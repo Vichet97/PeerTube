@@ -12,13 +12,13 @@
   --menu-width: #{$menu-width};
   --menu-border-radius: #{$menu-border-radius};
 
-  --fg: var(--mainForegroundColor, #000);
+  --fg: var(--mainForegroundColor, hsl(0, 0%, 95%));
 
-  --bg: var(--mainBackgroundColor, #fff);
-  --bg-secondary: var(--greyBackgroundColor, #E5E5E5);
+  --bg: var(--mainBackgroundColor, #0a0a0c);
+  --bg-secondary: var(--greyBackgroundColor, #121214);
 
-  --primary: var(--mainColor, hsl(24, 90%, 45%));
-  --on-primary: #{pvar(--fg)};
+  --primary: var(--mainColor, #00e5ff);
+  --on-primary: #000;
 
   --red: #{$red};
 
@@ -30,8 +30,8 @@
   --input-bg-in-modal: #{pvar(--input-bg-550)};
   --input-bg-in-secondary: #{pvar(--input-bg-600)};
 
-  --input-danger-fg: #9C221C;
-  --input-danger-bg: #FEBBB2;
+  --input-danger-fg: #FEBBB2;
+  --input-danger-bg: #9C221C;
 
   --input-placeholder-color: var(--inputPlaceholderColor, #{pvar(--fg-50)});
   --input-placeholder-font-size: 0.875rem;
@@ -45,7 +45,7 @@
   --input-y-padding: 5px;
   --input-x-padding: 20px;
 
-  --input-border-radius: 4px;
+  --input-border-radius: 8px;
 
   --textarea-y-padding: 12px;
   --textarea-x-padding: 15px;
@@ -75,10 +75,10 @@
   --pt-player-big-play-bg: rgba(0, 0, 0, 0.8);
 
   --menu-fg: #{pvar(--fg-400)};
-  --menu-bg: #{pvar(--bg-secondary-400)};
+  --menu-bg: #050506;
 
   --header-fg: #{pvar(--fg)};
-  --header-bg: #{pvar(--bg)};
+  --header-bg: #050506;
 
   --pt-player-overlay-secondary-fg: #{pvar(--fg-400)};
   --pt-player-overlay-secondary-bg: #{pvar(--bg-secondary-400)};
@@ -108,8 +108,7 @@
   // ---------------------------------------------------------------------------
 
   // Light theme
-  &[data-pt-theme="peertube-core-light-beige"],
-  &[data-pt-theme="default"] {
+  &[data-pt-theme="peertube-core-light-beige"] {
     --is-dark: 0;
 
     --primary: #FF8F37;
@@ -138,6 +137,46 @@
     --alert-primary-fg: #{pvar(--on-primary-200)};
     --alert-primary-bg: #{pvar(--primary-200)};
     --alert-primary-border-color: #{pvar(--primary-300)};
+  }
+
+  // Modern Black with Neo Blue (Default)
+  &[data-pt-theme="default"] {
+    --is-dark: 1;
+
+    --primary: #00e5ff;
+    --on-primary: #000;
+    --border-primary: #00bfff;
+
+    --fg: hsl(0, 0%, 95%);
+    --fg-200: hsl(0, 0%, 80%);
+
+    --bg: #0f0f11;
+    --bg-secondary: #1a1a1c;
+    --bg-secondary-500: #1a1a1c;
+    --bg-secondary-450: #222225;
+    --bg-secondary-400: #2a2a2e;
+    --bg-secondary-350: #333338;
+
+    --menu-bg-600: #050506;
+    --menu-bg-550: #0a0a0c;
+    --menu-bg: #0a0a0c;
+
+    --secondary-icon-color: hsl(0, 0%, 60%);
+    --input-placeholder-color: hsl(0, 0%, 50%);
+
+    --input-bg: #{pvar(--bg-secondary-450)};
+    --input-danger-fg: #FEBBB2;
+    --input-danger-bg: #9C221C;
+
+    --input-check-active-fg: #000;
+    --input-check-active-bg: #00e5ff;
+
+    --alert-primary-fg: #000;
+    --alert-primary-bg: #00e5ff;
+    --alert-primary-border-color: #00bfff;
+
+    --active-icon-color: #00e5ff;
+    --active-icon-bg: rgba(0, 229, 255, 0.1);
   }
 
   // Brown
