@@ -16,7 +16,7 @@ import bytes from 'bytes'
 import { type Config } from 'config'
 import { createRequire } from 'module'
 import { dirname, join } from 'path'
-import { parseBytes, parseDurationToMs } from '../helpers/core-utils.js'
+import { parseBytes, parseDurationToMs, resolveCommandSubstitution } from '../helpers/core-utils.js'
 
 const require = createRequire(import.meta.url)
 let config: Config = require('config')
@@ -885,7 +885,7 @@ const CONFIG = {
             return config.get<string>('import.videos.http.youtube_dl_release.name')
           },
           get PYTHON_PATH () {
-            return config.get<string>('import.videos.http.youtube_dl_release.python_path')
+            return resolveCommandSubstitution(config.get<string>('import.videos.http.youtube_dl_release.python_path'))
           }
         },
 

@@ -6,7 +6,7 @@
 */
 
 import { promisify1, promisify2, promisify3 } from '@peertube/peertube-core-utils'
-import { exec, ExecOptions } from 'child_process'
+import { exec, execSync, ExecOptions } from 'child_process'
 import { ED25519KeyPairOptions, generateKeyPair, randomBytes, RSAKeyPairOptions, scrypt } from 'crypto'
 import truncate from 'lodash-es/truncate.js'
 import { pipeline } from 'stream'
@@ -140,6 +140,20 @@ export function parseBytes (value: string | number): number {
   }
 
   return parseInt(value, 10)
+}
+
+/**
+ * Resolves shell-style command substitution.
+ * If value matches $(command), runs the command and returns its trimmed stdout.
+ * Otherwise returns the value as-is.
+ */
+export function resolveCommandSubstitution (value: string | null): string | null {
+  if (value === null || value === undefined) return value
+  const match = value.match(/^\$\((.+)\)$/)
+  if (match) {
+    return execSync(match[1], { encoding: 'utf8' }).trim()
+  }
+  return value
 }
 
 // ---------------------------------------------------------------------------
