@@ -67,7 +67,7 @@
       [isUploading]="isUploadingFile()"
       [uploadPercents]="getUploadPercents()" [error]="getUploadError()" [uploaded]="hasUploadedFile()"
       [enableRetryAfterError]="canRetryUpload" (retry)="retryUpload()"
-      [uploadedLabel]="uploadedLabel()"
+      [uploadedLabel]="getUploadedLabel()"
       >
     </my-upload-progress>
 

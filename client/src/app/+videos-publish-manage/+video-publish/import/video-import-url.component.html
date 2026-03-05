@@ -28,6 +28,28 @@
         <my-select-channel inputId="first-step-channel" [items]="userChannels()" [(ngModel)]="firstStepChannelId"></my-select-channel>
       </div>
 
+      <div class="form-group">
+        <label i18n for="customHeaders">Custom headers (JSON)</label>
+
+        <my-help>
+          <ng-container i18n>
+            Optional. Add custom HTTP headers for yt-dlp (e.g. for authentication or Referer).
+            Format: <code>{{ '{' }}"Header-Name": "value"{{ '}' }}</code>
+          </ng-container>
+        </my-help>
+
+        <textarea
+          id="customHeaders"
+          [(ngModel)]="customHeadersJson"
+          class="form-control"
+          rows="3"
+          [placeholder]="customHeadersPlaceholder"
+        ></textarea>
+        @if (customHeadersError) {
+          <div class="form-error">{{ customHeadersError }}</div>
+        }
+      </div>
+
       <input
         type="button" i18n-value value="Import" class="peertube-button primary-button"
         [disabled]="!isTargetUrlValid() || isImportingVideo" (click)="importVideo()"

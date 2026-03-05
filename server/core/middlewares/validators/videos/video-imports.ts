@@ -42,6 +42,28 @@ export const videoImportAddValidator = getCommonVideoEditAttributes().concat([
     .isArray()
     .withMessage('Video passwords should be an array.'),
 
+  body('customHeaders')
+    .optional()
+    .customSanitizer((value) => {
+      if (value === undefined || value === null) return undefined
+      if (typeof value === 'string') {
+        try {
+          return JSON.parse(value)
+        } catch {
+          return value
+        }
+      }
+      return value
+    })
+    .custom((value) => {
+      if (value === undefined || value === null) return true
+      if (typeof value !== 'object' || Array.isArray(value)) return false
+      return Object.entries(value).every(
+        ([ k, v ]) => typeof k === 'string' && typeof v === 'string' && k.length > 0 && v.length > 0
+      )
+    })
+    .withMessage('customHeaders must be a JSON object with string keys and values'),
+
   async (req: express.Request, res: express.Response, next: express.NextFunction) => {
     const torrentFile = req.files?.['torrentfile'] ? req.files['torrentfile'][0] : undefined
 

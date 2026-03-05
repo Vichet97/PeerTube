@@ -7,6 +7,7 @@ import { FormReactiveErrors, FormReactiveService } from '@app/shared/shared-form
 import { VideoCaptionService } from '@app/shared/shared-main/video-caption/video-caption.service'
 import { VideoChapterService } from '@app/shared/shared-main/video/video-chapter.service'
 import { VideoPasswordService } from '@app/shared/shared-main/video/video-password.service'
+import { VideoImportService } from '@app/shared/shared-main/video/video-import.service'
 import { VideoService } from '@app/shared/shared-main/video/video.service'
 import { LiveVideoService } from '@app/shared/shared-video-live/live-video.service'
 import { PlayerSettingsService } from '@app/shared/shared-video/player-settings.service'
@@ -20,12 +21,13 @@ import {
   UserVideoQuota,
   VideoPassword,
   VideoPrivacy,
+  VideoImportState,
   VideoPrivacyType,
   VideoState
 } from '@peertube/peertube-models'
 import debug from 'debug'
 import { UploadState, UploadxService } from 'ngx-uploadx'
-import { finalize, first, forkJoin, Observable, of, Subject, Subscription, switchMap, tap } from 'rxjs'
+import { finalize, first, forkJoin, interval, Observable, of, Subject, Subscription, switchMap, tap } from 'rxjs'
 import { SelectChannelItem } from '../../../types'
 import { VideoEdit } from './common/video-edit.model'
 import { VideoManageType } from './common/video-manage.type'
@@ -50,6 +52,7 @@ export class VideoManageController implements OnDestroy {
   private formReactiveService = inject(FormReactiveService)
   private videoStudio = inject(VideoStudioService)
   private peertubeRouter = inject(PeerTubeRouterService)
+  private videoImportService = inject(VideoImportService)
   private playerSettingsService = inject(PlayerSettingsService)
   private videoEmbedPrivacyService = inject(VideoEmbedPrivacyService)
 
@@ -74,6 +77,8 @@ export class VideoManageController implements OnDestroy {
   private embedVersion = 1
 
   private uploadServiceSubscription: Subscription
+  private importProgressPollingSubscription: Subscription
+  private importProgress: number | null = null
   private pendingUpdateObs: Observable<any>
   private updatedSubject = new Subject<void>()
 
@@ -94,6 +99,7 @@ export class VideoManageController implements OnDestroy {
 
     this.resumableUploadService.disconnect()
     this.uploadServiceSubscription?.unsubscribe()
+    this.stopImportProgressPolling()
   }
 
   reset () {
@@ -147,10 +153,13 @@ export class VideoManageController implements OnDestroy {
     this.userChannels = store.userChannels
     this.userQuota = store.userQuota
     this.privacies = store.privacies
+
+    this.updateImportProgressPolling()
   }
 
   setVideoEdit (videoEdit: VideoEdit) {
     this.videoEdit = videoEdit
+    this.updateImportProgressPolling()
   }
 
   getStore () {
@@ -493,7 +502,52 @@ export class VideoManageController implements OnDestroy {
   }
 
   getUploadPercents () {
+    if (this.isImportingFromUrl()) {
+      return this.importProgress ?? 0
+    }
     return this.videoUploadPercents
+  }
+
+  isImportingFromUrl () {
+    return this.videoEdit?.getVideoAttributes()?.state === VideoState.TO_IMPORT
+  }
+
+  private updateImportProgressPolling () {
+    if (this.isImportingFromUrl()) {
+      this.startImportProgressPolling()
+    } else {
+      this.stopImportProgressPolling()
+    }
+  }
+
+  private startImportProgressPolling () {
+    this.stopImportProgressPolling()
+    this.importProgress = 0
+    const videoId = this.videoEdit.getVideoAttributes().id
+    this.importProgressPollingSubscription = interval(2000).pipe(
+      switchMap(() => this.videoImportService.getVideoImportByVideoId(videoId))
+    ).subscribe({
+      next: videoImport => {
+        if (!videoImport) return
+        if (videoImport.progress != null) {
+          this.importProgress = videoImport.progress
+        }
+        const stateId = videoImport.state?.id
+        if (stateId === VideoImportState.SUCCESS || stateId === VideoImportState.FAILED ||
+            stateId === VideoImportState.CANCELLED || stateId === VideoImportState.REJECTED) {
+          this.stopImportProgressPolling()
+          if (stateId === VideoImportState.SUCCESS) {
+            this.importProgress = 100
+          }
+        }
+      },
+      error: () => this.stopImportProgressPolling()
+    })
+  }
+
+  private stopImportProgressPolling () {
+    this.importProgressPollingSubscription?.unsubscribe()
+    this.importProgressPollingSubscription = null
   }
 
   getUploadError () {
@@ -501,11 +555,18 @@ export class VideoManageController implements OnDestroy {
   }
 
   isUploadingFile () {
-    return this.uploadingVideo
+    return this.uploadingVideo || this.isImportingFromUrl()
   }
 
   hasUploadedFile () {
-    return this.videoUploaded
+    return this.videoUploaded || (this.isImportingFromUrl() && this.importProgress === 100)
+  }
+
+  getUploadedLabel () {
+    if (this.isImportingFromUrl() && this.importProgress === 100) {
+      return $localize`Processing…`
+    }
+    return undefined
   }
 
   // ---------------------------------------------------------------------------

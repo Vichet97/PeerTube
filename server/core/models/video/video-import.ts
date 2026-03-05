@@ -104,6 +104,10 @@ export class VideoImportModel extends SequelizeModel<VideoImportModel> {
   declare attempts: number
 
   @AllowNull(true)
+  @Column
+  declare progress: number
+
+  @AllowNull(true)
   @Column(DataType.JSONB)
   declare payload: VideoImportPayload
 
@@ -264,6 +268,7 @@ export class VideoImportModel extends SequelizeModel<VideoImportModel> {
       torrentName: this.torrentName,
 
       attempts: this.attempts,
+      progress: this.progress,
 
       state: {
         id: this.state,

@@ -158,6 +158,10 @@ export class VideoManageContainerComponent implements OnInit, OnDestroy {
     return this.manageController.hasUploadedFile()
   }
 
+  getUploadedLabel () {
+    return this.manageController.getUploadedLabel?.() ?? this.uploadedLabel?.()
+  }
+
   getWatchUrl () {
     return Video.buildWatchUrl(this.videoEdit.getVideoAttributes())
   }

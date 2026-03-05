@@ -142,16 +142,18 @@ export class JobsComponent implements OnInit {
   }
 
   hasGlobalProgress () {
-    return this.jobType === 'all' || this.jobType === 'video-transcoding'
+    return this.jobType === 'all' || this.jobType === 'video-transcoding' || this.jobType === 'video-import'
   }
 
   hasProgress (job: Job) {
-    return job.type === 'video-transcoding'
+    return job.type === 'video-transcoding' || job.type === 'video-import'
   }
 
   getProgress (job: Job) {
-    if (job.state === 'active') return job.progress + '%'
-
+    if (job.state === 'active') {
+      const p = job.progress
+      return (p != null ? p : 0) + '%'
+    }
     return ''
   }
 

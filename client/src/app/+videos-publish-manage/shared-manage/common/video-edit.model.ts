@@ -86,7 +86,7 @@ type LoadFromPublishOptions = Required<Pick<VideoCreate, 'channelId' | 'support'
 
 type CreateFromUploadOptions = LoadFromPublishOptions & Required<Pick<VideoCreate, 'name'>>
 
-type CreateFromImportOptions = LoadFromPublishOptions & Pick<VideoImportCreate, 'magnetUri' | 'torrentfile' | 'targetUrl'>
+type CreateFromImportOptions = LoadFromPublishOptions & Pick<VideoImportCreate, 'magnetUri' | 'torrentfile' | 'targetUrl' | 'customHeaders'>
 
 type CreateFromLiveOptions =
   & CreateFromUploadOptions
@@ -164,7 +164,7 @@ export class VideoEdit {
   private playerSettings: PlayerVideoSettingsUpdate
   private embedPrivacy: VideoEmbedPrivacyUpdate
 
-  private videoImport: Pick<VideoImportCreate, 'magnetUri' | 'torrentfile' | 'targetUrl'>
+  private videoImport: Pick<VideoImportCreate, 'magnetUri' | 'torrentfile' | 'targetUrl' | 'customHeaders'>
 
   private metadata: Partial<{
     id: number
@@ -253,7 +253,8 @@ export class VideoEdit {
     this.videoImport = {
       targetUrl: options.targetUrl,
       magnetUri: options.magnetUri,
-      torrentfile: options.torrentfile
+      torrentfile: options.torrentfile,
+      customHeaders: options.customHeaders
     }
 
     this.updateAfterChange()
@@ -775,6 +776,9 @@ export class VideoEdit {
     if (this.videoImport.targetUrl) base.targetUrl = this.videoImport.targetUrl
     if (this.videoImport.magnetUri) base.magnetUri = this.videoImport.magnetUri
     if (this.videoImport.torrentfile) base.torrentfile = this.videoImport.torrentfile
+    if (this.videoImport.customHeaders && Object.keys(this.videoImport.customHeaders).length > 0) {
+      base.customHeaders = this.videoImport.customHeaders
+    }
 
     return base
   }

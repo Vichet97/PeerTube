@@ -9444,6 +9444,12 @@ components:
             - properties:
                 targetUrl:
                   $ref: '#/components/schemas/VideoImport/properties/targetUrl'
+                customHeaders:
+                  type: object
+                  additionalProperties:
+                    type: string
+                  description: Custom HTTP headers for yt-dlp (e.g. for authentication or Referer). Only used with targetUrl.
+                  example: {"Authorization": "Bearer xxx", "Referer": "https://example.com"}
               required: [targetUrl]
             - properties:
                 magnetUri:

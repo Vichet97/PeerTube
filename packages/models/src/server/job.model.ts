@@ -109,6 +109,7 @@ export interface VideoImportYoutubeDLPayload extends VideoImportAbstractPayload 
   type: VideoImportYoutubeDLPayloadType
 
   fileExt?: string
+  customHeaders?: Record<string, string>
 }
 
 export interface VideoImportTorrentPayload extends VideoImportAbstractPayload {

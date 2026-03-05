@@ -13,7 +13,7 @@ import { isVideoFileExtnameValid } from '@server/helpers/custom-validators/video
 import { isResolvingToUnicastOnly } from '@server/helpers/dns.js'
 import { guessLanguageFromReq, t } from '@server/helpers/i18n.js'
 import { logger } from '@server/helpers/logger.js'
-import { YoutubeDlImportError, YoutubeDlImportErrorCode, YoutubeDLInfo, YoutubeDLWrapper } from '@server/helpers/youtube-dl/index.js'
+import { customHeadersToYoutubeDLArgs, YoutubeDlImportError, YoutubeDlImportErrorCode, YoutubeDLInfo, YoutubeDLWrapper } from '@server/helpers/youtube-dl/index.js'
 import { CONFIG } from '@server/initializers/config.js'
 import { sequelizeTypescript } from '@server/initializers/database.js'
 import { Hooks } from '@server/lib/plugins/hooks.js'
@@ -186,8 +186,11 @@ export async function buildYoutubeDLImport (options: {
     CONFIG.TRANSCODING.ALWAYS_TRANSCODE_ORIGINAL_RESOLUTION
   )
 
+  const customHeaders = importDataOverride?.customHeaders
+  const youtubeDLArgs = customHeadersToYoutubeDLArgs(customHeaders)
+
   // Get video infos
-  const youtubeDLInfo = await youtubeDL.getInfoForDownload({ userLanguage })
+  const youtubeDLInfo = await youtubeDL.getInfoForDownload({ userLanguage, youtubeDLArgs })
 
   if (skipPublishedBeforeOrEq) {
     const onlyAfterWithoutTime = new Date(skipPublishedBeforeOrEq)
@@ -273,6 +276,7 @@ export async function buildYoutubeDLImport (options: {
     videoImportId: videoImport.id,
     fileExt,
     generateTranscription: importDataOverride.generateTranscription ?? true,
+    customHeaders: importDataOverride?.customHeaders,
     // If part of a sync process, there is a parent job that will aggregate children results
     preventException: !!channelSync
   }

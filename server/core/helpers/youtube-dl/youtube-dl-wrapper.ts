@@ -187,7 +187,7 @@ export class YoutubeDLWrapper {
     return subtitles
   }
 
-  async downloadVideo (fileExt: string, timeout: number): Promise<string> {
+  async downloadVideo (fileExt: string, timeout: number, onProgress?: (percent: number) => void, youtubeDLArgs?: string[]): Promise<string> {
     // Leave empty the extension, youtube-dl will add it
     const pathWithoutExtension = generateVideoImportTmpPath(this.url, '')
 
@@ -201,7 +201,9 @@ export class YoutubeDLWrapper {
         format: YoutubeDLCLI.getYoutubeDLVideoFormat(this.enabledResolutions, this.useBestFormat),
         output: pathWithoutExtension,
         timeout,
-        processOptions
+        processOptions,
+        onProgress,
+        additionalYoutubeDLArgs: youtubeDLArgs
       })
 
       // If youtube-dl did not guess an extension for our file, just use .mp4 as default

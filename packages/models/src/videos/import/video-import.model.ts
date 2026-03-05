@@ -10,6 +10,7 @@ export interface VideoImport {
   torrentName: string
 
   attempts: number
+  progress?: number
 
   createdAt: string
   updatedAt: string

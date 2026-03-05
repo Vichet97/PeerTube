@@ -26,6 +26,17 @@ export class VideoImportService {
       .pipe(catchError(res => this.restExtractor.handleError(res)))
   }
 
+  getVideoImportByVideoId (videoId: number): Observable<VideoImport | null> {
+    return this.listMyVideoImports({
+      pagination: { start: 0, count: 1 },
+      sort: { field: 'createdAt', order: -1 },
+      includeCollaborations: true,
+      search: `videoId:${videoId}`
+    }).pipe(
+      map(res => res.data.length > 0 ? res.data[0] : null)
+    )
+  }
+
   listMyVideoImports (options: {
     pagination: RestPagination
     sort: SortMeta

@@ -11,7 +11,7 @@ import {
   VideoState
 } from '@peertube/peertube-models'
 import { retryTransactionWrapper } from '@server/helpers/database-utils.js'
-import { YoutubeDLWrapper } from '@server/helpers/youtube-dl/index.js'
+import { customHeadersToYoutubeDLArgs, YoutubeDLWrapper } from '@server/helpers/youtube-dl/index.js'
 import { CONFIG } from '@server/initializers/config.js'
 import { AutomaticTagger } from '@server/lib/automatic-tags/automatic-tagger.js'
 import { setAndSaveVideoAutomaticTags } from '@server/lib/automatic-tags/automatic-tags.js'
@@ -64,6 +64,7 @@ async function processVideoImport (job: Job): Promise<VideoImportPreventExceptio
 
   videoImport.attempts += 1
   videoImport.state = VideoImportState.PROCESSING
+  videoImport.progress = 0
   await videoImport.save()
 
   try {
@@ -114,8 +115,16 @@ async function processYoutubeDLImport (job: Job, videoImport: MVideoImportDefaul
     CONFIG.TRANSCODING.ALWAYS_TRANSCODE_ORIGINAL_RESOLUTION
   )
 
+  const onProgress = async (percent: number) => {
+    job.updateProgress(percent).catch(err => logger.error('Cannot update video import job progress', { err }))
+    videoImport.progress = percent
+    await videoImport.save()
+  }
+
+  const youtubeDLArgs = customHeadersToYoutubeDLArgs(payload.customHeaders)
+
   return processFile(
-    () => youtubeDL.downloadVideo(payload.fileExt, JOB_TTL['video-import']),
+    () => youtubeDL.downloadVideo(payload.fileExt, JOB_TTL['video-import'], onProgress, youtubeDLArgs),
     videoImport,
     options
   )
@@ -241,6 +250,7 @@ async function processFile (downloader: () => Promise<string>, videoImport: MVid
 
           // Update video import object
           videoImportWithFiles.state = VideoImportState.SUCCESS
+          videoImportWithFiles.progress = 100
           const videoImportUpdated = await videoImportWithFiles.save({ transaction: t }) as MVideoImport
 
           logger.info('Video %s imported.', video.uuid)
@@ -341,6 +351,7 @@ async function onImportError (err: Error, tempVideoPath: string, videoImport: MV
 
   await sequelizeTypescript.transaction(async t => {
     videoImport.error = err.message
+    videoImport.progress = null
 
     if (videoImport.state !== VideoImportState.REJECTED) {
       videoImport.state = VideoImportState.FAILED

@@ -8,5 +8,8 @@ export interface VideoImportCreate extends VideoCreateUpdateCommon {
   // Default is true if the feature is enabled by the instance admin
   generateTranscription?: boolean
 
+  // Custom HTTP headers for yt-dlp (e.g. {"Authorization": "Bearer xxx", "Cookie": "session=abc"})
+  customHeaders?: Record<string, string>
+
   channelId: number // Required
 }

@@ -14,6 +14,15 @@ type ProcessOptions = Pick<ExecaNodeOptions, 'cwd' | 'maxBuffer'>
 
 const lTags = loggerTagsFactory('youtube-dl')
 
+export function customHeadersToYoutubeDLArgs (customHeaders: Record<string, string> | undefined): string[] {
+  if (!customHeaders || typeof customHeaders !== 'object') return []
+
+  return Object.entries(customHeaders).flatMap(([ key, value ]) => {
+    if (typeof key !== 'string' || typeof value !== 'string') return []
+    return [ '--add-header', `${key}: ${value}` ]
+  })
+}
+
 const youtubeDLBinaryPath = join(CONFIG.STORAGE.BIN_DIR, CONFIG.IMPORT.VIDEOS.HTTP.YOUTUBE_DL_RELEASE.NAME)
 
 export class YoutubeDLCLI {
@@ -119,9 +128,21 @@ export class YoutubeDLCLI {
     processOptions: ProcessOptions
     timeout?: number
     additionalYoutubeDLArgs?: string[]
+    onProgress?: (percent: number) => void
   }) {
     let args = options.additionalYoutubeDLArgs || []
     args = args.concat([ '--merge-output-format', 'mp4', '-f', options.format, '-o', options.output ])
+
+    if (options.onProgress && CONFIG.IMPORT.VIDEOS.HTTP.YOUTUBE_DL_RELEASE.NAME === 'yt-dlp') {
+      args = [ '--newline' ].concat(args)
+      return this.runWithProgress({
+        url: options.url,
+        processOptions: options.processOptions,
+        timeout: options.timeout,
+        args,
+        onProgress: options.onProgress
+      })
+    }
 
     return this.run({
       url: options.url,
@@ -231,6 +252,59 @@ export class YoutubeDLCLI {
     const output = await subProcess
 
     logger.debug('Run youtube-dl command.', { command: output.command, ...lTags() })
+
+    return output.stdout
+      ? output.stdout.trim().split(/\r?\n/)
+      : undefined
+  }
+
+  private async runWithProgress (options: {
+    url: string
+    args: string[]
+    timeout?: number
+    processOptions: ProcessOptions
+    onProgress: (percent: number) => void
+  }) {
+    const { url, args, timeout, processOptions, onProgress } = options
+
+    let completeArgs = this.wrapWithJSRuntimeOptions(args)
+    completeArgs = this.wrapWithProxyOptions(completeArgs)
+    completeArgs = this.wrapWithIPOptions(completeArgs)
+    completeArgs = this.wrapWithFFmpegOptions(completeArgs)
+
+    const subProcessBinary = CONFIG.IMPORT.VIDEOS.HTTP.YOUTUBE_DL_RELEASE.PYTHON_PATH || youtubeDLBinaryPath
+    const subProcessArgs = [ ...completeArgs, url ]
+    if (subProcessBinary !== youtubeDLBinaryPath) subProcessArgs.unshift(youtubeDLBinaryPath)
+
+    const subProcess = execa(subProcessBinary, subProcessArgs, processOptions)
+
+    if (timeout) {
+      setTimeout(() => subProcess.kill(), timeout)
+    }
+
+    const progressRegex = /\[download\]\s+(\d+(?:\.\d+)?)%/
+    let lastReportedPercent = -1
+
+    const stderrStream = subProcess.stderr ?? subProcess.stdio?.[2]
+    if (stderrStream && typeof stderrStream.on === 'function') {
+      stderrStream.on('data', (chunk: Buffer) => {
+        const lines = chunk.toString().split(/\r?\n/)
+        for (const line of lines) {
+          const match = line.match(progressRegex)
+          if (match) {
+            const percent = Math.min(100, Math.floor(parseFloat(match[1])))
+            if (percent > lastReportedPercent && percent <= 100) {
+              lastReportedPercent = percent
+              onProgress(percent)
+            }
+          }
+        }
+      })
+    }
+
+    const output = await subProcess
+
+    logger.debug('Run youtube-dl command with progress.', { command: output.command, ...lTags() })
 
     return output.stdout
       ? output.stdout.trim().split(/\r?\n/)

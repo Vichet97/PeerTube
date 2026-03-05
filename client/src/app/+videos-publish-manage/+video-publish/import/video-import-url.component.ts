@@ -62,11 +62,14 @@ export class VideoImportUrlComponent implements OnInit, AfterViewInit, CanCompon
   readonly firstStepError = output()
 
   targetUrl = ''
+  customHeadersJson = ''
+  customHeadersPlaceholder = '{"Authorization": "Bearer xxx", "Referer": "https://example.com"}'
 
   firstStep = true
   firstStepChannelId: number
 
   isImportingVideo = false
+  customHeadersError = ''
 
   ngOnInit () {
     this.firstStepChannelId = this.userChannels()[0].id
@@ -107,6 +110,26 @@ export class VideoImportUrlComponent implements OnInit, AfterViewInit, CanCompon
 
   importVideo () {
     if (this.isImportingVideo) return
+
+    let customHeaders: Record<string, string> | undefined
+    if (this.customHeadersJson.trim()) {
+      try {
+        const parsed = JSON.parse(this.customHeadersJson.trim())
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          customHeaders = {}
+          for (const [ k, v ] of Object.entries(parsed)) {
+            if (typeof k === 'string' && typeof v === 'string') {
+              customHeaders[k] = v
+            }
+          }
+        }
+      } catch {
+        this.customHeadersError = $localize`Invalid JSON format`
+        return
+      }
+    }
+    this.customHeadersError = ''
+
     this.isImportingVideo = true
 
     const serverConfig = this.serverService.getHTMLConfig()
@@ -115,7 +138,8 @@ export class VideoImportUrlComponent implements OnInit, AfterViewInit, CanCompon
       targetUrl: this.targetUrl,
       channelId: this.firstStepChannelId,
       support: this.userChannels().find(c => c.id === this.firstStepChannelId).support ?? '',
-      user: this.authService.getUser()
+      user: this.authService.getUser(),
+      customHeaders
     })
     this.manageController.setConfig({ manageType: 'import-url', serverConfig: this.serverService.getHTMLConfig() })
     this.manageController.setVideoEdit(videoEdit)
@@ -150,6 +174,7 @@ export class VideoImportUrlComponent implements OnInit, AfterViewInit, CanCompon
 
           debugLogger(`URL import created`)
 
+          this.manageController.setVideoEdit(videoEdit)
           this.manageController.silentRedirectOnManage(videoEdit.getVideoAttributes().shortUUID, this.route)
 
           this.firstStep = false
