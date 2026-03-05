@@ -517,6 +517,22 @@ class JobQueue {
     return Promise.all(promises)
   }
 
+  async getTranscodingProgressForVideo (videoUUID: string): Promise<number | null> {
+    const queue = this.queues['video-transcoding']
+    if (!queue) return null
+
+    const jobs = await queue.getJobs([ 'active' ], 0, 100, true)
+    const matchingJobs = jobs.filter((j: Job) => (j.data as { videoUUID?: string }).videoUUID === videoUUID)
+    if (matchingJobs.length === 0) return null
+
+    const progresses = matchingJobs
+      .map((j: Job) => j.progress)
+      .filter((p: unknown): p is number => typeof p === 'number')
+
+    if (progresses.length === 0) return 0
+    return Math.round(progresses.reduce((a, b) => a + b, 0) / progresses.length)
+  }
+
   // ---------------------------------------------------------------------------
 
   private addRepeatableJobs () {

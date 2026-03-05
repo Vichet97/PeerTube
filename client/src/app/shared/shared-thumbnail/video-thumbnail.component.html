@@ -48,6 +48,12 @@
     <div class="duration-overlay" [ariaLabel]="getDurationOverlayLabel()">{{ getDurationLabel() }}</div>
   }
 
+  @if (showProcessingOverlay()) {
+    <div class="processing-overlay" [attr.aria-label]="'Processing: ' + (processingProgress() ?? 0) + '%'">
+      {{ processingProgress() ?? 0 }}%
+    </div>
+  }
+
   @if (playOverlay()) {
     <div class="play-overlay">
       <div class="icon"></div>

@@ -3257,6 +3257,41 @@ paths:
                 example: |
                   **[Want to help to translate this video?](https://weblate.framasoft.org/projects/what-is-peertube-video/)**\r\n\r\n**Take back the control of your videos! [#JoinPeertube](https://joinpeertube.org)**
 
+  '/api/v1/videos/{id}/processing-progress':
+    get:
+      summary: Get video processing progress
+      description: Returns processing progress (0-100) when the video is being transcoded or imported. Returns 404 when the video is ready to play or not local.
+      operationId: getVideoProcessingProgress
+      tags:
+        - Video
+      parameters:
+        - $ref: '#/components/parameters/idOrUUID'
+        - $ref: '#/components/parameters/videoPasswordHeader'
+      responses:
+        '200':
+          description: successful operation
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - progress
+                  - type
+                properties:
+                  progress:
+                    type: integer
+                    minimum: 0
+                    maximum: 100
+                    description: Processing progress percentage
+                  type:
+                    type: string
+                    enum:
+                      - transcoding
+                      - import
+                    description: Type of processing
+        '404':
+          description: Video not found or not being processed
+
   '/api/v1/videos/{id}/views':
     post:
       summary: Notify user is watching a video

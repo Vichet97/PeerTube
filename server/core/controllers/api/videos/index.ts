@@ -1,4 +1,4 @@
-import { HttpStatusCode, VideoChannelActivityAction } from '@peertube/peertube-models'
+import { HttpStatusCode, VideoChannelActivityAction, VideoState } from '@peertube/peertube-models'
 import { pickCommonVideoQuery } from '@server/helpers/query.js'
 import { openapiOperationDoc } from '@server/middlewares/doc.js'
 import { getServerActor } from '@server/models/application/application.js'
@@ -28,6 +28,7 @@ import {
   videosSortValidator
 } from '../../../middlewares/index.js'
 import { guessAdditionalAttributesFromQuery } from '../../../models/video/formatter/index.js'
+import { VideoImportModel } from '../../../models/video/video-import.js'
 import { VideoModel } from '../../../models/video/video.js'
 import { blacklistRouter } from './blacklist.js'
 import { videoCaptionsRouter } from './captions.js'
@@ -94,6 +95,15 @@ videosRouter.get(
 )
 
 videosRouter.get(
+  '/:id/processing-progress',
+  openapiOperationDoc({ operationId: 'getVideoProcessingProgress' }),
+  optionalAuthenticate,
+  asyncMiddleware(videosCustomGetValidator('for-api')),
+  asyncMiddleware(checkVideoFollowConstraints),
+  asyncMiddleware(getVideoProcessingProgress)
+)
+
+videosRouter.get(
   '/:id',
   openapiOperationDoc({ operationId: 'getVideo' }),
   optionalAuthenticate,
@@ -132,6 +142,37 @@ function listVideoLanguages (_req: express.Request, res: express.Response) {
 
 function listVideoPrivacies (_req: express.Request, res: express.Response) {
   res.json(VIDEO_PRIVACIES)
+}
+
+async function getVideoProcessingProgress (req: express.Request, res: express.Response) {
+  const video = res.locals.videoAPI
+
+  if (!video.isLocal()) {
+    return res.sendStatus(HttpStatusCode.NOT_FOUND_404)
+  }
+
+  const state = video.state
+
+  if (state === VideoState.TO_IMPORT) {
+    const videoImport = await VideoImportModel.loadByVideoId(video.id)
+    if (!videoImport) {
+      return res.json({ progress: 0, type: 'import' })
+    }
+    return res.json({
+      progress: videoImport.progress ?? 0,
+      type: 'import'
+    })
+  }
+
+  if (state === VideoState.TO_TRANSCODE) {
+    const progress = await JobQueue.Instance.getTranscodingProgressForVideo(video.uuid)
+    return res.json({
+      progress: progress ?? 0,
+      type: 'transcoding'
+    })
+  }
+
+  return res.sendStatus(HttpStatusCode.NOT_FOUND_404)
 }
 
 async function getVideo (req: express.Request, res: express.Response) {

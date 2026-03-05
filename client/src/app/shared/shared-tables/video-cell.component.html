@@ -4,6 +4,7 @@
     <my-video-thumbnail
       blur="false"
       [video]="video()" [videoRouterLink]="getVideoUrl()" [ariaLabel]="video().name" playOverlay="false"
+      [processingProgress]="processingProgress()"
     ></my-video-thumbnail>
   }
 

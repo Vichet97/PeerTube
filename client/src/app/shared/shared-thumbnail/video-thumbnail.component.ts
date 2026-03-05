@@ -54,6 +54,9 @@ export class VideoThumbnailComponent implements OnChanges {
 
   readonly widthPx = input(undefined, { transform: numberAttribute })
 
+  /** Progress 0-100 when video is importing or transcoding; null when ready */
+  readonly processingProgress = input<number | null>(null)
+
   addToWatchLaterText: string
   removeFromWatchLaterText: string
 
@@ -157,5 +160,10 @@ export class VideoThumbnailComponent implements OnChanges {
 
   getDurationLabel () {
     return this.durationLabel
+  }
+
+  showProcessingOverlay () {
+    const progress = this.processingProgress()
+    return progress != null && progress < 100
   }
 }

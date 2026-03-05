@@ -30,6 +30,16 @@
     }
 
     {{ getAlertWarning().watchMain }}
+
+    @if (shouldShowProcessingProgress()) {
+      <div class="mt-2">
+        <my-progress-bar
+          i18n-label label="Processing" theme="green"
+          [value]="processingProgress() ?? 0" [valueFormatted]="(processingProgress() ?? 0) + '%'"
+        >
+        </my-progress-bar>
+      </div>
+    }
   </my-alert>
 }
 

@@ -78,7 +78,9 @@ export class VideoManageController implements OnDestroy {
 
   private uploadServiceSubscription: Subscription
   private importProgressPollingSubscription: Subscription
+  private transcodingProgressPollingSubscription: Subscription
   private importProgress: number | null = null
+  private transcodingProgress: number | null = null
   private pendingUpdateObs: Observable<any>
   private updatedSubject = new Subject<void>()
 
@@ -100,6 +102,7 @@ export class VideoManageController implements OnDestroy {
     this.resumableUploadService.disconnect()
     this.uploadServiceSubscription?.unsubscribe()
     this.stopImportProgressPolling()
+    this.stopTranscodingProgressPolling()
   }
 
   reset () {
@@ -155,11 +158,13 @@ export class VideoManageController implements OnDestroy {
     this.privacies = store.privacies
 
     this.updateImportProgressPolling()
+    this.updateTranscodingProgressPolling()
   }
 
   setVideoEdit (videoEdit: VideoEdit) {
     this.videoEdit = videoEdit
     this.updateImportProgressPolling()
+    this.updateTranscodingProgressPolling()
   }
 
   getStore () {
@@ -505,11 +510,18 @@ export class VideoManageController implements OnDestroy {
     if (this.isImportingFromUrl()) {
       return this.importProgress ?? 0
     }
+    if (this.isTranscoding()) {
+      return this.transcodingProgress ?? 0
+    }
     return this.videoUploadPercents
   }
 
   isImportingFromUrl () {
     return this.videoEdit?.getVideoAttributes()?.state === VideoState.TO_IMPORT
+  }
+
+  isTranscoding () {
+    return this.videoEdit?.getVideoAttributes()?.state === VideoState.TO_TRANSCODE
   }
 
   private updateImportProgressPolling () {
@@ -518,6 +530,37 @@ export class VideoManageController implements OnDestroy {
     } else {
       this.stopImportProgressPolling()
     }
+  }
+
+  private updateTranscodingProgressPolling () {
+    if (this.isTranscoding()) {
+      this.startTranscodingProgressPolling()
+    } else {
+      this.stopTranscodingProgressPolling()
+    }
+  }
+
+  private startTranscodingProgressPolling () {
+    this.stopTranscodingProgressPolling()
+    this.transcodingProgress = 0
+    const videoAttrs = this.videoEdit.getVideoAttributes()
+    this.transcodingProgressPollingSubscription = interval(2000).pipe(
+      switchMap(() => this.videoService.getProcessingProgress({ videoId: videoAttrs.uuid }))
+    ).subscribe({
+      next: result => {
+        if (result) {
+          this.transcodingProgress = result.progress
+        } else {
+          this.stopTranscodingProgressPolling()
+        }
+      },
+      error: () => this.stopTranscodingProgressPolling()
+    })
+  }
+
+  private stopTranscodingProgressPolling () {
+    this.transcodingProgressPollingSubscription?.unsubscribe()
+    this.transcodingProgressPollingSubscription = null
   }
 
   private startImportProgressPolling () {
@@ -555,15 +598,20 @@ export class VideoManageController implements OnDestroy {
   }
 
   isUploadingFile () {
-    return this.uploadingVideo || this.isImportingFromUrl()
+    return this.uploadingVideo || this.isImportingFromUrl() || this.isTranscoding()
   }
 
   hasUploadedFile () {
-    return this.videoUploaded || (this.isImportingFromUrl() && this.importProgress === 100)
+    return this.videoUploaded ||
+      (this.isImportingFromUrl() && this.importProgress === 100) ||
+      (this.isTranscoding() && this.transcodingProgress === 100)
   }
 
   getUploadedLabel () {
     if (this.isImportingFromUrl() && this.importProgress === 100) {
+      return $localize`Processing…`
+    }
+    if (this.isTranscoding() && this.transcodingProgress === 100) {
       return $localize`Processing…`
     }
     return undefined

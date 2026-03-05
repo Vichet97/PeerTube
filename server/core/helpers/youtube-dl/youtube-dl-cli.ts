@@ -285,21 +285,28 @@ export class YoutubeDLCLI {
     const progressRegex = /\[download\]\s+(\d+(?:\.\d+)?)%/
     let lastReportedPercent = -1
 
-    const stderrStream = subProcess.stderr ?? subProcess.stdio?.[2]
-    if (stderrStream && typeof stderrStream.on === 'function') {
-      stderrStream.on('data', (chunk: Buffer) => {
-        const lines = chunk.toString().split(/\r?\n/)
-        for (const line of lines) {
-          const match = line.match(progressRegex)
-          if (match) {
-            const percent = Math.min(100, Math.floor(parseFloat(match[1])))
-            if (percent > lastReportedPercent && percent <= 100) {
-              lastReportedPercent = percent
-              onProgress(percent)
-            }
+    const parseProgressChunk = (chunk: Buffer) => {
+      const lines = chunk.toString().split(/\r?\n/)
+      for (const line of lines) {
+        const match = line.match(progressRegex)
+        if (match) {
+          const percent = Math.min(100, Math.floor(parseFloat(match[1])))
+          if (percent > lastReportedPercent && percent <= 100) {
+            lastReportedPercent = percent
+            onProgress(percent)
           }
         }
-      })
+      }
+    }
+
+    // yt-dlp outputs progress to stdout by default; some versions/configs use stderr
+    const stdoutStream = subProcess.stdout ?? subProcess.stdio?.[1]
+    const stderrStream = subProcess.stderr ?? subProcess.stdio?.[2]
+    if (stdoutStream && typeof stdoutStream.on === 'function') {
+      stdoutStream.on('data', parseProgressChunk)
+    }
+    if (stderrStream && typeof stderrStream.on === 'function') {
+      stderrStream.on('data', parseProgressChunk)
     }
 
     const output = await subProcess

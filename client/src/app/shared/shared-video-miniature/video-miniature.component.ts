@@ -3,17 +3,21 @@ import {
   ChangeDetectionStrategy,
   ChangeDetectorRef,
   Component,
+  effect,
   OnInit,
+  OnDestroy,
   booleanAttribute,
   inject,
   input,
   numberAttribute,
-  output
+  output,
+  signal
 } from '@angular/core'
 import { AuthService, ScreenService, ServerService, User } from '@app/core'
 import { NgbTooltipModule } from '@ng-bootstrap/ng-bootstrap'
-import { HTMLServerConfig, VideoPlaylistType, VideoPrivacy } from '@peertube/peertube-models'
+import { HTMLServerConfig, VideoPlaylistType, VideoPrivacy, VideoState } from '@peertube/peertube-models'
 import { first, switchMap } from 'rxjs/operators'
+import { interval, Subscription } from 'rxjs'
 import { LinkType } from '../../../types/link.type'
 import { ActorAvatarComponent } from '../shared-actor-image/actor-avatar.component'
 import { ActorHostComponent } from '../shared-actor/actor-host.component'
@@ -56,7 +60,7 @@ export type MiniatureDisplayOptions = {
     NgTemplateOutlet
   ]
 })
-export class VideoMiniatureComponent implements OnInit {
+export class VideoMiniatureComponent implements OnInit, OnDestroy {
   private screenService = inject(ScreenService)
   private serverService = inject(ServerService)
   private authService = inject(AuthService)
@@ -127,6 +131,50 @@ export class VideoMiniatureComponent implements OnInit {
   private ownerDisplayType: 'account' | 'videoChannel'
   private actionsLoaded = false
 
+  readonly processingProgress = signal<number | null>(null)
+  private processingProgressSubscription: Subscription
+
+  constructor () {
+    effect(() => {
+      const video = this.video()
+      const shouldPoll = video?.isLocal && video?.state && (
+        video.state.id === VideoState.TO_TRANSCODE ||
+        video.state.id === VideoState.TO_IMPORT
+      )
+
+      this.stopProcessingProgressPolling()
+
+      if (shouldPoll) {
+        this.processingProgress.set(0)
+        this.startProcessingProgressPolling()
+      } else {
+        this.processingProgress.set(null)
+      }
+    })
+  }
+
+  private startProcessingProgressPolling () {
+    const video = this.video()
+    if (!video) return
+
+    this.processingProgressSubscription = interval(2000).pipe(
+      switchMap(() => this.videoService.getProcessingProgress({ videoId: video.uuid }))
+    ).subscribe({
+      next: result => {
+        if (result) {
+          this.processingProgress.set(result.progress)
+          this.cd.markForCheck()
+        }
+      },
+      error: () => this.stopProcessingProgressPolling()
+    })
+  }
+
+  private stopProcessingProgressPolling () {
+    this.processingProgressSubscription?.unsubscribe()
+    this.processingProgressSubscription = null
+  }
+
   get preferAuthorDisplayName () {
     return this.serverConfig.client.videos.miniature.preferAuthorDisplayName
   }
@@ -158,6 +206,10 @@ export class VideoMiniatureComponent implements OnInit {
     if (this.screenService.isInTouchScreen()) {
       this.loadActions()
     }
+  }
+
+  ngOnDestroy () {
+    this.stopProcessingProgressPolling()
   }
 
   private buildVideoLink () {

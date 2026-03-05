@@ -54,6 +54,11 @@ import { VideoDetails } from './video-details.model'
 import { VideoPasswordService } from './video-password.service'
 import { Video } from './video.model'
 
+export type VideoProcessingProgress = {
+  progress: number
+  type: 'transcoding' | 'import'
+}
+
 export type VideoListParams = Omit<VideosCommonQuery, 'start' | 'count' | 'sort'> & {
   videoPagination?: ComponentPaginationLight
   sort: VideoSortField | SortMeta
@@ -89,6 +94,19 @@ export class VideoService {
       map(({ videoHash, translations }) => new VideoDetails(videoHash, translations)),
       catchError(err => this.restExtractor.handleError(err))
     )
+  }
+
+  getProcessingProgress (options: { videoId: string, videoPassword?: string }): Observable<VideoProcessingProgress | null> {
+    const headers = VideoPasswordService.buildVideoPasswordHeader(options.videoPassword)
+
+    return this.authHttp
+      .get<VideoProcessingProgress>(`${VideoService.BASE_VIDEO_URL}/${options.videoId}/processing-progress`, { headers })
+      .pipe(
+        catchError(err => {
+          if (err?.status === 404) return of(null)
+          return this.restExtractor.handleError(err)
+        })
+      )
   }
 
   updateVideo (id: number | string, video: VideoUpdate) {

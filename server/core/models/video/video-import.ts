@@ -163,6 +163,10 @@ export class VideoImportModel extends SequelizeModel<VideoImportModel> {
     return VideoImportModel.findByPk(id)
   }
 
+  static loadByVideoId (videoId: number): Promise<MVideoImportDefault | null> {
+    return VideoImportModel.findOne({ where: { videoId } })
+  }
+
   static listUserVideoImportsForApi (options: ListVideoImportsOptions) {
     return Promise.all([
       new VideoImportListQueryBuilder(VideoImportModel.sequelize, options).list<MVideoImportFormattable>(),
