@@ -360,6 +360,11 @@ export class VideoEdit {
     this.updateAfterChange()
   }
 
+  loadCaptionsFromAPI (captions: VideoCaption[]) {
+    this.captions = captions
+    this.updateAfterChange()
+  }
+
   private loadVideo (options: {
     video: UpdateFromAPIOptions['video']
     videoPasswords?: string[]

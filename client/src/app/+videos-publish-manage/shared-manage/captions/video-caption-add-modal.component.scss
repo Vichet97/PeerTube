@@ -1,6 +1,11 @@
 @use '_variables' as *;
 @use '_mixins' as *;
 
+.import-mode-toggle {
+  display: flex;
+  gap: 0.5rem;
+}
+
 .caption-file {
   margin-top: 20px;
   width: max-content;

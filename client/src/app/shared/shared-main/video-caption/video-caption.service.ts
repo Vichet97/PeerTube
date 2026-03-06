@@ -55,6 +55,12 @@ export class VideoCaptionService {
       .pipe(catchError(res => this.restExtractor.handleError(res)))
   }
 
+  addCaptionFromUrl (videoId: number | string, language: string, targetUrl: string, customHeaders?: Record<string, string>) {
+    const body = { targetUrl, language, customHeaders }
+    return this.authHttp.post(`${VideoService.BASE_VIDEO_URL}/${videoId}/captions/import`, body)
+      .pipe(catchError(res => this.restExtractor.handleError(res)))
+  }
+
   updateCaptions (videoId: number | string, videoCaptions: VideoCaptionEdit[]) {
     let obs: Observable<any> = of(undefined)
 

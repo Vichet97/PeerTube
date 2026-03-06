@@ -1,5 +1,6 @@
 import { HttpStatusCode, ServerErrorCode, UserRight, VideoCaptionGenerate } from '@peertube/peertube-models'
 import { isBooleanValid, toBooleanOrNull } from '@server/helpers/custom-validators/misc.js'
+import { isVideoImportTargetUrlValid } from '@server/helpers/custom-validators/video-imports.js'
 import { CONFIG } from '@server/initializers/config.js'
 import { VideoCaptionModel } from '@server/models/video/video-caption.js'
 import { VideoJobInfoModel } from '@server/models/video/video-job-info.js'
@@ -164,6 +165,63 @@ export const listVideoCaptionsValidator = [
 
     const video = res.locals.onlyVideo
     if (!await checkCanSeeVideo({ req, res, video, paramId: req.params.videoId })) return
+
+    return next()
+  }
+]
+
+export const addVideoCaptionImportValidator = [
+  isValidVideoIdParam('videoId'),
+
+  body('targetUrl')
+    .notEmpty().withMessage('targetUrl is required')
+    .custom(isVideoImportTargetUrlValid)
+    .withMessage('targetUrl must be a valid HTTP or HTTPS URL'),
+
+  body('language')
+    .custom(isVideoCaptionLanguageValid).not().isEmpty()
+    .withMessage('Should have a valid caption language'),
+
+  body('customHeaders')
+    .optional()
+    .customSanitizer((value) => {
+      if (value === undefined || value === null) return undefined
+      if (typeof value === 'string') {
+        try {
+          return JSON.parse(value)
+        } catch {
+          return value
+        }
+      }
+      return value
+    })
+    .custom((value) => {
+      if (value === undefined || value === null) return true
+      if (typeof value !== 'object' || Array.isArray(value)) return false
+      return Object.entries(value).every(
+        ([ k, v ]) => typeof k === 'string' && typeof v === 'string' && k.length > 0 && v.length > 0
+      )
+    })
+    .withMessage('customHeaders must be a JSON object with string keys and values'),
+
+  async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (areValidationErrors(req, res)) return
+    if (!await doesVideoExist(req.params.videoId, res)) return
+
+    const user = res.locals.oauth.token.User
+    if (
+      !await checkCanManageVideo({
+        user,
+        video: res.locals.videoAll,
+        right: UserRight.UPDATE_ANY_VIDEO,
+        req,
+        res,
+        checkIsLocal: true,
+        checkIsOwner: false
+      })
+    ) {
+      return
+    }
 
     return next()
   }

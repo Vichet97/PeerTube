@@ -10,6 +10,21 @@
     </div>
 
     <div class="modal-body">
+      <div class="import-mode-toggle mb-3">
+        <button
+          type="button" class="peertube-button" [class.primary-button]="importMode === 'file'" [class.secondary-button]="importMode !== 'file'"
+          (click)="setImportMode('file')"
+        >
+          <ng-container i18n>Upload file</ng-container>
+        </button>
+        <button
+          type="button" class="peertube-button" [class.primary-button]="importMode === 'url'" [class.secondary-button]="importMode !== 'url'"
+          (click)="setImportMode('url')"
+        >
+          <ng-container i18n>Import from URL</ng-container>
+        </button>
+      </div>
+
       <label i18n for="language">Language</label>
 
       <my-select-options
@@ -23,13 +38,46 @@
         </div>
       }
 
-      <div class="caption-file">
-        <my-reactive-file
-          formControlName="captionfile" inputName="captionfile" i18n-inputLabel inputLabel="Select the caption file"
-          [extensions]="videoCaptionExtensions" [maxFileSize]="videoCaptionMaxSize" [displayFilename]="true"
-          [buttonTooltip]="getReactiveFileButtonTooltip()"
-        ></my-reactive-file>
-      </div>
+      @if (importMode === 'file') {
+        <div class="caption-file">
+          <my-reactive-file
+            formControlName="captionfile" inputName="captionfile" i18n-inputLabel inputLabel="Select the caption file"
+            [extensions]="videoCaptionExtensions" [maxFileSize]="videoCaptionMaxSize" [displayFilename]="true"
+            [buttonTooltip]="getReactiveFileButtonTooltip()"
+          ></my-reactive-file>
+        </div>
+      } @else {
+        <div class="form-group">
+          <label i18n for="captionUrl">Caption URL</label>
+          <my-help>
+            <ng-container i18n>
+              URL of a VTT or SRT subtitle file (e.g. https://example.com/subtitles.vtt).
+            </ng-container>
+          </my-help>
+          <input type="url" id="captionUrl" [(ngModel)]="targetUrl" [ngModelOptions]="{standalone: true}" class="form-control" placeholder="https://" />
+        </div>
+
+        <div class="form-group">
+          <label i18n for="captionCustomHeaders">Custom headers (JSON)</label>
+          <my-help>
+            <ng-container i18n>
+              Optional. Add custom HTTP headers for the request (e.g. for authentication or Referer).
+              Format: <code>{{ '{' }}"Header-Name": "value"{{ '}' }}</code>
+            </ng-container>
+          </my-help>
+          <textarea
+            id="captionCustomHeaders"
+            [(ngModel)]="customHeadersJson"
+            [ngModelOptions]="{standalone: true}"
+            class="form-control"
+            rows="3"
+            [placeholder]="customHeadersPlaceholder"
+          ></textarea>
+          @if (customHeadersError) {
+            <div class="form-error">{{ customHeadersError }}</div>
+          }
+        </div>
+      }
 
       @if (isReplacingExistingCaption()) {
         <div class="warning-replace-caption" i18n>
@@ -44,10 +92,17 @@
         (click)="hide()" (key.enter)="hide()"
         >
 
-      <input
-        type="submit" i18n-value value="Add this caption" class="peertube-button primary-button"
-        [disabled]="!form.valid" (click)="addCaption()"
-        >
+      @if (importMode === 'url') {
+        <input
+          type="submit" i18n-value value="Import" class="peertube-button primary-button"
+          [disabled]="!isUrlModeValid() || importLoading" (click)="addCaption()"
+          >
+      } @else {
+        <input
+          type="submit" i18n-value value="Add this caption" class="peertube-button primary-button"
+          [disabled]="!form.valid" (click)="addCaption()"
+          >
+      }
     </div>
   </ng-container>
 </ng-template>

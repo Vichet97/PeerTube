@@ -4588,6 +4588,47 @@ paths:
         '404':
           description: video not found
 
+  /api/v1/videos/{id}/captions/import:
+    post:
+      summary: Import a video caption from URL
+      operationId: importVideoCaption
+      description: |
+        Import a caption (VTT or SRT) from a remote URL. Supports optional custom HTTP headers for authenticated or protected resources.
+      security:
+        - OAuth2:
+          - user
+      tags:
+        - Video Captions
+      parameters:
+        - $ref: '#/components/parameters/idOrUUID'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - targetUrl
+                - language
+              properties:
+                targetUrl:
+                  type: string
+                  format: uri
+                  description: URL of the caption file (VTT or SRT)
+                language:
+                  type: string
+                  description: Caption language code (e.g. en, fr)
+                customHeaders:
+                  type: object
+                  additionalProperties:
+                    type: string
+                  description: Optional custom HTTP headers (e.g. Authorization, Referer)
+      responses:
+        '204':
+          description: successful operation
+        '400':
+          description: Invalid URL, language, or caption file format
+        '404':
+          description: video not found
 
   /api/v1/videos/{id}/captions/{captionLanguage}:
     put:

@@ -34,10 +34,26 @@ async function isVTTFileValid (filePath: string) {
   return content?.startsWith('WEBVTT')
 }
 
+async function isCaptionFileValid (filePath: string) {
+  const size = await getFileSize(filePath)
+  if (size > CONSTRAINTS_FIELDS.VIDEO_CAPTIONS.CAPTION_FILE.FILE_SIZE.max || size === 0) return false
+
+  const content = await readFile(filePath, 'utf8')
+  if (!content || content.trim().length === 0) return false
+
+  // VTT format
+  if (content.trimStart().startsWith('WEBVTT')) return true
+
+  // SRT format: sequence number, timestamp line, optional text
+  const srtBlock = /^\d+\s*\n\d{2}:\d{2}:\d{2}[,.]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[,.]\d{3}/
+  return srtBlock.test(content.trimStart())
+}
+
 // ---------------------------------------------------------------------------
 
 export {
   isVideoCaptionFile,
   isVTTFileValid,
+  isCaptionFileValid,
   isVideoCaptionLanguageValid
 }

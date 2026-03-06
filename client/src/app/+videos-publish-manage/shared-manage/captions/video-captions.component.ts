@@ -3,6 +3,7 @@ import { FormsModule, ReactiveFormsModule } from '@angular/forms'
 import { VideoCaptionEdit, VideoCaptionWithPathEdit } from '@app/+videos-publish-manage/shared-manage/common/video-caption-edit.model'
 import { ServerService } from '@app/core'
 import { removeElementFromArray } from '@app/helpers'
+import { VideoCaptionService } from '@app/shared/shared-main/video-caption/video-caption.service'
 import { AlertComponent } from '@app/shared/shared-main/common/alert.component'
 import { PTDatePipe } from '@app/shared/shared-main/common/date.pipe'
 import { HTMLServerConfig, ConstantLabel } from '@peertube/peertube-models'
@@ -41,6 +42,7 @@ const debugLogger = debug('peertube:video-manage')
 export class VideoCaptionsComponent implements OnInit {
   private serverService = inject(ServerService)
   private manageController = inject(VideoManageController)
+  private videoCaptionService = inject(VideoCaptionService)
 
   readonly videoCaptionAddModal = viewChild<VideoCaptionAddModalComponent>('videoCaptionAddModal')
   readonly videoCaptionEditModal = viewChild<VideoCaptionEditModalComponent>('videoCaptionEditModal')
@@ -123,6 +125,16 @@ export class VideoCaptionsComponent implements OnInit {
 
   openAddCaptionModal () {
     this.videoCaptionAddModal().show()
+  }
+
+  onCaptionImported () {
+    const videoId = this.videoEdit.getVideoAttributes().uuid
+    this.videoCaptionService.listCaptions(videoId).subscribe({
+      next: ({ data }) => {
+        this.videoEdit.loadCaptionsFromAPI(data)
+        this.initialVideoCaptions = data.map(c => c.language.id)
+      }
+    })
   }
 
   openEditCaptionModal (videoCaption: VideoCaptionWithPathEdit) {

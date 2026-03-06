@@ -1,17 +1,24 @@
-import { HttpStatusCode, VideoCaptionGenerate, VideoChannelActivityAction } from '@peertube/peertube-models'
+import { HttpStatusCode, VideoCaptionGenerate, VideoCaptionImport, VideoChannelActivityAction } from '@peertube/peertube-models'
+import { buildSUUID } from '@peertube/peertube-node-utils'
 import { retryTransactionWrapper } from '@server/helpers/database-utils.js'
+import { doRequestAndSaveToFile } from '@server/helpers/requests.js'
 import { Hooks } from '@server/lib/plugins/hooks.js'
 import { createLocalCaption, createTranscriptionTaskIfNeeded, updateHLSMasterOnCaptionChangeIfNeeded } from '@server/lib/video-captions.js'
 import { VideoJobInfoModel } from '@server/models/video/video-job-info.js'
 import express from 'express'
+import { remove } from 'fs-extra/esm'
+import { join } from 'path'
 import { createReqFiles } from '../../../helpers/express-utils.js'
 import { logger, loggerTagsFactory } from '../../../helpers/logger.js'
 import { getFormattedObjects } from '../../../helpers/utils.js'
-import { MIMETYPES } from '../../../initializers/constants.js'
+import { CONSTRAINTS_FIELDS, MIMETYPES } from '../../../initializers/constants.js'
+import { CONFIG } from '../../../initializers/config.js'
 import { sequelizeTypescript } from '../../../initializers/database.js'
 import { federateVideoIfNeeded } from '../../../lib/activitypub/videos/index.js'
 import { asyncMiddleware, asyncRetryTransactionMiddleware, authenticate } from '../../../middlewares/index.js'
+import { isCaptionFileValid } from '../../../helpers/custom-validators/video-captions.js'
 import {
+  addVideoCaptionImportValidator,
   addVideoCaptionValidator,
   deleteVideoCaptionValidator,
   generateVideoCaptionValidator,
@@ -34,6 +41,13 @@ videoCaptionsRouter.post(
 )
 
 videoCaptionsRouter.get('/:videoId/captions', asyncMiddleware(listVideoCaptionsValidator), asyncMiddleware(listVideoCaptions))
+
+videoCaptionsRouter.post(
+  '/:videoId/captions/import',
+  authenticate,
+  asyncMiddleware(addVideoCaptionImportValidator),
+  asyncMiddleware(createVideoCaptionFromImport)
+)
 
 videoCaptionsRouter.put(
   '/:videoId/captions/:captionLanguage',
@@ -75,6 +89,68 @@ async function listVideoCaptions (req: express.Request, res: express.Response) {
   const data = await VideoCaptionModel.listVideoCaptions(res.locals.onlyVideo.id)
 
   return res.json(getFormattedObjects(data, data.length))
+}
+
+async function createVideoCaptionFromImport (req: express.Request, res: express.Response) {
+  const body = req.body as VideoCaptionImport
+  const video = res.locals.videoAll
+  const { targetUrl, language, customHeaders } = body
+
+  const bodyKBLimit = Math.ceil(CONSTRAINTS_FIELDS.VIDEO_CAPTIONS.CAPTION_FILE.FILE_SIZE.max / 1000)
+  const ext = targetUrl.toLowerCase().endsWith('.srt') ? '.srt' : '.vtt'
+  const tmpPath = join(CONFIG.STORAGE.TMP_DIR, `caption-import-${buildSUUID()}${ext}`)
+
+  try {
+    const requestHeaders = customHeaders && Object.keys(customHeaders).length > 0
+      ? { ...customHeaders }
+      : undefined
+
+    await doRequestAndSaveToFile(targetUrl, tmpPath, {
+      headers: requestHeaders,
+      bodyKBLimit,
+      timeout: 30000
+    })
+
+    if (!await isCaptionFileValid(tmpPath)) {
+      return res.fail({
+        status: HttpStatusCode.BAD_REQUEST_400,
+        message: 'The downloaded file is not a valid VTT or SRT caption file'
+      })
+    }
+
+    const videoCaption = await createLocalCaption({
+      video,
+      language,
+      path: tmpPath,
+      automaticallyGenerated: false
+    })
+
+    if (videoCaption.m3u8Filename) {
+      await updateHLSMasterOnCaptionChangeIfNeeded(video)
+    }
+
+    await retryTransactionWrapper(() => {
+      return sequelizeTypescript.transaction(async t => {
+        await VideoChannelActivityModel.addVideoActivity({
+          action: VideoChannelActivityAction.UPDATE_CAPTIONS,
+          user: res.locals.oauth.token.User,
+          channel: video.VideoChannel,
+          video,
+          transaction: t
+        })
+
+        return federateVideoIfNeeded(video, false, t)
+      })
+    })
+
+    Hooks.runAction('action:api.video-caption.created', { caption: videoCaption, req, res })
+
+    logger.info('Video caption %s imported from URL for video %s.', language, video.uuid, lTags(video.uuid))
+
+    return res.status(HttpStatusCode.NO_CONTENT_204).end()
+  } finally {
+    await remove(tmpPath).catch(() => {})
+  }
 }
 
 async function createVideoCaption (req: express.Request, res: express.Response) {
