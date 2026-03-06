@@ -11,6 +11,7 @@ import {
   VideoState
 } from '@peertube/peertube-models'
 import { retryTransactionWrapper } from '@server/helpers/database-utils.js'
+import { downloadWithNm3u8dlRe } from '@server/helpers/n-m3u8dl-re/index.js'
 import { customHeadersToYoutubeDLArgs, YoutubeDLWrapper } from '@server/helpers/youtube-dl/index.js'
 import { CONFIG } from '@server/initializers/config.js'
 import { AutomaticTagger } from '@server/lib/automatic-tags/automatic-tagger.js'
@@ -109,13 +110,15 @@ async function processTorrentImport (job: Job, videoImport: MVideoImportDefault,
 async function processYoutubeDLImport (job: Job, videoImport: MVideoImportDefault, payload: VideoImportYoutubeDLPayload) {
   logger.info('Processing youtubeDL video import in job %s.', job.id)
 
-  const options = { type: payload.type, generateTranscription: payload.generateTranscription, videoImportId: videoImport.id }
-
-  const youtubeDL = new YoutubeDLWrapper(
-    videoImport.targetUrl,
-    ServerConfigManager.Instance.getEnabledResolutions('vod'),
-    CONFIG.TRANSCODING.ALWAYS_TRANSCODE_ORIGINAL_RESOLUTION
-  )
+  const options = {
+    type: payload.type,
+    generateTranscription: payload.generateTranscription,
+    videoImportId: videoImport.id,
+    licenseServerUrl: payload.licenseServerUrl,
+    drmType: payload.drmType,
+    clearkeys: payload.clearkeys,
+    useNm3u8dlRe: payload.useNm3u8dlRe
+  }
 
   const onProgress = async (percent: number) => {
     job.updateProgress(percent).catch(err => logger.error('Cannot update video import job progress', { err }))
@@ -123,18 +126,27 @@ async function processYoutubeDLImport (job: Job, videoImport: MVideoImportDefaul
     await videoImport.save()
   }
 
-  const youtubeDLArgs = customHeadersToYoutubeDLArgs(payload.customHeaders)
+  let downloader: () => Promise<string>
 
-  return processFile(
-    () => youtubeDL.downloadVideo(payload.fileExt, JOB_TTL['video-import'], onProgress, youtubeDLArgs),
-    videoImport,
-    {
-      ...options,
-      licenseServerUrl: payload.licenseServerUrl,
-      drmType: payload.drmType,
-      clearkeys: payload.clearkeys
-    }
-  )
+  if (payload.useNm3u8dlRe && payload.clearkeys) {
+    downloader = () => downloadWithNm3u8dlRe({
+      url: videoImport.targetUrl,
+      clearkeys: payload.clearkeys,
+      customHeaders: payload.customHeaders,
+      timeout: JOB_TTL['video-import'],
+      onProgress
+    })
+  } else {
+    const youtubeDL = new YoutubeDLWrapper(
+      videoImport.targetUrl,
+      ServerConfigManager.Instance.getEnabledResolutions('vod'),
+      CONFIG.TRANSCODING.ALWAYS_TRANSCODE_ORIGINAL_RESOLUTION
+    )
+    const youtubeDLArgs = customHeadersToYoutubeDLArgs(payload.customHeaders)
+    downloader = () => youtubeDL.downloadVideo(payload.fileExt ?? '.mp4', JOB_TTL['video-import'], onProgress, youtubeDLArgs)
+  }
+
+  return processFile(downloader, videoImport, options)
 }
 
 async function getVideoImportOrDie (payload: VideoImportPayload) {
@@ -161,6 +173,7 @@ type ProcessFileOptions = {
   licenseServerUrl?: string | null
   drmType?: string | null
   clearkeys?: string | null
+  useNm3u8dlRe?: boolean
 }
 async function processFile (downloader: () => Promise<string>, videoImport: MVideoImportDefault, options: ProcessFileOptions) {
   let tmpVideoPath: string
@@ -170,8 +183,8 @@ async function processFile (downloader: () => Promise<string>, videoImport: MVid
     // Download video from youtubeDL or torrent
     tmpVideoPath = await downloader()
 
-    // Optional DRM decryption step (before transcoding)
-    if (CONFIG.IMPORT.VIDEOS.HTTP.DRM_DECRYPTION.ENABLED && options.type === 'youtube-dl') {
+    // Optional DRM decryption step (before transcoding). Skip when N_m3u8DL-RE already decrypted.
+    if (CONFIG.IMPORT.VIDEOS.HTTP.DRM_DECRYPTION.ENABLED && options.type === 'youtube-dl' && !options.useNm3u8dlRe) {
       const ext = tmpVideoPath.match(/\.[^/.]+$/)?.[0] ?? '.mp4'
       const baseName = basename(tmpVideoPath, ext)
       const decryptedPath = join(dirname(tmpVideoPath), `${baseName}-decrypted${ext}`)

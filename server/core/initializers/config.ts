@@ -897,6 +897,16 @@ const CONFIG = {
           return config.get<string[]>('import.videos.http.proxies')
         },
 
+        N_M3U8DL_RE: {
+          get BINARY_PATH () {
+            const binaryPath = config.has('import.videos.http.n_m3u8dl_re.binary_path')
+              ? config.get<string>('import.videos.http.n_m3u8dl_re.binary_path')
+              : null
+            if (binaryPath) return binaryPath
+            return join(CONFIG.STORAGE.BIN_DIR, 'N_m3u8DL-RE')
+          }
+        },
+
         DRM_DECRYPTION: {
           get ENABLED () {
             return config.has('import.videos.http.drm_decryption.enabled')

@@ -874,6 +874,12 @@ import:
       # IPv6 is very strongly rate-limited on most sites supported by youtube-dl
       force_ipv4: true
 
+      # N_m3u8DL-RE for DASH/M3U8 with Clearkey. When URL is .mpd/.m3u8 and clearkeys provided, uses this instead of yt-dlp.
+      # yt-dlp refuses DRM content; N_m3u8DL-RE can download+decrypt with --key kid:key
+      # Download from https://github.com/nilaoda/N_m3u8DL-RE/releases (e.g. N_m3u8DL-RE for macOS)
+      n_m3u8dl_re:
+        binary_path: null  # e.g. /usr/local/bin/N_m3u8DL-RE or null to use storage/bin/N_m3u8DL-RE
+
       # Optional DRM decryption step before transcoding (Widevine, FairPlay, etc.)
       # Runs after yt-dlp downloads, before transcoding. Requires external tools (mp4decrypt, pywidevine, etc.)
       drm_decryption:

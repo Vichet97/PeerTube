@@ -13,6 +13,7 @@ import { isVideoFileExtnameValid } from '@server/helpers/custom-validators/video
 import { isResolvingToUnicastOnly } from '@server/helpers/dns.js'
 import { guessLanguageFromReq, t } from '@server/helpers/i18n.js'
 import { logger } from '@server/helpers/logger.js'
+import { isMpdOrM3u8Url } from '@server/helpers/n-m3u8dl-re/index.js'
 import { customHeadersToYoutubeDLArgs, YoutubeDlImportError, YoutubeDlImportErrorCode, YoutubeDLInfo, YoutubeDLWrapper } from '@server/helpers/youtube-dl/index.js'
 import { CONFIG } from '@server/initializers/config.js'
 import { sequelizeTypescript } from '@server/initializers/database.js'
@@ -180,17 +181,31 @@ export async function buildYoutubeDLImport (options: {
     ? guessLanguageFromReq(req, res)
     : user.getLanguage()
 
-  const youtubeDL = new YoutubeDLWrapper(
-    targetUrl,
-    ServerConfigManager.Instance.getEnabledResolutions('vod'),
-    CONFIG.TRANSCODING.ALWAYS_TRANSCODE_ORIGINAL_RESOLUTION
-  )
+  const useNm3u8dlRe = isMpdOrM3u8Url(targetUrl) && !!importDataOverride?.clearkeys
 
-  const customHeaders = importDataOverride?.customHeaders
-  const youtubeDLArgs = customHeadersToYoutubeDLArgs(customHeaders)
+  let youtubeDLInfo: YoutubeDLInfo
 
-  // Get video infos
-  const youtubeDLInfo = await youtubeDL.getInfoForDownload({ userLanguage, youtubeDLArgs })
+  if (useNm3u8dlRe) {
+    youtubeDLInfo = {
+      name: importDataOverride?.name || 'Imported video',
+      urls: [ targetUrl ],
+      ext: 'mp4',
+      originallyPublishedAtWithoutTime: new Date(),
+      webpageUrl: targetUrl,
+      chapters: []
+    }
+  } else {
+    const youtubeDL = new YoutubeDLWrapper(
+      targetUrl,
+      ServerConfigManager.Instance.getEnabledResolutions('vod'),
+      CONFIG.TRANSCODING.ALWAYS_TRANSCODE_ORIGINAL_RESOLUTION
+    )
+
+    const customHeaders = importDataOverride?.customHeaders
+    const youtubeDLArgs = customHeadersToYoutubeDLArgs(customHeaders)
+
+    youtubeDLInfo = await youtubeDL.getInfoForDownload({ userLanguage, youtubeDLArgs })
+  }
 
   if (skipPublishedBeforeOrEq) {
     const onlyAfterWithoutTime = new Date(skipPublishedBeforeOrEq)
@@ -265,8 +280,15 @@ export async function buildYoutubeDLImport (options: {
     }
   })
 
-  // Get video subtitles
-  await processYoutubeSubtitles(youtubeDL, targetUrl, video)
+  // Get video subtitles (skip for N_m3u8DL-RE path)
+  if (!useNm3u8dlRe) {
+    const youtubeDL = new YoutubeDLWrapper(
+      targetUrl,
+      ServerConfigManager.Instance.getEnabledResolutions('vod'),
+      CONFIG.TRANSCODING.ALWAYS_TRANSCODE_ORIGINAL_RESOLUTION
+    )
+    await processYoutubeSubtitles(youtubeDL, targetUrl, video)
+  }
 
   let fileExt = `.${youtubeDLInfo.ext}`
   if (!isVideoFileExtnameValid(fileExt)) fileExt = '.mp4'
@@ -280,6 +302,7 @@ export async function buildYoutubeDLImport (options: {
     licenseServerUrl: importDataOverride?.licenseServerUrl,
     drmType: importDataOverride?.drmType,
     clearkeys: importDataOverride?.clearkeys,
+    useNm3u8dlRe: useNm3u8dlRe || undefined,
     // If part of a sync process, there is a parent job that will aggregate children results
     preventException: !!channelSync
   }

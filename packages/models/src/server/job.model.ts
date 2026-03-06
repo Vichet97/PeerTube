@@ -113,6 +113,7 @@ export interface VideoImportYoutubeDLPayload extends VideoImportAbstractPayload 
   licenseServerUrl?: string
   drmType?: string
   clearkeys?: string
+  useNm3u8dlRe?: boolean
 }
 
 export interface VideoImportTorrentPayload extends VideoImportAbstractPayload {
