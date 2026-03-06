@@ -9,7 +9,15 @@
 }
 
 <ng-template #aContent>
-  <img alt="" [attr.src]="getImageUrl()" [ngClass]="{ 'blur-filter': blur() }"  />
+  @if (showUploadingPlaceholder()) {
+    <div class="uploading-placeholder" aria-hidden="true">
+      <div class="uploading-animation">
+        <my-global-icon iconName="upload"></my-global-icon>
+      </div>
+    </div>
+  } @else {
+    <img alt="" [attr.src]="getImageUrl()" [ngClass]="{ 'blur-filter': blur() }"  />
+  }
 
   @if (displayWatchLaterPlaylist()) {
     <div class="actions-overlay">

@@ -14,6 +14,13 @@
         <img [src]="imageSrc" alt="Current thumbnail" i18n-alt />
 
         <div class="muted-2 fs-8 mt-1" i18n>Current thumbnail</div>
+      } @else if (isImporting()) {
+        <div class="uploading-placeholder" aria-hidden="true">
+          <div class="uploading-animation">
+            <my-global-icon iconName="upload"></my-global-icon>
+          </div>
+          <div class="muted-2 fs-8 mt-1" i18n>Uploading...</div>
+        </div>
       } @else {
         <div class="no-image">
           <svg width="28" height="20" viewBox="0 0 28 20" fill="none" xmlns="http://www.w3.org/2000/svg">

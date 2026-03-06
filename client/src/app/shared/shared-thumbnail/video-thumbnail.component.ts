@@ -166,4 +166,13 @@ export class VideoThumbnailComponent implements OnChanges {
     const progress = this.processingProgress()
     return progress != null && progress < 100
   }
+
+  hasThumbnail () {
+    const url = this.getImageUrl()
+    return !!url
+  }
+
+  showUploadingPlaceholder () {
+    return this.showProcessingOverlay() && !this.hasThumbnail()
+  }
 }

@@ -19,13 +19,14 @@ import { HTMLServerConfig, VideoState } from '@peertube/peertube-models'
 import { imageToDataURL } from '@root-helpers/images'
 import { PeerTubePlayer } from '../../../../standalone/embed-player-api/player'
 import { ButtonComponent } from '../../../shared/shared-main/buttons/button.component'
+import { GlobalIconComponent } from '../../../shared/shared-icons/global-icon.component'
 import { VideoEdit } from './video-edit.model'
 
 @Component({
   selector: 'my-thumbnail-manager',
   styleUrls: [ './thumbnail-manager.component.scss' ],
   templateUrl: './thumbnail-manager.component.html',
-  imports: [ ReactiveFileComponent, EmbedComponent, DragDropDirective, ButtonComponent ],
+  imports: [ ReactiveFileComponent, EmbedComponent, DragDropDirective, ButtonComponent, GlobalIconComponent ],
   providers: [
     {
       provide: NG_VALUE_ACCESSOR,
@@ -81,6 +82,15 @@ export class ThumbnailManagerComponent implements OnInit, ControlValueAccessor {
     const attrs = videoEdit.getVideoAttributes()
 
     return !attrs.isLive && attrs.state === VideoState.PUBLISHED
+  }
+
+  isImporting () {
+    const videoEdit = this.videoEdit()
+    if (!videoEdit) return false
+
+    const state = videoEdit.getVideoAttributes().state
+    const stateId = typeof state === 'number' ? state : (state as { id: number })?.id
+    return stateId === VideoState.TO_IMPORT
   }
 
   ngOnInit () {
