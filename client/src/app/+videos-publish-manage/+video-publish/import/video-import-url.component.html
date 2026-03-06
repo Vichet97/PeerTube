@@ -28,6 +28,58 @@
         <my-select-channel inputId="first-step-channel" [items]="userChannels()" [(ngModel)]="firstStepChannelId"></my-select-channel>
       </div>
 
+      @if (isHttpImportEnabled()) {
+        <div class="form-group">
+          <label i18n for="drmType">DRM type</label>
+
+          <my-help>
+            <ng-container i18n>
+              Optional. For DRM-protected content. Select the type of DRM used by the remote video.
+            </ng-container>
+          </my-help>
+
+          <select id="drmType" [(ngModel)]="drmType" class="form-control">
+            <option value="" i18n>None / Auto-detect</option>
+            <option value="widevine" i18n>Widevine</option>
+            <option value="fairplay" i18n>FairPlay</option>
+            <option value="clearkey" i18n>Clearkey</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label i18n for="licenseServerUrl">License server URL</label>
+
+          <my-help>
+            <ng-container i18n>
+              Optional. For Widevine/FairPlay. URL of the license server to obtain decryption keys.
+            </ng-container>
+          </my-help>
+
+          <input type="url" id="licenseServerUrl" [(ngModel)]="licenseServerUrl" class="form-control" placeholder="https://" />
+        </div>
+
+        <div class="form-group">
+          <label i18n for="clearkeysJson">Clearkeys (JSON)</label>
+
+          <my-help>
+            <ng-container i18n>
+              Optional. For Clearkey DRM. Keys in JSON format: object with kid/k pairs or array of objects with kid and k properties.
+            </ng-container>
+          </my-help>
+
+          <textarea
+            id="clearkeysJson"
+            [(ngModel)]="clearkeysJson"
+            class="form-control"
+            rows="2"
+            placeholder='{"kid": "hexkey"}'
+          ></textarea>
+          @if (clearkeysError) {
+            <div class="form-error">{{ clearkeysError }}</div>
+          }
+        </div>
+      }
+
       <div class="form-group">
         <label i18n for="customHeaders">Custom headers (JSON)</label>
 

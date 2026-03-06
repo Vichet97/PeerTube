@@ -289,6 +289,9 @@ export interface ServerConfig {
     videos: {
       http: {
         enabled: boolean
+        drmDecryption?: {
+          enabled: boolean
+        }
       }
       torrent: {
         enabled: boolean

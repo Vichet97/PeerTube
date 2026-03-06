@@ -277,6 +277,9 @@ export async function buildYoutubeDLImport (options: {
     fileExt,
     generateTranscription: importDataOverride.generateTranscription ?? true,
     customHeaders: importDataOverride?.customHeaders,
+    licenseServerUrl: importDataOverride?.licenseServerUrl,
+    drmType: importDataOverride?.drmType,
+    clearkeys: importDataOverride?.clearkeys,
     // If part of a sync process, there is a parent job that will aggregate children results
     preventException: !!channelSync
   }

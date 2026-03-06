@@ -224,6 +224,35 @@ async function getVideoWithRights (video: MVideoWithRights): Promise<MVideoWithR
   return VideoModel.loadFull(video.id)
 }
 
+/**
+ * Check if a user can see a protected video for watch page HTML generation.
+ * Returns true if the user has access, false otherwise.
+ */
+export async function canUserSeeVideoForWatchPage (options: {
+  user: MUserAccountId
+  video: MVideo
+  req: Request
+}): Promise<boolean> {
+  const { user, video, req } = options
+
+  const videoWithRights = await getVideoWithRights(video as MVideoWithRights)
+  const privacy = videoWithRights.privacy
+
+  if (privacy === VideoPrivacy.INTERNAL) {
+    return true
+  }
+
+  if (videoWithRights.isBlacklisted()) {
+    return canUserManageProtectedVideo({ user, req, video: videoWithRights, right: UserRight.MANAGE_VIDEO_BLACKLIST })
+  }
+
+  if (privacy === VideoPrivacy.PRIVATE || privacy === VideoPrivacy.UNLISTED) {
+    return canUserManageProtectedVideo({ user, req, video: videoWithRights, right: UserRight.SEE_ALL_VIDEOS })
+  }
+
+  return false
+}
+
 // ---------------------------------------------------------------------------
 
 export async function checkCanAccessVideoStaticFiles (options: {

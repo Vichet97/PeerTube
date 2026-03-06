@@ -4,6 +4,7 @@ import { objectKeysTyped } from '@peertube/peertube-core-utils'
 import { NSFWPolicyType, UserRoleType, UserUpdateMe } from '@peertube/peertube-models'
 import { getBoolOrDefault, getNumberOrDefault } from '@root-helpers/local-storage-utils'
 import { logger } from '@root-helpers/logger'
+import { clearAuthCookie, setAuthCookie } from '@root-helpers/auth-cookie'
 import { OAuthUserTokens, UserLocalStorageKeys } from '@root-helpers/users'
 import { filter, throttleTime } from 'rxjs'
 import { ServerService } from '../server'
@@ -202,9 +203,11 @@ export class UserLocalStorageService {
 
   setTokens (tokens: OAuthUserTokens) {
     OAuthUserTokens.saveToLocalStorage(this.localStorageService, tokens)
+    setAuthCookie(tokens.accessToken)
   }
 
   flushTokens () {
     OAuthUserTokens.flushLocalStorage(this.localStorageService)
+    clearAuthCookie()
   }
 }

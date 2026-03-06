@@ -418,6 +418,9 @@ export class AppComponent implements OnInit, AfterViewInit, OnDestroy {
     const user = this.userLocalStorage.getLoggedInUser()
     if (!user) return
 
+    // Sync auth cookie for server-side HTML generation (e.g. watch page reload)
+    this.userLocalStorage.setTokens(tokens)
+
     // Initialize user
     this.authService.buildAuthUser(user, tokens)
   }

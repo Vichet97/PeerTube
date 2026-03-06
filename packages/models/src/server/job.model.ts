@@ -110,6 +110,9 @@ export interface VideoImportYoutubeDLPayload extends VideoImportAbstractPayload 
 
   fileExt?: string
   customHeaders?: Record<string, string>
+  licenseServerUrl?: string
+  drmType?: string
+  clearkeys?: string
 }
 
 export interface VideoImportTorrentPayload extends VideoImportAbstractPayload {

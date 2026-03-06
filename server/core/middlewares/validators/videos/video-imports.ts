@@ -42,6 +42,42 @@ export const videoImportAddValidator = getCommonVideoEditAttributes().concat([
     .isArray()
     .withMessage('Video passwords should be an array.'),
 
+  body('licenseServerUrl')
+    .optional()
+    .isURL({ require_protocol: true, protocols: [ 'http', 'https' ] })
+    .withMessage('licenseServerUrl must be a valid HTTP or HTTPS URL'),
+
+  body('drmType')
+    .optional()
+    .customSanitizer((v) => (v === '' || v === null || v === undefined) ? undefined : v)
+    .custom((v) => !v || [ 'widevine', 'fairplay', 'clearkey' ].includes(v))
+    .withMessage('drmType must be widevine, fairplay, or clearkey'),
+
+  body('clearkeys')
+    .optional()
+    .customSanitizer((value) => {
+      if (value === undefined || value === null || value === '') return undefined
+      if (typeof value === 'string') {
+        try {
+          const parsed = JSON.parse(value)
+          return typeof parsed === 'object' ? JSON.stringify(parsed) : undefined
+        } catch {
+          return value
+        }
+      }
+      return typeof value === 'object' ? JSON.stringify(value) : undefined
+    })
+    .custom((value) => {
+      if (value === undefined || value === null || value === '') return true
+      try {
+        const parsed = JSON.parse(value)
+        return typeof parsed === 'object'
+      } catch {
+        return false
+      }
+    })
+    .withMessage('clearkeys must be valid JSON (object or array)'),
+
   body('customHeaders')
     .optional()
     .customSanitizer((value) => {

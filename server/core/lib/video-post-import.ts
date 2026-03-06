@@ -18,7 +18,10 @@ export async function buildRetryImportJob (videoImport: MVideoImport) {
 
     generateTranscription: videoImport.payload?.generateTranscription ?? CONFIG.VIDEO_TRANSCRIPTION.ENABLED,
     fileExt: (videoImport.payload as VideoImportYoutubeDLPayload)?.fileExt,
-    customHeaders: (videoImport.payload as VideoImportYoutubeDLPayload)?.customHeaders
+    customHeaders: (videoImport.payload as VideoImportYoutubeDLPayload)?.customHeaders,
+    licenseServerUrl: (videoImport.payload as VideoImportYoutubeDLPayload)?.licenseServerUrl,
+    drmType: (videoImport.payload as VideoImportYoutubeDLPayload)?.drmType,
+    clearkeys: (videoImport.payload as VideoImportYoutubeDLPayload)?.clearkeys
   }
 
   videoImport.state = VideoImportState.PENDING

@@ -11,5 +11,14 @@ export interface VideoImportCreate extends VideoCreateUpdateCommon {
   // Custom HTTP headers for yt-dlp (e.g. {"Authorization": "Bearer xxx", "Cookie": "session=abc"})
   customHeaders?: Record<string, string>
 
+  // License server URL for DRM decryption (Widevine, FairPlay). Required when importing DRM-protected content.
+  licenseServerUrl?: string
+
+  // DRM type: widevine, fairplay, clearkey, or empty for auto-detect
+  drmType?: string
+
+  // Clearkeys for Clearkey DRM in JSON format (e.g. {"kid": "hexkey"} or [{"kid": "...", "k": "..."}])
+  clearkeys?: string
+
   channelId: number // Required
 }

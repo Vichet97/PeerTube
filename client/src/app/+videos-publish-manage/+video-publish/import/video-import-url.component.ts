@@ -62,6 +62,9 @@ export class VideoImportUrlComponent implements OnInit, AfterViewInit, CanCompon
   readonly firstStepError = output()
 
   targetUrl = ''
+  licenseServerUrl = ''
+  drmType = ''
+  clearkeysJson = ''
   customHeadersJson = ''
   customHeadersPlaceholder = '{"Authorization": "Bearer xxx", "Referer": "https://example.com"}'
 
@@ -70,6 +73,7 @@ export class VideoImportUrlComponent implements OnInit, AfterViewInit, CanCompon
 
   isImportingVideo = false
   customHeadersError = ''
+  clearkeysError = ''
 
   ngOnInit () {
     this.firstStepChannelId = this.userChannels()[0].id
@@ -108,6 +112,10 @@ export class VideoImportUrlComponent implements OnInit, AfterViewInit, CanCompon
     return this.serverService.getHTMLConfig().import.videoChannelSynchronization.enabled
   }
 
+  isHttpImportEnabled () {
+    return this.serverService.getHTMLConfig().import.videos.http.enabled === true
+  }
+
   importVideo () {
     if (this.isImportingVideo) return
 
@@ -130,6 +138,23 @@ export class VideoImportUrlComponent implements OnInit, AfterViewInit, CanCompon
     }
     this.customHeadersError = ''
 
+    let clearkeys: string | undefined
+    if (this.clearkeysJson.trim()) {
+      try {
+        const parsed = JSON.parse(this.clearkeysJson.trim())
+        if (parsed && typeof parsed === 'object') {
+          clearkeys = JSON.stringify(parsed)
+        } else {
+          this.clearkeysError = $localize`Invalid JSON format`
+          return
+        }
+      } catch {
+        this.clearkeysError = $localize`Invalid JSON format`
+        return
+      }
+    }
+    this.clearkeysError = ''
+
     this.isImportingVideo = true
 
     const serverConfig = this.serverService.getHTMLConfig()
@@ -139,7 +164,10 @@ export class VideoImportUrlComponent implements OnInit, AfterViewInit, CanCompon
       channelId: this.firstStepChannelId,
       support: this.userChannels().find(c => c.id === this.firstStepChannelId).support ?? '',
       user: this.authService.getUser(),
-      customHeaders
+      customHeaders,
+      licenseServerUrl: this.licenseServerUrl?.trim() || undefined,
+      drmType: this.drmType?.trim() || undefined,
+      clearkeys
     })
     this.manageController.setConfig({ manageType: 'import-url', serverConfig: this.serverService.getHTMLConfig() })
     this.manageController.setVideoEdit(videoEdit)

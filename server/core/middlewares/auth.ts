@@ -55,6 +55,23 @@ export function authenticateSocket (socket: Socket, next: (err?: any) => void) {
     .catch(err => logger.error('Cannot get access token.', { err }))
 }
 
+const AUTH_COOKIE_NAME = 'peertube_auth'
+
+/**
+ * Injects Authorization header from auth cookie when missing.
+ * Used for watch page reload so the server can authenticate the user for private/internal videos.
+ */
+export function injectAuthFromCookie (req: express.Request, _res: express.Response, next: express.NextFunction) {
+  if (req.header('authorization')) return next()
+
+  const token = req.cookies?.[AUTH_COOKIE_NAME]
+  if (token && typeof token === 'string') {
+    req.headers.authorization = `Bearer ${token}`
+  }
+
+  return next()
+}
+
 export function optionalAuthenticate (req: express.Request, res: express.Response, next: express.NextFunction) {
   if (req.header('authorization')) return authenticate(req, res, next)
 

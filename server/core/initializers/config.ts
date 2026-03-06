@@ -895,6 +895,47 @@ const CONFIG = {
 
         get PROXIES () {
           return config.get<string[]>('import.videos.http.proxies')
+        },
+
+        DRM_DECRYPTION: {
+          get ENABLED () {
+            return config.has('import.videos.http.drm_decryption.enabled')
+              ? config.get<boolean>('import.videos.http.drm_decryption.enabled')
+              : false
+          },
+          get BINARY_PATH () {
+            const releaseUrl = config.has('import.videos.http.drm_decryption.release.url') &&
+              config.get<string>('import.videos.http.drm_decryption.release.url')
+            const name = config.get<string>('import.videos.http.drm_decryption.release.name') ?? 'mp4decrypt'
+            const binDirPath = join(CONFIG.STORAGE.BIN_DIR, name)
+
+            if (releaseUrl) return binDirPath
+            const binaryPath = config.get<string>('import.videos.http.drm_decryption.binary_path')
+            if (binaryPath) return binaryPath
+            return binDirPath
+          },
+          RELEASE: {
+            get URL () {
+              return config.has('import.videos.http.drm_decryption.release.url') &&
+                config.get<string>('import.videos.http.drm_decryption.release.url')
+                ? config.get<string>('import.videos.http.drm_decryption.release.url')
+                : null
+            },
+            get NAME () {
+              return config.get<string>('import.videos.http.drm_decryption.release.name') ?? 'mp4decrypt'
+            }
+          },
+          get ARGS () {
+            return config.has('import.videos.http.drm_decryption.args')
+              ? (config.get<string[]>('import.videos.http.drm_decryption.args') ?? [])
+              : []
+          },
+          get DEFAULT_LICENSE_SERVER_URL () {
+            return config.has('import.videos.http.drm_decryption.default_license_server_url') &&
+              config.get<string>('import.videos.http.drm_decryption.default_license_server_url')
+              ? config.get<string>('import.videos.http.drm_decryption.default_license_server_url')
+              : null
+          }
         }
       },
       TORRENT: {

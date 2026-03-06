@@ -3,6 +3,7 @@ import { HttpStatusCode, VideoPrivacy } from '@peertube/peertube-models'
 import { Memoize } from '@server/helpers/memoize.js'
 import { getVideoRSSFeeds } from '@server/lib/rss.js'
 import { VideoCaptionModel } from '@server/models/video/video-caption.js'
+import { canUserSeeVideoForWatchPage } from '@server/middlewares/validators/shared/videos.js'
 import express from 'express'
 import validator from 'validator'
 import { CONFIG } from '../../../initializers/config.js'
@@ -32,9 +33,18 @@ export class VideoHtml {
     }
 
     // Let Angular application handle errors
-    if (!video || isVideoInPrivateDirectory(video.privacy) || video.VideoBlacklist) {
+    if (!video) {
       res.status(HttpStatusCode.NOT_FOUND_404)
       return html
+    }
+
+    // For private/internal/blacklisted videos, check if authenticated user has access
+    if (isVideoInPrivateDirectory(video.privacy) || video.VideoBlacklist) {
+      const user = res.locals.oauth?.token?.User
+      if (!user || !await canUserSeeVideoForWatchPage({ user, video, req })) {
+        res.status(HttpStatusCode.NOT_FOUND_404)
+        return html
+      }
     }
 
     return this.buildVideoHTML({

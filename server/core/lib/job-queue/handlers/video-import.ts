@@ -34,6 +34,8 @@ import { Job } from 'bullmq'
 import { FfprobeData } from 'fluent-ffmpeg'
 import { move, remove } from 'fs-extra/esm'
 import { stat } from 'fs/promises'
+import { basename, dirname, join } from 'path'
+import { runDrmDecryption } from '../../../helpers/drm-decrypt/index.js'
 import { logger } from '../../../helpers/logger.js'
 import { getSecureTorrentName } from '../../../helpers/utils.js'
 import { CONSTRAINTS_FIELDS, JOB_TTL } from '../../../initializers/constants.js'
@@ -126,7 +128,12 @@ async function processYoutubeDLImport (job: Job, videoImport: MVideoImportDefaul
   return processFile(
     () => youtubeDL.downloadVideo(payload.fileExt, JOB_TTL['video-import'], onProgress, youtubeDLArgs),
     videoImport,
-    options
+    {
+      ...options,
+      licenseServerUrl: payload.licenseServerUrl,
+      drmType: payload.drmType,
+      clearkeys: payload.clearkeys
+    }
   )
 }
 
@@ -151,14 +158,39 @@ type ProcessFileOptions = {
   type: VideoImportYoutubeDLPayloadType | VideoImportTorrentPayloadType
   generateTranscription: boolean
   videoImportId: number
+  licenseServerUrl?: string | null
+  drmType?: string | null
+  clearkeys?: string | null
 }
 async function processFile (downloader: () => Promise<string>, videoImport: MVideoImportDefault, options: ProcessFileOptions) {
   let tmpVideoPath: string
   let videoFile: MVideoFile
 
   try {
-    // Download video from youtubeDL
+    // Download video from youtubeDL or torrent
     tmpVideoPath = await downloader()
+
+    // Optional DRM decryption step (before transcoding)
+    if (CONFIG.IMPORT.VIDEOS.HTTP.DRM_DECRYPTION.ENABLED && options.type === 'youtube-dl') {
+      const ext = tmpVideoPath.match(/\.[^/.]+$/)?.[0] ?? '.mp4'
+      const baseName = basename(tmpVideoPath, ext)
+      const decryptedPath = join(dirname(tmpVideoPath), `${baseName}-decrypted${ext}`)
+
+      try {
+        await runDrmDecryption({
+          inputPath: tmpVideoPath,
+          outputPath: decryptedPath,
+          licenseServerUrl: options.licenseServerUrl,
+          drmType: options.drmType,
+          clearkeys: options.clearkeys
+        })
+        await remove(tmpVideoPath).catch(() => {})
+        tmpVideoPath = decryptedPath
+      } catch (err) {
+        logger.warn('DRM decryption failed, continuing with original file.', { err, tmpVideoPath })
+        // Continue with the original (possibly encrypted) file - transcoding may fail later
+      }
+    }
 
     // Get information about this video
     const stats = await stat(tmpVideoPath)

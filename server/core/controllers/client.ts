@@ -11,7 +11,7 @@ import { constants, promises as fs } from 'fs'
 import { join } from 'path'
 import { STATIC_MAX_AGE } from '../initializers/constants.js'
 import { ClientHtml, sendHTML, serveIndexHTML } from '../lib/html/client-html.js'
-import { asyncMiddleware, buildRateLimiter, embedCSP } from '../middlewares/index.js'
+import { asyncMiddleware, buildRateLimiter, embedCSP, injectAuthFromCookie, optionalAuthenticate } from '../middlewares/index.js'
 
 const clientsRouter = express.Router()
 
@@ -26,7 +26,13 @@ const distPath = join(root(), 'client', 'dist')
 // Do not use a template engine for a so little thing
 clientsRouter.use([ '/w/p/:id', '/videos/watch/playlist/:id' ], clientsRateLimiter, asyncMiddleware(generateWatchPlaylistHtmlPage))
 
-clientsRouter.use([ '/w/:id', '/videos/watch/:id' ], clientsRateLimiter, asyncMiddleware(generateWatchHtmlPage))
+clientsRouter.use(
+  [ '/w/:id', '/videos/watch/:id' ],
+  clientsRateLimiter,
+  injectAuthFromCookie,
+  optionalAuthenticate,
+  asyncMiddleware(generateWatchHtmlPage)
+)
 
 clientsRouter.use([ '/accounts/:handle', '/a/:handle' ], clientsRateLimiter, asyncMiddleware(generateAccountHtmlPage))
 

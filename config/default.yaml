@@ -874,6 +874,28 @@ import:
       # IPv6 is very strongly rate-limited on most sites supported by youtube-dl
       force_ipv4: true
 
+      # Optional DRM decryption step before transcoding (Widevine, FairPlay, etc.)
+      # Runs after yt-dlp downloads, before transcoding. Requires external tools (mp4decrypt, pywidevine, etc.)
+      drm_decryption:
+        enabled: true
+        # Path to pre-installed binary (ignored when release.url is set). Set to null to use storage/bin.
+        binary_path: null
+        # Download binary directly (like youtube_dl_release). When set, binary_path is ignored.
+        release:
+          # Direct download URL or GitHub releases API (e.g. https://api.github.com/repos/.../releases)
+          # Platform-specific examples for Bento4/mp4decrypt:
+          #   * Direct binary: https://github.com/.../releases/latest/download/mp4decrypt
+          #   * GitHub API: https://api.github.com/repos/axiomatic-systems/Bento4/releases
+          url: null
+          # Binary name for GitHub API asset lookup, or filename when using direct URL.
+          # When url and binary_path are both null, looks for this name in storage/bin.
+          name: 'mp4decrypt'
+        # Optional args; placeholders: {input}, {output}, {licenseServerUrl}, {clearkeys}
+        # For Clearkey, {clearkeys} expands to --key kid:k args (from per-import JSON)
+        args: []
+        # Default license server URL (overridden by per-import value if provided)
+        default_license_server_url: null
+
       # By default PeerTube uses HTTP_PROXY and HTTPS_PROXY environment variables
       # But you can specify custom proxies for youtube-dl because remote websites (like YouTube) may block your server IP address
       # PeerTube will randomly select a proxy from the following list

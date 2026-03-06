@@ -265,7 +265,10 @@ class ServerConfigManager {
       import: {
         videos: {
           http: {
-            enabled: CONFIG.IMPORT.VIDEOS.HTTP.ENABLED
+            enabled: CONFIG.IMPORT.VIDEOS.HTTP.ENABLED,
+            drmDecryption: {
+              enabled: CONFIG.IMPORT.VIDEOS.HTTP.DRM_DECRYPTION.ENABLED
+            }
           },
           torrent: {
             enabled: CONFIG.IMPORT.VIDEOS.TORRENT.ENABLED

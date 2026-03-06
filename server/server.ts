@@ -128,6 +128,7 @@ import { Redis } from './core/lib/redis.js'
 import { ActorFollowScheduler } from './core/lib/schedulers/actor-follow-scheduler.js'
 import { RemoveOldViewsScheduler } from './core/lib/schedulers/remove-old-views-scheduler.js'
 import { UpdateVideosScheduler } from './core/lib/schedulers/update-videos-scheduler.js'
+import { DrmDecryptUpdateScheduler } from './core/lib/schedulers/drm-decrypt-update-scheduler.js'
 import { YoutubeDlUpdateScheduler } from './core/lib/schedulers/youtube-dl-update-scheduler.js'
 import { VideosRedundancyScheduler } from './core/lib/schedulers/videos-redundancy-scheduler.js'
 import { RemoveOldHistoryScheduler } from './core/lib/schedulers/remove-old-history-scheduler.js'
@@ -316,6 +317,7 @@ async function startApplication () {
   ActorFollowScheduler.Instance.enable()
   UpdateVideosScheduler.Instance.enable()
   YoutubeDlUpdateScheduler.Instance.enable()
+  DrmDecryptUpdateScheduler.Instance.enable()
   VideosRedundancyScheduler.Instance.enable()
   RemoveOldHistoryScheduler.Instance.enable()
   RemoveOldViewsScheduler.Instance.enable()
