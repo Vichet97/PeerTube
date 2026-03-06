@@ -1,4 +1,5 @@
 import { AccessDeniedError } from '@node-oauth/oauth2-server'
+import { UserRight, UserRightType } from '@peertube/peertube-models'
 import { pick } from '@peertube/peertube-core-utils'
 import { AttributesOnly } from '@peertube/peertube-typescript-utils'
 import { isUserPasswordTooLong } from '@server/helpers/custom-validators/users.js'
@@ -13,6 +14,7 @@ import { logger } from '../../helpers/logger.js'
 import { CONFIG } from '../../initializers/config.js'
 import { OAuthClientModel } from '../../models/oauth/oauth-client.js'
 import { OAuthTokenModel } from '../../models/oauth/oauth-token.js'
+import { UserApiTokenModel } from '../../models/user/user-api-token.js'
 import { UserModel } from '../../models/user/user.js'
 import { findAvailableLocalActorName } from '../local-actor.js'
 import { buildUser, createUserAccountAndChannelAndPlaylist, getByEmailPermissive } from '../user.js'
@@ -53,18 +55,50 @@ async function getAccessToken (bearerToken: string) {
   } else {
     tokenModel = await OAuthTokenModel.getByTokenAndPopulateUser(bearerToken)
 
-    if (tokenModel) TokensCache.Instance.setToken(tokenModel)
+    if (tokenModel) {
+      TokensCache.Instance.setToken(tokenModel)
+    } else {
+      const apiTokenModel = await UserApiTokenModel.getByToken(bearerToken)
+      if (apiTokenModel) {
+        tokenModel = buildApiTokenAsOAuthToken(bearerToken, apiTokenModel)
+        // Do not cache API tokens so revocation takes effect immediately
+      }
+    }
   }
 
   if (!tokenModel) return undefined
 
-  if (tokenModel.User.pluginAuth) {
+  if (tokenModel.User?.pluginAuth) {
     const valid = await PluginManager.Instance.isTokenValid(tokenModel, 'access')
 
     if (valid !== true) return undefined
   }
 
   return tokenModel
+}
+
+function buildApiTokenAsOAuthToken (bearerToken: string, apiToken: Awaited<ReturnType<typeof UserApiTokenModel.getByToken>>): MOAuthTokenUser | undefined {
+  if (!apiToken) return undefined
+
+  const { User, scopes } = apiToken
+
+  if (!User) return undefined
+  if (User.blocked) return undefined
+  if (apiToken.expiresAt && new Date(apiToken.expiresAt) < new Date()) return undefined
+
+  const scopedUser = Object.create(User)
+  scopedUser.hasRight = function (right: UserRightType) {
+    return User.hasRight(right) && (scopes.includes(UserRight.ALL) || scopes.includes(right))
+  }
+
+  void UserApiTokenModel.updateLastUsed(apiToken.id)
+
+  return {
+    accessToken: bearerToken,
+    userId: User.id,
+    User: scopedUser,
+    user: scopedUser
+  } as MOAuthTokenUser
 }
 
 function getClient (clientId: string, clientSecret: string) {

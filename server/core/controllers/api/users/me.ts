@@ -46,6 +46,7 @@ import {
   videosSortValidator,
   usersNewFeatureInfoReadValidator
 } from '../../../middlewares/validators/index.js'
+import { apiTokensRouter } from './api-tokens.js'
 import { AccountVideoRateModel } from '../../../models/account/account-video-rate.js'
 import { AccountModel } from '../../../models/account/account.js'
 import { UserModel } from '../../../models/user/user.js'
@@ -132,6 +133,8 @@ meRouter.post(
   usersNewFeatureInfoReadValidator,
   asyncMiddleware(usersNewFeatureInfoRead)
 )
+
+meRouter.use('/me', apiTokensRouter)
 
 // ---------------------------------------------------------------------------
 

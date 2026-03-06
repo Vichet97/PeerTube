@@ -1,4 +1,5 @@
 export * from './user.js'
+export * from './user-api-token.js'
 export * from './user-export.js'
 export * from './user-import.js'
 export * from './user-notification.js'

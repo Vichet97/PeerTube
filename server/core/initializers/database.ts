@@ -11,6 +11,7 @@ import { RunnerRegistrationTokenModel } from '@server/models/runner/runner-regis
 import { RunnerModel } from '@server/models/runner/runner.js'
 import { TrackerModel } from '@server/models/server/tracker.js'
 import { VideoTrackerModel } from '@server/models/server/video-tracker.js'
+import { UserApiTokenModel } from '@server/models/user/user-api-token.js'
 import { UserExportModel } from '@server/models/user/user-export.js'
 import { UserImportModel } from '@server/models/user/user-import.js'
 import { UserNotificationModel } from '@server/models/user/user-notification.js'
@@ -202,6 +203,7 @@ export async function initDatabaseModels (silent: boolean) {
     RunnerModel,
     RunnerJobModel,
     StoryboardModel,
+    UserApiTokenModel,
     UserExportModel,
     VideoAutomaticTagModel,
     CommentAutomaticTagModel,

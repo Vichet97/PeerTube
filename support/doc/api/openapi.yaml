@@ -2603,6 +2603,74 @@ paths:
         '204':
           description: successful operation
 
+  /api/v1/users/me/api-tokens:
+    get:
+      tags:
+        - My User
+      summary: List my API tokens
+      description: List all API tokens for the authenticated user. Raw tokens are never returned.
+      security:
+        - OAuth2:
+          - user
+      responses:
+        '200':
+          description: successful operation
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/UserApiToken'
+                  total:
+                    type: integer
+    post:
+      tags:
+        - My User
+      summary: Create an API token
+      description: Create a new API token. The raw token is returned only once in the response.
+      security:
+        - OAuth2:
+          - user
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserApiTokenCreate'
+      responses:
+        '200':
+          description: successful operation
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/UserApiToken'
+                  - type: object
+                    properties:
+                      token:
+                        type: string
+                        description: The raw token (shown only once)
+
+  '/api/v1/users/me/api-tokens/{id}':
+    delete:
+      tags:
+        - My User
+      summary: Revoke an API token
+      security:
+        - OAuth2:
+          - user
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '204':
+          description: successful operation
+
   /api/v1/users/me/history/videos:
     get:
       summary: List watched videos history
@@ -12297,6 +12365,59 @@ components:
           type: string
           format: date-time
           description: Date when the stream is scheduled to air at
+
+    UserApiTokenCreate:
+      type: object
+      required:
+        - name
+        - scopes
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        description:
+          type: string
+          maxLength: 500
+        expiresAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: ISO date when the token expires, or null for no expiration
+        scopes:
+          type: array
+          items:
+            type: integer
+          description: Array of UserRight enum values the token will have
+
+    UserApiToken:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        expiresAt:
+          type: string
+          format: date-time
+          nullable: true
+        scopes:
+          type: array
+          items:
+            type: integer
+        createdAt:
+          type: string
+          format: date-time
+        lastUsedAt:
+          type: string
+          format: date-time
+          nullable: true
+        maskedToken:
+          type: string
+          description: Masked token for display (e.g. peertube_api_****...xyz1)
 
     TokenSession:
       properties:

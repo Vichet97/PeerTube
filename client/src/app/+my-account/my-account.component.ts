@@ -44,6 +44,11 @@ export class MyAccountComponent implements OnInit {
       },
 
       {
+        label: $localize`API tokens`,
+        routerLink: '/my-account/api-tokens'
+      },
+
+      {
         label: $localize`Moderation`,
         routerLink: '/my-account/blocklist/accounts',
         children: [

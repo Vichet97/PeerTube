@@ -9,6 +9,7 @@ import { TwoFactorService } from '@app/shared/shared-users/two-factor.service'
 import { VideoCommentService } from '@app/shared/shared-video-comment/video-comment.service'
 import { CanDeactivateGuard, LoginGuard } from '../core'
 import { MyAccountAbusesListComponent } from './my-account-abuses/my-account-abuses-list.component'
+import { MyAccountApiTokensComponent } from './my-account-api-tokens/my-account-api-tokens.component'
 import { MyAccountApplicationsComponent } from './my-account-applications/my-account-applications.component'
 import { MyAccountBlocklistComponent } from './my-account-blocklist/my-account-blocklist.component'
 import { MyAccountServerBlocklistComponent } from './my-account-blocklist/my-account-server-blocklist.component'
@@ -155,6 +156,15 @@ export default [
         data: {
           meta: {
             title: $localize`Applications`
+          }
+        }
+      },
+      {
+        path: 'api-tokens',
+        component: MyAccountApiTokensComponent,
+        data: {
+          meta: {
+            title: $localize`API tokens`
           }
         }
       },

@@ -255,6 +255,8 @@ declare module 'express' {
 
       tokenSession?: MOAuthToken
 
+      apiToken?: import('@server/models/user/user-api-token.js').UserApiTokenModel
+
       channelCollaborator?: MChannelCollaboratorAccount
     }
   }

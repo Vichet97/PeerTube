@@ -1,5 +1,6 @@
 export * from './registration/index.js'
 export * from './two-factor-enable-result.model.js'
+export * from './user-api-token.model.js'
 export * from './user-create-result.model.js'
 export * from './user-create.model.js'
 export * from './user-flag.model.js'

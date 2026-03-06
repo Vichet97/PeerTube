@@ -1,0 +1,128 @@
+<h1 class="visually-hidden" i18n>API Tokens</h1>
+
+<div class="pt-two-cols">
+  <div class="title-col">
+    <h2 i18n>API TOKENS</h2>
+
+    <div i18n class="api-tokens-description">
+      Create long-lived API tokens to authenticate with external applications. Each token can have custom permissions.
+    </div>
+  </div>
+
+  <div class="content-col">
+    @if (!showCreateForm()) {
+      <button class="peertube-button primary-button mb-3" (click)="toggleCreateForm()" i18n>Create token</button>
+    } @else {
+      <div class="create-form mb-4 p-3 border rounded">
+        <h3 i18n class="mb-3">Create new token</h3>
+
+        <div class="form-group">
+          <label i18n for="token-name">Name</label>
+          <input id="token-name" type="text" class="form-control" [(ngModel)]="name" placeholder="e.g. CI/CD, Mobile app" maxlength="100">
+        </div>
+
+        <div class="form-group">
+          <label i18n for="token-description">Description (optional)</label>
+          <textarea id="token-description" class="form-control" [(ngModel)]="description" rows="2" maxlength="500"></textarea>
+        </div>
+
+        <div class="form-group">
+          <label class="d-flex align-items-center gap-2">
+            <input type="checkbox" [(ngModel)]="noExpiration" (ngModelChange)="noExpiration && (expiresAt = null)">
+            <span i18n>No expiration</span>
+          </label>
+          @if (!noExpiration) {
+            <input type="datetime-local" class="form-control mt-2" [(ngModel)]="expiresAt" [min]="today">
+          }
+        </div>
+
+        <div class="form-group">
+          <label i18n>Permissions</label>
+          <div class="scope-options">
+            @if (hasFullAccessOption) {
+              <label class="scope-option">
+                <input type="checkbox" [checked]="hasScope(0)" (change)="toggleFullAccess()">
+                <span i18n>Full access</span>
+              </label>
+            }
+            @for (right of availableRights(); track right.value) {
+              @if (right.value !== 0) {
+                <label class="scope-option">
+                  <input type="checkbox" [checked]="hasScope(right.value)" (change)="toggleScope(right.value)">
+                  <span>{{ right.label }}</span>
+                </label>
+              }
+            }
+          </div>
+        </div>
+
+        <div class="d-flex gap-2 mt-3">
+          <button class="peertube-button primary-button" (click)="createToken()" [disabled]="loading()" i18n>Create</button>
+          <button class="peertube-button secondary-button" (click)="toggleCreateForm()" i18n>Cancel</button>
+        </div>
+      </div>
+    }
+
+    <div class="root tokens-list">
+      @if (loading() && tokens().length === 0) {
+        <p class="text-muted" i18n>Loading...</p>
+      } @else if (tokens().length === 0) {
+        <p class="text-muted" i18n>No API tokens yet</p>
+      } @else {
+        @for (token of tokens(); track token.id) {
+          <div class="token-card">
+            <div class="token-card-header">
+              <div class="token-name">{{ token.name }}</div>
+              <button class="peertube-button secondary-button" (click)="revokeToken(token)" i18n>Revoke</button>
+            </div>
+            @if (token.description) {
+              <div class="token-description">{{ token.description }}</div>
+            }
+            <div class="token-meta">
+              <span class="token-meta-item">
+                <span class="token-meta-label" i18n>Permissions</span>
+                <span class="token-meta-value">{{ getScopeLabels(token.scopes) }}</span>
+              </span>
+              <span class="token-meta-item">
+                <span class="token-meta-label" i18n>Expires</span>
+                <span class="token-meta-value">{{ token.expiresAt ? (token.expiresAt | date: 'short') : neverExpirationLabel }}</span>
+              </span>
+              <span class="token-meta-item">
+                <span class="token-meta-label" i18n>Last used</span>
+                <span class="token-meta-value">{{ token.lastUsedAt ? (token.lastUsedAt | date: 'short') : '-' }}</span>
+              </span>
+            </div>
+          </div>
+        }
+      }
+    </div>
+  </div>
+</div>
+
+<ng-template #tokenCreatedModal>
+  <div class="modal-header">
+    <h4 i18n class="modal-title">Token created</h4>
+    <button class="border-0 p-0" title="Close this modal" i18n-title (click)="closeCreatedTokenModal()">
+      <my-global-icon iconName="cross"></my-global-icon>
+    </button>
+  </div>
+  <div class="modal-body">
+    <p i18n class="text-warning mb-3">Copy your token now. You won't be able to see it again.</p>
+    <div class="form-group">
+      <label i18n>Your token</label>
+      <div class="d-flex gap-2 align-items-center">
+        @if (createdToken(); as token) {
+          <my-input-text
+            inputId="created-token"
+            [value]="token.token || ''"
+            [withToggle]="false"
+            [withCopy]="true"
+            [readonly]="true"
+            [show]="true"
+          ></my-input-text>
+        }
+      </div>
+    </div>
+    <button class="peertube-button primary-button" (click)="closeCreatedTokenModal()" i18n>Done</button>
+  </div>
+</ng-template>
