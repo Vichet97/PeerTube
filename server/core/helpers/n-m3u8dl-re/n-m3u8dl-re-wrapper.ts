@@ -70,7 +70,8 @@ export async function downloadWithNm3u8dlRe (options: {
     '-sa', 'for=best',
     '--mux-after-done', 'format=mp4',
     '--save-name', saveName,
-    '--save-dir', workDir
+    '--save-dir', workDir,
+    '--no-ansi-color'
   ]
 
   for (const keyArg of keyPairs) {
@@ -91,14 +92,30 @@ export async function downloadWithNm3u8dlRe (options: {
   })
 
   if (onProgress) {
-    subprocess.stderr?.on('data', (chunk: Buffer) => {
+    let lastReportedPercent = -1
+    const progressRegex = /(\d+(?:\.\d+)?)\s*%/
+    const parseProgressChunk = (chunk: Buffer) => {
       const str = chunk.toString()
-      const match = str.match(/(\d+(?:\.\d+)?)\s*%/)
-      if (match) {
-        const percent = parseFloat(match[1])
-        if (!isNaN(percent)) onProgress(Math.min(100, percent))
+      const lines = str.split(/\r?\n|\r/)
+      for (const line of lines) {
+        const match = line.match(progressRegex)
+        if (match) {
+          const percent = Math.min(100, Math.floor(parseFloat(match[1])))
+          if (percent > lastReportedPercent && percent <= 100) {
+            lastReportedPercent = percent
+            onProgress(percent)
+          }
+        }
       }
-    })
+    }
+    const stdoutStream = subprocess.stdout ?? subprocess.stdio?.[1]
+    const stderrStream = subprocess.stderr ?? subprocess.stdio?.[2]
+    if (stdoutStream && typeof stdoutStream.on === 'function') {
+      stdoutStream.on('data', parseProgressChunk)
+    }
+    if (stderrStream && typeof stderrStream.on === 'function') {
+      stderrStream.on('data', parseProgressChunk)
+    }
   }
 
   const result = await subprocess
