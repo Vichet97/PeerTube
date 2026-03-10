@@ -261,7 +261,7 @@ log:
   rotation:
     enabled: true # Enabled by default, if disabled make sure that 'storage.logs' is pointing to a folder handled by logrotate
     max_file_size: 12MB
-    max_files: 20
+    max_files: 7 # ~1 week retention
 
   anonymize_ip: false
 
@@ -634,9 +634,9 @@ transcoding:
     enabled: false
 
   # Amount of threads used by ffmpeg for 1 local transcoding job
-  threads: 1
+  threads: 10
   # Amount of local transcoding jobs to execute in parallel
-  concurrency: 1
+  concurrency: 10
 
   # Choose the local transcoding profile
   # New profiles can be added by plugins
@@ -648,11 +648,11 @@ transcoding:
     144p: false
     240p: false
     360p: false
-    480p: false
-    720p: false
-    1080p: false
-    1440p: false
-    2160p: false
+    480p: true
+    720p: true
+    1080p: true
+    1440p: true
+    2160p: true
 
   # Transcode and keep original resolution, even if it's above your maximum enabled resolution
   always_transcode_original_resolution: true
@@ -688,7 +688,7 @@ transcoding:
     split_audio_and_video: false
 
 live:
-  enabled: false
+  enabled: true
 
   # Limit lives duration
   # -1 == unlimited
@@ -756,7 +756,7 @@ live:
       enabled: false
 
     # Amount of threads used by ffmpeg per live when using local transcoding
-    threads: 2
+    threads: 10
 
     # Choose the local transcoding profile
     # New profiles can be added by plugins
@@ -768,11 +768,11 @@ live:
       144p: false
       240p: false
       360p: false
-      480p: false
-      720p: false
-      1080p: false
-      1440p: false
-      2160p: false
+      480p: true
+      720p: true
+      1080p: true
+      1440p: true
+      2160p: true
 
     # Also transcode original resolution, even if it's above your maximum enabled resolution
     always_transcode_original_resolution: true
@@ -795,7 +795,7 @@ video_studio:
 
 video_transcription:
   # Enable automatic transcription of videos
-  enabled: false
+  enabled: true
 
   # Choose engine for local transcription
   # Supported: 'openai-whisper' or 'whisper-ctranslate2'
@@ -833,7 +833,7 @@ import:
   # Add ability for your users to import remote videos (from YouTube, torrent...)
   videos:
     # Amount of import jobs to execute in parallel
-    concurrency: 1
+    concurrency: 10
 
     # Set a custom video import timeout to not block import queue
     timeout: '2 hours'

@@ -11,6 +11,11 @@ services:
   postgres:
     image: postgres:17-alpine
     container_name: peertube-postgres
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "7"
     environment:
       POSTGRES_USER: peertube
       POSTGRES_PASSWORD: peertube
@@ -29,6 +34,11 @@ services:
   redis:
     image: redis:8-alpine
     container_name: peertube-redis
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "7"
     ports:
       - "6379:6379"
     volumes:
@@ -38,7 +48,48 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+  rustfs:
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "7"
+    security_opt:
+      - "no-new-privileges:true"
+    image: rustfs/rustfs:latest
+    container_name: rustfs-server
+    ports:
+      - "9000:9000" # S3 API port
+      - "9001:9001" # Console port
+    environment:
+      - RUSTFS_VOLUMES=/data/rustfs{0..3} # Define 4 storage volumes
+      - RUSTFS_ADDRESS=0.0.0.0:9000
+      - RUSTFS_CONSOLE_ADDRESS=0.0.0.0:9001
+      - RUSTFS_CONSOLE_ENABLE=true
+      - RUSTFS_CORS_ALLOWED_ORIGINS=*
+      - RUSTFS_CONSOLE_CORS_ALLOWED_ORIGINS=*
+      - RUSTFS_ACCESS_KEY=peertube
+      - RUSTFS_SECRET_KEY=016997791aA
+      - RUSTFS_OBS_LOGGER_LEVEL=info
+      # - RUSTFS_TLS_PATH=/opt/tls
+      # - RUSTFS_OBS_ENDPOINT=http://otel-collector:4318
+    volumes:
+      - ./storage/s3/rustfs:/data
+      - peertube_rustfs_log:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "sh", "-c",
+          "curl -f http://127.0.0.1:9000/health && curl -f http://127.0.0.1:9001/rustfs/console/health"
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
 volumes:
   peertube_postgres_data:
   peertube_redis_data:
+  peertube_rustfs_log:

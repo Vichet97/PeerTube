@@ -1,4 +1,5 @@
 export * from './activitypub/index.js'
+export * from './api-docs.js'
 export * from './api/index.js'
 export * from './sitemap.js'
 export * from './client.js'

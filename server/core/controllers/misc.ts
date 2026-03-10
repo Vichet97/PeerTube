@@ -1,6 +1,7 @@
 import cors from 'cors'
 import express from 'express'
 import { HttpNodeinfoDiasporaSoftwareNsSchema20, HttpStatusCode } from '@peertube/peertube-models'
+import { apiDocsRouter } from './api-docs.js'
 import { CONFIG, isEmailEnabled } from '@server/initializers/config.js'
 import { serveIndexHTML } from '@server/lib/html/client-html.js'
 import { ServerConfigManager } from '@server/lib/server-config-manager.js'
@@ -15,6 +16,7 @@ import { VideoModel } from '../models/video/video.js'
 const miscRouter = express.Router()
 
 miscRouter.use(cors())
+miscRouter.use('/api-docs', apiDocsRouter)
 
 miscRouter.use('/nodeinfo/:version.json', apiRateLimiter, cacheRoute(ROUTE_CACHE_LIFETIME.NODEINFO), asyncMiddleware(generateNodeinfo))
 

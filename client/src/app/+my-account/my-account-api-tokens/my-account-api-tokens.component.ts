@@ -5,8 +5,8 @@ import { AuthService, ConfirmService, Notifier } from '@app/core'
 import { USER_RIGHT_LABELS } from '@peertube/peertube-core-utils'
 import { UserRight, UserRightType, UserApiToken, UserApiTokenCreate } from '@peertube/peertube-models'
 import { NgbModal, NgbModalRef } from '@ng-bootstrap/ng-bootstrap'
-import { InputTextComponent } from '@app/shared/shared-forms/input-text.component'
 import { GlobalIconComponent } from '@app/shared/shared-icons/global-icon.component'
+import { CopyButtonComponent } from '@app/shared/shared-main/buttons/copy-button.component'
 import { ApiTokenService, UserApiTokenWithSecret } from '@app/shared/shared-users/api-token.service'
 
 @Component({
@@ -16,8 +16,8 @@ import { ApiTokenService, UserApiTokenWithSecret } from '@app/shared/shared-user
   imports: [
     CommonModule,
     FormsModule,
-    InputTextComponent,
-    GlobalIconComponent
+    GlobalIconComponent,
+    CopyButtonComponent
   ],
   providers: [ ApiTokenService ]
 })

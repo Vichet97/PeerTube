@@ -93,11 +93,17 @@ function buildApiTokenAsOAuthToken (bearerToken: string, apiToken: Awaited<Retur
 
   void UserApiTokenModel.updateLastUsed(apiToken.id)
 
+  // oauth2-server requires accessTokenExpiresAt to be a Date instance
+  const accessTokenExpiresAt = apiToken.expiresAt
+    ? new Date(apiToken.expiresAt)
+    : new Date('999999-01-01') // Far future for non-expiring API tokens
+
   return {
     accessToken: bearerToken,
     userId: User.id,
     User: scopedUser,
-    user: scopedUser
+    user: scopedUser,
+    accessTokenExpiresAt
   } as MOAuthTokenUser
 }
 

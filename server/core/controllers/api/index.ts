@@ -1,5 +1,7 @@
 import { HttpStatusCode } from '@peertube/peertube-models'
 import { logger } from '@server/helpers/logger.js'
+import { getOpenAPISpec } from '@server/controllers/api-docs.js'
+import { asyncMiddleware } from '@server/middlewares/index.js'
 import cors from 'cors'
 import express from 'express'
 import { abuseRouter } from './abuse.js'
@@ -57,6 +59,11 @@ apiRouter.use('/runners', runnersRouter)
 apiRouter.use('/watched-words', watchedWordsRouter)
 apiRouter.use('/automatic-tags', automaticTagRouter)
 apiRouter.use('/client-config', clientConfigRouter)
+
+apiRouter.get('/openapi.json', asyncMiddleware(async (_req, res) => {
+  const spec = await getOpenAPISpec()
+  return res.json(spec).end()
+}))
 
 apiRouter.use('/ping', pong)
 apiRouter.use('/*', badRequest)

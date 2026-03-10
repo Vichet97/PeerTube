@@ -7,6 +7,10 @@
     <div i18n class="api-tokens-description">
       Create long-lived API tokens to authenticate with external applications. Each token can have custom permissions.
     </div>
+    <a href="/api-docs" target="_blank" rel="noopener noreferrer" class="peertube-button secondary-button mt-2">
+      <span i18n>Open API documentation</span>
+      <my-global-icon iconName="external-link" class="ms-1"></my-global-icon>
+    </a>
   </div>
 
   <div class="content-col">
@@ -107,19 +111,27 @@
     </button>
   </div>
   <div class="modal-body">
-    <p i18n class="text-warning mb-3">Copy your token now. You won't be able to see it again.</p>
+    <p i18n class="mb-3">Your token is shown below. Copy and store it securely. You won't be able to see it again after closing.</p>
     <div class="form-group">
       <label i18n>Your token</label>
-      <div class="d-flex gap-2 align-items-center">
+      <div class="d-flex gap-2 align-items-center flex-wrap">
         @if (createdToken(); as token) {
-          <my-input-text
-            inputId="created-token"
-            [value]="token.token || ''"
-            [withToggle]="false"
-            [withCopy]="true"
-            [readonly]="true"
-            [show]="true"
-          ></my-input-text>
+          <div class="flex-grow-1 d-flex gap-2 align-items-center min-width-0">
+            <input
+              type="text"
+              class="form-control font-monospace"
+              [value]="token.token || ''"
+              readonly
+              id="created-token-display"
+              (click)="$event.target.select()"
+            >
+            <my-copy-button
+              [value]="token.token || ''"
+              i18n-notification
+              notification="Copied"
+              class="flex-shrink-0"
+            >COPY</my-copy-button>
+          </div>
         }
       </div>
     </div>
