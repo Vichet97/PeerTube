@@ -210,7 +210,7 @@ object_storage:
   streaming_playlists:
     # Bucket name created on your object storage provider
     # PeerTube will access it via {bucket_name}.example.com
-    bucket_name: 'peertube'
+    bucket_name: 'vod'
 
     # Allows setting all buckets to the same value but with a different prefix
     prefix: 'streaming-playlists/'
@@ -226,49 +226,49 @@ object_storage:
     store_live_streams: false
 
   web_videos:
-    bucket_name: 'peertube'
+    bucket_name: 'vod'
     prefix: 'web-videos/'
     base_url: ''
 
   user_exports:
-    bucket_name: 'peertube'
+    bucket_name: 'vod'
     prefix: 'user-exports/'
     base_url: ''
 
   # Same settings but for original video files
   original_video_files:
-    bucket_name: 'peertube'
+    bucket_name: 'vod'
     prefix: 'original-video-files/'
     base_url: ''
 
   # Video captions
   captions:
-    bucket_name: 'peertube'
+    bucket_name: 'vod'
     prefix: 'captions/'
     base_url: ''
 
   previews:
-    bucket_name: 'peertube'
+    bucket_name: 'vod'
     prefix: 'previews/'
     base_url: '' 
   
   redundancy:
-    bucket_name: 'peertube'
+    bucket_name: 'vod'
     prefix: 'redundancy/'
     base_url: '' 
 
   storyboards:
-    bucket_name: 'peertube'
+    bucket_name: 'vod'
     prefix: 'storyboards/'
     base_url: '' 
 
   thumbnails:
-    bucket_name: 'peertube'
+    bucket_name: 'vod'
     prefix: 'thumbnails/'
     base_url: '' 
 
   torrents:
-    bucket_name: 'peertube'
+    bucket_name: 'vod'
     prefix: 'torrents/'
     base_url: '' 
 
