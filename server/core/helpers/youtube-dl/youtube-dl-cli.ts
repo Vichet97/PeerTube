@@ -114,7 +114,7 @@ export class YoutubeDLCLI {
       await writeFile(youtubeDLBinaryPath, gotResult.body)
 
       if (!CONFIG.IMPORT.VIDEOS.HTTP.YOUTUBE_DL_RELEASE.PYTHON_PATH) {
-        await chmod(youtubeDLBinaryPath, '744')
+        await chmod(youtubeDLBinaryPath, '755')
       }
 
       logger.info('youtube-dl updated %s.', youtubeDLBinaryPath, lTags())

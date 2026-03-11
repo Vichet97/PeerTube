@@ -93,7 +93,7 @@ async function downloadBinary (assetName: string, targetPath: string) {
 
   await ensureDir(dirname(targetPath))
   await writeFile(targetPath, gotResult.body)
-  if (process.platform !== 'win32') await chmod(targetPath, 0o744)
+  if (process.platform !== 'win32') await chmod(targetPath, 755)
 }
 
 export async function ensureFFmpegBinaries () {
