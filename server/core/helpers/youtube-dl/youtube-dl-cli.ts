@@ -1,11 +1,16 @@
 import { randomInt } from '@peertube/peertube-core-utils'
 import { VideoResolution, VideoResolutionType } from '@peertube/peertube-models'
 import { CONFIG } from '@server/initializers/config.js'
+import {
+  buildPlatformBinaryPath,
+  getBinPlatformFolder,
+  resolvePlatformBinaryPathWithLegacyFallback
+} from '@server/helpers/binaries/platform-binaries.js'
 import { execa, Options as ExecaNodeOptions } from 'execa'
 import { ensureDir, pathExists } from 'fs-extra/esm'
 import { chmod, writeFile } from 'fs/promises'
 import { OptionsOfBufferResponseBody } from 'got'
-import { dirname, join } from 'path'
+import { dirname } from 'path'
 import { logger, loggerTagsFactory } from '../logger.js'
 import { getProxy, isProxyEnabled } from '../proxy.js'
 import { isBinaryResponse, unsafeSSRFGot } from '../requests.js'
@@ -23,10 +28,43 @@ export function customHeadersToYoutubeDLArgs (customHeaders: Record<string, stri
   })
 }
 
-const youtubeDLBinaryPath = join(CONFIG.STORAGE.BIN_DIR, CONFIG.IMPORT.VIDEOS.HTTP.YOUTUBE_DL_RELEASE.NAME)
+function getYoutubeDLAssetName () {
+  const releaseName = CONFIG.IMPORT.VIDEOS.HTTP.YOUTUBE_DL_RELEASE.NAME
+  if (releaseName !== 'yt-dlp') return releaseName
+
+  const platform = getBinPlatformFolder()
+  if (platform === 'windows') return process.arch === 'arm64' ? 'yt-dlp_arm64.exe' : 'yt-dlp.exe'
+  if (platform === 'linux-arm64') return 'yt-dlp_linux_aarch64'
+  if (platform === 'linux-amd64') return 'yt-dlp_linux'
+
+  return 'yt-dlp_macos'
+}
+
+function getYoutubeDLBinaryName () {
+  const releaseName = CONFIG.IMPORT.VIDEOS.HTTP.YOUTUBE_DL_RELEASE.NAME
+  if (releaseName !== 'yt-dlp') return releaseName
+
+  return process.platform === 'win32'
+    ? 'yt-dlp.exe'
+    : 'yt-dlp'
+}
+
+function getYoutubeDLBinaryPath () {
+  const binaryName = getYoutubeDLBinaryName()
+
+  return resolvePlatformBinaryPathWithLegacyFallback(CONFIG.STORAGE.BIN_DIR, binaryName, [
+    CONFIG.IMPORT.VIDEOS.HTTP.YOUTUBE_DL_RELEASE.NAME
+  ])
+}
+
+function getYoutubeDLDownloadPath () {
+  return buildPlatformBinaryPath(CONFIG.STORAGE.BIN_DIR, getYoutubeDLBinaryName())
+}
 
 export class YoutubeDLCLI {
   static async safeGet () {
+    const youtubeDLBinaryPath = getYoutubeDLBinaryPath()
+
     if (!await pathExists(youtubeDLBinaryPath)) {
       await ensureDir(dirname(youtubeDLBinaryPath))
 
@@ -60,9 +98,9 @@ export class YoutubeDLCLI {
         const latest = json.filter(release => release.prerelease === false)[0]
         if (!latest) throw new Error('Cannot find latest release')
 
-        const releaseName = CONFIG.IMPORT.VIDEOS.HTTP.YOUTUBE_DL_RELEASE.NAME
-        const releaseAsset = latest.assets.find(a => a.name === releaseName)
-        if (!releaseAsset) throw new Error(`Cannot find appropriate release with name ${releaseName} in release assets`)
+        const releaseAssetName = getYoutubeDLAssetName()
+        const releaseAsset = latest.assets.find(a => a.name === releaseAssetName)
+        if (!releaseAsset) throw new Error(`Cannot find appropriate release with name ${releaseAssetName} in release assets`)
 
         gotResult = await unsafeSSRFGot(releaseAsset.browser_download_url, gotOptions)
       }
@@ -71,6 +109,8 @@ export class YoutubeDLCLI {
         throw new Error('Not a binary response')
       }
 
+      const youtubeDLBinaryPath = getYoutubeDLDownloadPath()
+      await ensureDir(dirname(youtubeDLBinaryPath))
       await writeFile(youtubeDLBinaryPath, gotResult.body)
 
       if (!CONFIG.IMPORT.VIDEOS.HTTP.YOUTUBE_DL_RELEASE.PYTHON_PATH) {
@@ -239,7 +279,8 @@ export class YoutubeDLCLI {
     completeArgs = this.wrapWithIPOptions(completeArgs)
     completeArgs = this.wrapWithFFmpegOptions(completeArgs)
 
-    const subProcessBinary = CONFIG.IMPORT.VIDEOS.HTTP.YOUTUBE_DL_RELEASE.PYTHON_PATH || youtubeDLBinaryPath
+    const youtubeDLBinaryPath = getYoutubeDLBinaryPath()
+    const subProcessBinary = this.getSubProcessBinary(youtubeDLBinaryPath)
     const subProcessArgs = [ ...completeArgs, url ]
     if (subProcessBinary !== youtubeDLBinaryPath) subProcessArgs.unshift(youtubeDLBinaryPath)
 
@@ -272,7 +313,8 @@ export class YoutubeDLCLI {
     completeArgs = this.wrapWithIPOptions(completeArgs)
     completeArgs = this.wrapWithFFmpegOptions(completeArgs)
 
-    const subProcessBinary = CONFIG.IMPORT.VIDEOS.HTTP.YOUTUBE_DL_RELEASE.PYTHON_PATH || youtubeDLBinaryPath
+    const youtubeDLBinaryPath = getYoutubeDLBinaryPath()
+    const subProcessBinary = this.getSubProcessBinary(youtubeDLBinaryPath)
     const subProcessArgs = [ ...completeArgs, url ]
     if (subProcessBinary !== youtubeDLBinaryPath) subProcessArgs.unshift(youtubeDLBinaryPath)
 
@@ -361,5 +403,15 @@ export class YoutubeDLCLI {
     }
 
     return args
+  }
+
+  private getSubProcessBinary (youtubeDLBinaryPath: string) {
+    const pythonPath = CONFIG.IMPORT.VIDEOS.HTTP.YOUTUBE_DL_RELEASE.PYTHON_PATH
+    if (!pythonPath) return youtubeDLBinaryPath
+
+    // Standalone yt-dlp binaries are native executables and should not be launched via python.
+    if (CONFIG.IMPORT.VIDEOS.HTTP.YOUTUBE_DL_RELEASE.NAME === 'yt-dlp') return youtubeDLBinaryPath
+
+    return pythonPath
   }
 }

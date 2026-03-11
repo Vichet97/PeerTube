@@ -61,7 +61,7 @@ if [ -z ${1+x} ] || ([ "$1" != "--light" ] && [ "$1" != "--analyze-bundle" ]); t
         additionalParams="--source-map=true"
     fi
 
-    NODE_OPTIONS=--max_old_space_size=8192 node_modules/.bin/ng build --configuration production --output-path "dist/build" $additionalParams
+    NODE_OPTIONS=--max_old_space_size=8192 npm exec ng -- build --configuration=production --output-path="dist/build" $additionalParams
 
     for entry in "${languages[@]}"; do
         key="${entry%%:*}"
@@ -87,8 +87,8 @@ else
         export ANALYZE_BUNDLE=true
     fi
 
-    NODE_OPTIONS=--max_old_space_size=8192 node_modules/.bin/ng build --localize=false --output-path "dist/$defaultLanguage/" \
-                                                              --configuration production --stats-json $additionalParams
+    NODE_OPTIONS=--max_old_space_size=8192 npm exec ng -- build --localize=false --output-path="dist/$defaultLanguage/" \
+                                                              --configuration=production --stats-json $additionalParams
 fi
 
 # Copy runtime locales

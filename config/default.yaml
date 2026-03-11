@@ -14,7 +14,7 @@ webserver:
 # Mainly used to sign JWT tokens and TOTP
 secrets:
   # Generate one using `openssl rand -hex 32`
-  peertube: ''
+  peertube: 'fc4905235fd59c51720a01d8775bdcf46e4ec7fcf85638a6fd9e6e156fb5cc99'
 
 # How long PeerTube should wait to receive the entire request
 http_timeouts:
@@ -177,7 +177,7 @@ object_storage:
   enabled: true # RustFS (S3-compatible) - see docker-compose.yml
 
   # Without protocol, will default to HTTPS
-  endpoint: 'http://127.0.0.1:9000' # RustFS S3 API (localhost)
+  endpoint: 'http://127.0.0.1:9002' # RustFS S3 API (localhost)
 
   region: 'us-east-1'
 
@@ -245,6 +245,31 @@ object_storage:
     bucket_name: 'peertube'
     prefix: 'captions/'
     base_url: ''
+
+  previews:
+    bucket_name: 'peertube'
+    prefix: 'previews/'
+    base_url: '' 
+  
+  redundancy:
+    bucket_name: 'peertube'
+    prefix: 'redundancy/'
+    base_url: '' 
+
+  storyboards:
+    bucket_name: 'peertube'
+    prefix: 'storyboards/'
+    base_url: '' 
+
+  thumbnails:
+    bucket_name: 'peertube'
+    prefix: 'thumbnails/'
+    base_url: '' 
+
+  torrents:
+    bucket_name: 'peertube'
+    prefix: 'torrents/'
+    base_url: '' 
 
 log:
   level: 'info' # 'debug' | 'info' | 'warn' | 'error'

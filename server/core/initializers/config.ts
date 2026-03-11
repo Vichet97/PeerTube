@@ -11,6 +11,10 @@ import {
 } from '@peertube/peertube-models'
 import { buildPath, root } from '@peertube/peertube-node-utils'
 import { TranscriptionEngineName, WhisperBuiltinModelName } from '@peertube/peertube-transcription'
+import {
+  getPlatformExecutableName,
+  resolvePlatformBinaryPathWithLegacyFallback
+} from '@server/helpers/binaries/platform-binaries.js'
 import { decacheModule } from '@server/helpers/decache.js'
 import bytes from 'bytes'
 import { type Config } from 'config'
@@ -903,7 +907,17 @@ const CONFIG = {
               ? config.get<string>('import.videos.http.n_m3u8dl_re.binary_path')
               : null
             if (binaryPath) return binaryPath
-            return join(CONFIG.STORAGE.BIN_DIR, 'N_m3u8DL-RE')
+
+            const binaryName = getPlatformExecutableName('N_m3u8DL-RE')
+            return resolvePlatformBinaryPathWithLegacyFallback(CONFIG.STORAGE.BIN_DIR, binaryName, [ 'N_m3u8DL-RE' ])
+          },
+          RELEASE: {
+            get URL () {
+              return config.has('import.videos.http.n_m3u8dl_re.release.url') &&
+                config.get<string>('import.videos.http.n_m3u8dl_re.release.url')
+                ? config.get<string>('import.videos.http.n_m3u8dl_re.release.url')
+                : null
+            }
           }
         },
 
@@ -916,13 +930,16 @@ const CONFIG = {
           get BINARY_PATH () {
             const releaseUrl = config.has('import.videos.http.drm_decryption.release.url') &&
               config.get<string>('import.videos.http.drm_decryption.release.url')
-            const name = config.get<string>('import.videos.http.drm_decryption.release.name') ?? 'mp4decrypt'
-            const binDirPath = join(CONFIG.STORAGE.BIN_DIR, name)
+            const releaseName = config.get<string>('import.videos.http.drm_decryption.release.name') ?? 'mp4decrypt'
+            const binaryName = getPlatformExecutableName(releaseName)
 
-            if (releaseUrl) return binDirPath
+            if (releaseUrl) {
+              return resolvePlatformBinaryPathWithLegacyFallback(CONFIG.STORAGE.BIN_DIR, binaryName, [ releaseName ])
+            }
             const binaryPath = config.get<string>('import.videos.http.drm_decryption.binary_path')
             if (binaryPath) return binaryPath
-            return binDirPath
+
+            return resolvePlatformBinaryPathWithLegacyFallback(CONFIG.STORAGE.BIN_DIR, binaryName, [ releaseName ])
           },
           RELEASE: {
             get URL () {

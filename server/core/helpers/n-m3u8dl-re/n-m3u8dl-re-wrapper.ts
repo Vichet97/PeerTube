@@ -1,8 +1,7 @@
-import { CONFIG } from '@server/initializers/config.js'
-import { pathExists } from 'fs-extra/esm'
+import { ensureDir, pathExists } from 'fs-extra/esm'
 import { execa } from 'execa'
 import { basename, dirname } from 'path'
-import { ensureDir } from 'fs-extra/esm'
+import { NM3U8DLRECLI } from './n-m3u8dl-re-cli.js'
 import { logger, loggerTagsFactory } from '../logger.js'
 import { generateVideoImportTmpPath } from '../utils.js'
 
@@ -17,7 +16,7 @@ function formatClearkeysForNm3u8dlRe (clearkeysJson: string | null | undefined):
 
   try {
     const parsed = JSON.parse(clearkeysJson.trim())
-    const pairs: Array<[string, string]> = []
+    const pairs: [string, string][] = []
 
     if (Array.isArray(parsed)) {
       for (const item of parsed) {
@@ -46,10 +45,10 @@ export async function downloadWithNm3u8dlRe (options: {
 }): Promise<string> {
   const { url, clearkeys, customHeaders, timeout, onProgress } = options
 
-  const binaryPath = CONFIG.IMPORT.VIDEOS.HTTP.N_M3U8DL_RE.BINARY_PATH
+  const binaryPath = await NM3U8DLRECLI.safeGetBinaryPath()
   if (!await pathExists(binaryPath)) {
     throw new Error(
-      `N_m3u8DL-RE not found at ${binaryPath}. Install it for DASH/M3U8+Clearkey imports, or set import.videos.http.n_m3u8dl_re.binary_path`
+      `N_m3u8DL-RE not found at ${binaryPath}. Install it or configure import.videos.http.n_m3u8dl_re.release.url`
     )
   }
 

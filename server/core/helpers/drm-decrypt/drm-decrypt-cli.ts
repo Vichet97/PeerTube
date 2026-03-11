@@ -1,15 +1,42 @@
 import { CONFIG } from '@server/initializers/config.js'
+import { getBinPlatformFolder } from '@server/helpers/binaries/platform-binaries.js'
 import { ensureDir, pathExists } from 'fs-extra/esm'
 import { chmod, writeFile } from 'fs/promises'
 import { OptionsOfBufferResponseBody } from 'got'
-import { dirname, join } from 'path'
+import { dirname } from 'path'
 import { logger, loggerTagsFactory } from '../logger.js'
 import { isBinaryResponse, unsafeSSRFGot } from '../requests.js'
 
 const lTags = loggerTagsFactory('drm-decrypt')
 
 function getDrmBinaryPath () {
-  return join(CONFIG.STORAGE.BIN_DIR, CONFIG.IMPORT.VIDEOS.HTTP.DRM_DECRYPTION.RELEASE.NAME)
+  return CONFIG.IMPORT.VIDEOS.HTTP.DRM_DECRYPTION.BINARY_PATH
+}
+
+function getDrmAssetNameCandidates () {
+  const releaseName = CONFIG.IMPORT.VIDEOS.HTTP.DRM_DECRYPTION.RELEASE.NAME
+  if (releaseName !== 'mp4decrypt') return [ releaseName ]
+
+  const platform = getBinPlatformFolder()
+  const arch = process.arch
+  const candidates = [ 'mp4decrypt' ]
+
+  if (platform === 'windows') {
+    candidates.unshift('mp4decrypt.exe')
+    if (arch === 'arm64') {
+      candidates.unshift('mp4decrypt-win-arm64.exe', 'mp4decrypt_win_arm64.exe')
+    } else {
+      candidates.unshift('mp4decrypt-win-x64.exe', 'mp4decrypt_win_x64.exe', 'mp4decrypt-win64.exe')
+    }
+  } else if (platform === 'linux-arm64') {
+    candidates.unshift('mp4decrypt-linux-arm64', 'mp4decrypt_linux_arm64')
+  } else if (platform === 'linux-amd64') {
+    candidates.unshift('mp4decrypt-linux-x64', 'mp4decrypt_linux_x64')
+  } else {
+    candidates.unshift('mp4decrypt-macos', 'mp4decrypt_osx', 'mp4decrypt-darwin')
+  }
+
+  return candidates
 }
 
 export class DrmDecryptCLI {
@@ -56,9 +83,10 @@ export class DrmDecryptCLI {
         const latest = json.filter((release: { prerelease?: boolean }) => release.prerelease === false)[0]
         if (!latest) throw new Error('Cannot find latest release')
 
-        const releaseName = CONFIG.IMPORT.VIDEOS.HTTP.DRM_DECRYPTION.RELEASE.NAME
-        const releaseAsset = latest.assets.find((a: { name: string }) => a.name === releaseName)
-        if (!releaseAsset) throw new Error(`Cannot find appropriate release with name ${releaseName} in release assets`)
+        const candidates = getDrmAssetNameCandidates()
+        const releaseAsset = latest.assets.find((a: { name: string }) => candidates.includes(a.name)) ??
+          latest.assets.find((a: { name: string }) => candidates.some(candidate => a.name.includes(candidate)))
+        if (!releaseAsset) throw new Error(`Cannot find appropriate release with names: ${candidates.join(', ')}`)
 
         gotResult = await unsafeSSRFGot(releaseAsset.browser_download_url, gotOptions)
       }

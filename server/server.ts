@@ -8,6 +8,7 @@ import { checkMissedConfig, checkFFmpeg, checkNodeVersion } from './core/initial
 
 // Do not use barrels because we don't want to load all modules here (we need to initialize database first)
 import { CONFIG } from './core/initializers/config.js'
+import { ensureFFmpegBinaries } from './core/helpers/ffmpeg/ffmpeg-cli.js'
 import { API_VERSION, WEBSERVER, loadLanguages } from './core/initializers/constants.js'
 import { logger } from './core/helpers/logger.js'
 import { initI18n, useI18n } from '@server/helpers/i18n.js'
@@ -17,6 +18,12 @@ if (missed.length !== 0) {
   logger.error('Your configuration files miss keys: ' + missed)
   process.exit(-1)
 }
+
+await ensureFFmpegBinaries()
+  .catch(err => {
+    logger.error('Error while ensuring ffmpeg binaries.', { err })
+    process.exit(-1)
+  })
 
 checkFFmpeg(CONFIG)
   .catch(err => {
