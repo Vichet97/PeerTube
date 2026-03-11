@@ -869,7 +869,12 @@ import:
       # yt-dlp refuses DRM content; N_m3u8DL-RE can download+decrypt with --key kid:key
       # Download from https://github.com/nilaoda/N_m3u8DL-RE/releases (e.g. N_m3u8DL-RE for macOS)
       n_m3u8dl_re:
-        binary_path: null  # e.g. /usr/local/bin/N_m3u8DL-RE or null to use storage/bin/N_m3u8DL-RE
+        # Path to pre-installed binary (ignored when release.url is set). Set to null to use storage/bin/<platform>/N_m3u8DL-RE
+        binary_path: null
+        release:
+          # GitHub releases API or direct binary/archive URL
+          # Linux/macOS assets are usually .tar.gz archives, Windows assets are usually .zip
+          url: 'https://api.github.com/repos/nilaoda/N_m3u8DL-RE/releases'
 
       # Optional DRM decryption step before transcoding (Widevine, FairPlay, etc.)
       # Runs after yt-dlp downloads, before transcoding. Requires external tools (mp4decrypt, pywidevine, etc.)
