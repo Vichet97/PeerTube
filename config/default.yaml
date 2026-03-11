@@ -25,6 +25,7 @@ rates_limit:
     # 50 attempts in 10 seconds
     window: 10 seconds
     max: 50
+    bypass_with_token: true
   login:
     # 15 attempts in 5 min
     window: 5 minutes

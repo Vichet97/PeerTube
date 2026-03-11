@@ -103,8 +103,9 @@ function buildApiTokenAsOAuthToken (bearerToken: string, apiToken: Awaited<Retur
     userId: User.id,
     User: scopedUser,
     user: scopedUser,
-    accessTokenExpiresAt
-  } as MOAuthTokenUser
+    accessTokenExpiresAt,
+    isApiToken: true
+  } as MOAuthTokenUser & { isApiToken: boolean }
 }
 
 function getClient (clientId: string, clientSecret: string) {

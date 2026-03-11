@@ -323,7 +323,10 @@ const CONFIG = {
   RATES_LIMIT: {
     API: {
       WINDOW_MS: parseDurationToMs(config.get<string>('rates_limit.api.window')),
-      MAX: config.get<number>('rates_limit.api.max')
+      MAX: config.get<number>('rates_limit.api.max'),
+      BYPASS_WITH_TOKEN: config.has('rates_limit.api.bypass_with_token')
+        ? config.get<boolean>('rates_limit.api.bypass_with_token')
+        : false
     },
     SIGNUP: {
       WINDOW_MS: parseDurationToMs(config.get<string>('rates_limit.signup.window')),

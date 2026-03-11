@@ -8,15 +8,16 @@ import { logger } from '@server/helpers/logger.js'
 
 const whitelistRoles = new Set<UserRoleType>([ UserRole.ADMINISTRATOR, UserRole.MODERATOR ])
 
-export function buildRateLimiter (options: {
+export function buildRateLimiter (limiterOptions: {
   windowMs: number
   max: number
   skipFailedRequests?: boolean
+  allowBypassWithApiToken?: boolean
 }) {
   return RateLimit({
-    windowMs: options.windowMs,
-    max: options.max,
-    skipFailedRequests: options.skipFailedRequests,
+    windowMs: limiterOptions.windowMs,
+    max: limiterOptions.max,
+    skipFailedRequests: limiterOptions.skipFailedRequests,
 
     handler: (req, res, next, options) => {
       // Bypass rate limit for registered runners
@@ -31,8 +32,14 @@ export function buildRateLimiter (options: {
 
       // Bypass rate limit for admins/moderators
       return optionalAuthenticate(req, res, () => {
-        if (res.locals.authenticated === true && whitelistRoles.has(res.locals.oauth.token.User.role)) {
-          return next()
+        if (res.locals.authenticated === true) {
+          if (whitelistRoles.has(res.locals.oauth.token.User.role)) {
+            return next()
+          }
+
+          if (limiterOptions.allowBypassWithApiToken === true && (res.locals.oauth.token as any).isApiToken === true) {
+            return next()
+          }
         }
 
         return sendRateLimited(req, res, options)
@@ -43,7 +50,8 @@ export function buildRateLimiter (options: {
 
 export const apiRateLimiter = buildRateLimiter({
   windowMs: CONFIG.RATES_LIMIT.API.WINDOW_MS,
-  max: CONFIG.RATES_LIMIT.API.MAX
+  max: CONFIG.RATES_LIMIT.API.MAX,
+  allowBypassWithApiToken: CONFIG.RATES_LIMIT.API.BYPASS_WITH_TOKEN
 })
 
 export const activityPubRateLimiter = buildRateLimiter({
