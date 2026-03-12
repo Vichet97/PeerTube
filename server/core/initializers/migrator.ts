@@ -114,15 +114,15 @@ async function executeMigration (actualVersion: number, entity: { version: strin
       await sequelizeTypescript.query('UPDATE "application" SET "migrationVersion" = ' + versionScript, { transaction: t })
     })
   } catch (err) {
-    if (!isAlreadyExistsMigrationError(err)) throw err
+    if (!isRecoverableMigrationSchemaError(err)) throw err
 
-    logger.warn('Ignoring migration %s failure because schema object already exists. Marking migration as applied.', migrationScriptName, { err })
+    logger.warn('Ignoring migration %s failure because of a recoverable schema mismatch. Marking migration as applied.', migrationScriptName, { err })
     await sequelizeTypescript.query('UPDATE "application" SET "migrationVersion" = ' + versionScript)
     return undefined
   }
 }
 
-function isAlreadyExistsMigrationError (err: unknown) {
+function isRecoverableMigrationSchemaError (err: unknown) {
   const error = err as {
     message?: string
     parent?: {
@@ -136,10 +136,13 @@ function isAlreadyExistsMigrationError (err: unknown) {
   }
 
   const code = error.parent?.code || error.original?.code || ''
-  if (code === '42701' || code === '42P07' || code === '42710') return true
+  if (code === '42701' || code === '42P07' || code === '42710' || code === '42703' || code === '42P01') return true
 
   const messages = [ error.message, error.parent?.message, error.original?.message ]
     .filter((m): m is string => !!m)
 
-  return messages.some(m => m.toLowerCase().includes('already exists'))
+  return messages.some(m => {
+    const normalized = m.toLowerCase()
+    return normalized.includes('already exists') || normalized.includes('does not exist')
+  })
 }
