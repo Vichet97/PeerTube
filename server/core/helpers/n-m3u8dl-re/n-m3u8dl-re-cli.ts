@@ -135,7 +135,7 @@ export class NM3U8DLRECLI {
         const binaryPath = getNm3u8BinaryPath()
         await ensureDir(dirname(binaryPath))
         await writeFile(binaryPath, await readFile(extractedBinaryPath))
-        await chmod(binaryPath, 755)
+        await chmod(binaryPath, 0o755)
       } finally {
         await remove(tempDirectory)
       }
@@ -147,7 +147,7 @@ export class NM3U8DLRECLI {
     const binaryPath = getNm3u8BinaryPath()
     await ensureDir(dirname(binaryPath))
     await writeFile(binaryPath, gotResult.body)
-    await chmod(binaryPath, 755)
+    await chmod(binaryPath, 0o755)
     logger.info('N_m3u8DL-RE updated %s.', binaryPath, lTags())
   }
 }

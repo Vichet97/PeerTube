@@ -58,9 +58,6 @@ export async function downloadWithNm3u8dlRe (options: {
   await ensureDir(workDir)
 
   const keyPairs = formatClearkeysForNm3u8dlRe(clearkeys)
-  if (keyPairs.length === 0) {
-    throw new Error('Clearkeys required for N_m3u8DL-RE but none provided or invalid JSON')
-  }
 
   const args = [
     url,

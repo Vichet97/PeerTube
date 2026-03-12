@@ -128,7 +128,7 @@ async function processYoutubeDLImport (job: Job, videoImport: MVideoImportDefaul
 
   let downloader: () => Promise<string>
 
-  if (payload.useNm3u8dlRe && payload.clearkeys) {
+  if (payload.useNm3u8dlRe) {
     downloader = () => downloadWithNm3u8dlRe({
       url: videoImport.targetUrl,
       clearkeys: payload.clearkeys,

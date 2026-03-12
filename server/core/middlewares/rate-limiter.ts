@@ -30,13 +30,14 @@ export function buildRateLimiter (limiterOptions: {
           })
       }
 
-      // Bypass rate limit for admins/moderators
+      // Bypass rate limit for admins/moderators or API token holders (if configured)
       return optionalAuthenticate(req, res, () => {
         if (res.locals.authenticated === true) {
           if (whitelistRoles.has(res.locals.oauth.token.User.role)) {
             return next()
           }
 
+          // bypass_with_token: true — only tokens from /my-account/api-tokens skip the limit
           if (limiterOptions.allowBypassWithApiToken === true && (res.locals.oauth.token as any).isApiToken === true) {
             return next()
           }

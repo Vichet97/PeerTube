@@ -13,11 +13,14 @@ export function authenticate (req: express.Request, res: express.Response, next:
       res.locals.oauth = { token }
       res.locals.authenticated = true
 
-      UpdateTokenSessionScheduler.Instance.addToUpdate(token.id, {
-        lastActivityDate: new Date(),
-        lastActivityIP: req.ip,
-        lastActivityDevice: req.header('user-agent')
-      })
+      // API tokens are synthetic (no DB row) and have no `id`; skip the session update for them
+      if (token.id !== undefined) {
+        UpdateTokenSessionScheduler.Instance.addToUpdate(token.id, {
+          lastActivityDate: new Date(),
+          lastActivityIP: req.ip,
+          lastActivityDevice: req.header('user-agent')
+        })
+      }
 
       return next()
     })

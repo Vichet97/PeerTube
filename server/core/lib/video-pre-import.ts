@@ -181,7 +181,8 @@ export async function buildYoutubeDLImport (options: {
     ? guessLanguageFromReq(req, res)
     : user.getLanguage()
 
-  const useNm3u8dlRe = isMpdOrM3u8Url(targetUrl) && !!importDataOverride?.clearkeys
+  const useNm3u8dlRe = isMpdOrM3u8Url(targetUrl) && 
+    (!!importDataOverride?.clearkeys || (importDataOverride?.customHeaders && Object.keys(importDataOverride.customHeaders).length > 0))
 
   let youtubeDLInfo: YoutubeDLInfo
 

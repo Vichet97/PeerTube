@@ -35,6 +35,11 @@ export class UpdateTokenSessionScheduler extends AbstractScheduler {
     this.toUpdate = new Map()
 
     for (const [ id, payload ] of entriesToUpdate) {
+      if (id === undefined || id === null) {
+        logger.warn('Skipping token session update for entry with undefined id', lTags())
+        continue
+      }
+
       await OAuthTokenModel.update({
         lastActivityDate: payload.lastActivityDate,
         lastActivityIP: payload.lastActivityIP,

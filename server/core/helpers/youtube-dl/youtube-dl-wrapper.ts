@@ -1,5 +1,6 @@
 import { VideoResolutionType } from '@peertube/peertube-models'
 import { CONFIG } from '@server/initializers/config.js'
+import { REQUEST_TIMEOUTS } from '@server/initializers/constants.js'
 import { ExecaError } from 'execa'
 import { move, pathExists, remove } from 'fs-extra/esm'
 import { readdir } from 'fs/promises'
@@ -105,7 +106,8 @@ export class YoutubeDLWrapper {
         url: this.url,
         format: YoutubeDLCLI.getYoutubeDLVideoFormat(this.enabledResolutions, this.useBestFormat),
         additionalYoutubeDLArgs: youtubeDLArgs,
-        processOptions
+        processOptions,
+        timeout: REQUEST_TIMEOUTS.VIDEO_FILE
       })
 
       if (!info) {

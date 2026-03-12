@@ -112,10 +112,7 @@ export class YoutubeDLCLI {
       const youtubeDLBinaryPath = getYoutubeDLDownloadPath()
       await ensureDir(dirname(youtubeDLBinaryPath))
       await writeFile(youtubeDLBinaryPath, gotResult.body)
-
-      if (!CONFIG.IMPORT.VIDEOS.HTTP.YOUTUBE_DL_RELEASE.PYTHON_PATH) {
-        await chmod(youtubeDLBinaryPath, '755')
-      }
+      await chmod(youtubeDLBinaryPath, 0o755)
 
       logger.info('youtube-dl updated %s.', youtubeDLBinaryPath, lTags())
     } catch (err) {
@@ -196,13 +193,14 @@ export class YoutubeDLCLI {
     url: string
     format: string
     processOptions: ProcessOptions
+    timeout?: number
     additionalYoutubeDLArgs?: string[]
   }) {
-    const { url, format, additionalYoutubeDLArgs = [], processOptions } = options
+    const { url, format, additionalYoutubeDLArgs = [], processOptions, timeout } = options
 
     const completeArgs = additionalYoutubeDLArgs.concat([ '--dump-json', '-f', format ])
 
-    const data = await this.run({ url, args: completeArgs, processOptions })
+    const data = await this.run({ url, args: completeArgs, processOptions, timeout })
     if (!data) return undefined
 
     const info = data.map(d => JSON.parse(d))

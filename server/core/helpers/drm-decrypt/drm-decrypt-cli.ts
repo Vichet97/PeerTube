@@ -96,8 +96,9 @@ export class DrmDecryptCLI {
       }
 
       const binaryPath = getDrmBinaryPath()
+      await ensureDir(dirname(binaryPath))
       await writeFile(binaryPath, gotResult.body)
-      await chmod(binaryPath, 755)
+      await chmod(binaryPath, 0o755)
 
       logger.info('DRM decryption binary updated %s.', binaryPath, lTags())
     } catch (err) {
