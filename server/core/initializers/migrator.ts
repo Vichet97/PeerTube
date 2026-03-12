@@ -2,6 +2,7 @@ import { readdir } from 'fs/promises'
 import { join } from 'path'
 import { QueryTypes } from 'sequelize'
 import { currentDir } from '@peertube/peertube-node-utils'
+import { getNodeABIVersion } from '@server/helpers/version.js'
 import { logger } from '../helpers/logger.js'
 import { LAST_MIGRATION_VERSION } from './constants.js'
 import { sequelizeTypescript } from './database.js'
@@ -26,7 +27,15 @@ async function migrate () {
   }
 
   if (actualVersion === null) {
-    await sequelizeTypescript.query('INSERT INTO "application" ("migrationVersion") VALUES (0)')
+    await sequelizeTypescript.query(
+      'INSERT INTO "application" ("migrationVersion", "nodeVersion", "nodeABIVersion") VALUES (0, :nodeVersion, :nodeABIVersion)',
+      {
+        replacements: {
+          nodeVersion: process.version,
+          nodeABIVersion: getNodeABIVersion()
+        }
+      }
+    )
     actualVersion = 0
   }
 
