@@ -2,7 +2,7 @@ module.exports = {
   apps: [
     {
       name: 'peertube',
-      script: 'dist/server',
+      script: 'dist/server.js',
       interpreter: 'node',
       cwd: __dirname,
       autorestart: true,
