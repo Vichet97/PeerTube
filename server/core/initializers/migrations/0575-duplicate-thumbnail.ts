@@ -6,18 +6,10 @@ async function up (utils: {
   sequelize: Sequelize.Sequelize
   db: any
 }): Promise<void> {
-  const tableDefinition = await utils.queryInterface.describeTable('thumbnail')
-  const hasTypeColumn = !!tableDefinition['type']
-
   {
-    const query = hasTypeColumn
-      ? 'DELETE FROM "thumbnail" s1 ' +
-        'USING (SELECT MIN(id) as id, "filename", "type" FROM "thumbnail" GROUP BY "filename", "type" HAVING COUNT(*) > 1) s2 ' +
-        'WHERE s1."filename" = s2."filename" AND s1."type" = s2."type" AND s1.id <> s2.id'
-      : 'DELETE FROM "thumbnail" s1 ' +
-        'USING (SELECT MIN(id) as id, "filename" FROM "thumbnail" GROUP BY "filename" HAVING COUNT(*) > 1) s2 ' +
-        'WHERE s1."filename" = s2."filename" AND s1.id <> s2.id'
-
+    const query = 'DELETE FROM "thumbnail" s1 ' +
+      'USING (SELECT MIN(id) as id, "filename", "type" FROM "thumbnail" GROUP BY "filename", "type" HAVING COUNT(*) > 1) s2 ' +
+      'WHERE s1."filename" = s2."filename" AND s1."type" = s2."type" AND s1.id <> s2.id'
     await utils.sequelize.query(query)
   }
 }
