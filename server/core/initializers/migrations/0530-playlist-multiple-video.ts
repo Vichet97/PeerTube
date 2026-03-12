@@ -21,25 +21,13 @@ async function up (utils: {
   {
     const selectPlaylistUUID = 'SELECT "uuid" FROM "videoPlaylist" WHERE "id" = "videoPlaylistElement"."videoPlaylistId"'
     const url = `'${WEBSERVER.URL}' || '/video-playlists/' || (${selectPlaylistUUID}) || '/videos/' || "videoPlaylistElement"."id"`
-    const accountTableDefinition = await utils.queryInterface.describeTable('account')
-    const actorTableDefinition = await utils.queryInterface.describeTable('actor')
-
-    let actorJoin = ''
-    if (accountTableDefinition['actorId']) {
-      actorJoin = 'INNER JOIN actor ON actor.id = account."actorId"'
-    } else if (actorTableDefinition['accountId']) {
-      actorJoin = 'INNER JOIN actor ON actor."accountId" = account.id'
-    } else {
-      // Unexpected schema state: skip this backfill instead of crashing startup.
-      return
-    }
 
     const query = `
       UPDATE "videoPlaylistElement" SET "url" = ${url} WHERE id IN (
         SELECT "videoPlaylistElement"."id" FROM "videoPlaylistElement"
         INNER JOIN "videoPlaylist" ON "videoPlaylist".id = "videoPlaylistElement"."videoPlaylistId"
         INNER JOIN account ON account.id = "videoPlaylist"."ownerAccountId"
-        ${actorJoin}
+        INNER JOIN actor ON actor.id = account."actorId"
         WHERE actor."serverId" IS NULL
       )`
 
