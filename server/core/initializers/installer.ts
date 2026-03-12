@@ -144,7 +144,8 @@ async function createOAuthAdminIfNotExist () {
   } else if (process.env.PT_INITIAL_ROOT_PASSWORD) {
     password = process.env.PT_INITIAL_ROOT_PASSWORD
   } else {
-    password = await generatePassword(16, true)
+    // Keep root password entropy above password-generator v3 security threshold.
+    password = await generatePassword(32, false, /[a-zA-Z0-9]/)
   }
 
   const user = buildUser({

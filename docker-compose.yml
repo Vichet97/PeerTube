@@ -12,6 +12,10 @@ services:
     image: postgres:17-alpine
     container_name: peertube-postgres
     restart: unless-stopped
+    deploy:
+      restart_policy:
+        condition: any
+        delay: 10s
     logging:
       driver: json-file
       options:
@@ -36,6 +40,10 @@ services:
     image: redis:8-alpine
     container_name: peertube-redis
     restart: unless-stopped
+    deploy:
+      restart_policy:
+        condition: any
+        delay: 10s
     logging:
       driver: json-file
       options:
@@ -80,6 +88,10 @@ services:
       - ./storage/s3/rustfs:/data
       - peertube_rustfs_log:/app/logs
     restart: unless-stopped
+    deploy:
+      restart_policy:
+        condition: any
+        delay: 10s
     healthcheck:
       test:
         [

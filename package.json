@@ -75,6 +75,8 @@
     "simulate-many-viewers": "tsx --conditions=peertube:tsx ./scripts/simulate-many-viewers.ts",
     "start:server": "node dist/server --no-client",
     "start": "node dist/server",
+    "start:pm2": "pm2 start ecosystem.config.cjs --only peertube",
+    "restart:pm2": "pm2 restart ecosystem.config.cjs --only peertube",
     "swagger-cli": "swagger-cli",
     "test": "bash ./scripts/test.sh",
     "tsc": "tsc",
