@@ -8,6 +8,8 @@ import { LAST_MIGRATION_VERSION } from './constants.js'
 import { sequelizeTypescript } from './database.js'
 
 async function migrate () {
+  await cleanupDatabaseBeforeMigrationIfNeeded()
+
   const tables = await sequelizeTypescript.getQueryInterface().showAllTables()
 
   // No tables, we don't need to migrate anything
@@ -86,6 +88,22 @@ async function getMigrationScripts () {
     })
 
   return filesToMigrate
+}
+
+async function cleanupDatabaseBeforeMigrationIfNeeded () {
+  if (process.env.PT_CLEAN_DATABASE_BEFORE_MIGRATION !== 'true') return
+
+  logger.warn('PT_CLEAN_DATABASE_BEFORE_MIGRATION=true: dropping all public tables before migrations.')
+
+  const tableRows = await sequelizeTypescript.query<{ tablename: string }>(
+    `SELECT tablename FROM pg_tables WHERE schemaname = 'public'`,
+    { type: QueryTypes.SELECT as QueryTypes.SELECT }
+  )
+
+  for (const row of tableRows) {
+    const tableName = row.tablename.replace(/"/g, '""')
+    await sequelizeTypescript.query(`DROP TABLE IF EXISTS "${tableName}" CASCADE`)
+  }
 }
 
 async function executeMigration (actualVersion: number, entity: { version: string, script: string }) {
