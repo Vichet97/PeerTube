@@ -118,46 +118,16 @@ async function executeMigration (actualVersion: number, entity: { version: strin
 
   const migrationScript = await import(join(currentDir(import.meta.url), 'migrations', migrationScriptName))
 
-  try {
-    return await sequelizeTypescript.transaction(async t => {
-      const options = {
-        transaction: t,
-        queryInterface: sequelizeTypescript.getQueryInterface(),
-        sequelize: sequelizeTypescript
-      }
-
-      await migrationScript.up(options)
-
-      // Update the new migration version
-      await sequelizeTypescript.query('UPDATE "application" SET "migrationVersion" = ' + versionScript, { transaction: t })
-    })
-  } catch (err) {
-    if (!isAlreadyExistsMigrationError(err)) throw err
-
-    logger.warn('Ignoring migration %s failure because schema object already exists. Marking migration as applied.', migrationScriptName, { err })
-    await sequelizeTypescript.query('UPDATE "application" SET "migrationVersion" = ' + versionScript)
-    return undefined
-  }
-}
-
-function isAlreadyExistsMigrationError (err: unknown) {
-  const error = err as {
-    message?: string
-    parent?: {
-      code?: string
-      message?: string
+  return sequelizeTypescript.transaction(async t => {
+    const options = {
+      transaction: t,
+      queryInterface: sequelizeTypescript.getQueryInterface(),
+      sequelize: sequelizeTypescript
     }
-    original?: {
-      code?: string
-      message?: string
-    }
-  }
 
-  const code = error.parent?.code || error.original?.code || ''
-  if (code === '42701' || code === '42P07' || code === '42710') return true
+    await migrationScript.up(options)
 
-  const messages = [ error.message, error.parent?.message, error.original?.message ]
-    .filter((m): m is string => !!m)
-
-  return messages.some(m => m.toLowerCase().includes('already exists'))
+    // Update the new migration version
+    await sequelizeTypescript.query('UPDATE "application" SET "migrationVersion" = ' + versionScript, { transaction: t })
+  })
 }
