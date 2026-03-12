@@ -21,7 +21,7 @@ services:
       POSTGRES_PASSWORD: peertube
       POSTGRES_DB: peertube_dev
     ports:
-      - "5432:5432"
+      - "9004:5432"
     volumes:
       - peertube_postgres_data:/var/lib/postgresql/data
       - ./support/docker/dev/init-postgres.sql:/docker-entrypoint-initdb.d/init.sql:ro
@@ -40,7 +40,7 @@ services:
         max-size: "10m"
         max-file: "7"
     ports:
-      - "6379:6379"
+      - "9003:6379"
     volumes:
       - peertube_redis_data:/data
     healthcheck:

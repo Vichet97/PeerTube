@@ -81,7 +81,7 @@ trust_proxy:
 # Your database name will be database.name OR 'peertube'+database.suffix
 database:
   hostname: '127.0.0.1'
-  port: 5432
+  port: 9004
   ssl: false
   ssl_settings:
     reject_unauthorized: false
@@ -99,7 +99,7 @@ database:
 # set 'hostname' and 'port' to null
 redis:
   hostname: '127.0.0.1'
-  port: 6379
+  port: 9003
   auth: null
   db: 0
   enable_tls: false
