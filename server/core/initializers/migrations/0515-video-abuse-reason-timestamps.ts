@@ -5,20 +5,28 @@ async function up (utils: {
   queryInterface: Sequelize.QueryInterface
   sequelize: Sequelize.Sequelize
 }): Promise<void> {
-  await utils.queryInterface.addColumn('videoAbuse', 'predefinedReasons', {
-    type: Sequelize.ARRAY(Sequelize.INTEGER),
-    allowNull: true
-  })
+  const tableDefinition = await utils.queryInterface.describeTable('videoAbuse')
 
-  await utils.queryInterface.addColumn('videoAbuse', 'startAt', {
-    type: Sequelize.INTEGER,
-    allowNull: true
-  })
+  if (!tableDefinition['predefinedReasons']) {
+    await utils.queryInterface.addColumn('videoAbuse', 'predefinedReasons', {
+      type: Sequelize.ARRAY(Sequelize.INTEGER),
+      allowNull: true
+    })
+  }
 
-  await utils.queryInterface.addColumn('videoAbuse', 'endAt', {
-    type: Sequelize.INTEGER,
-    allowNull: true
-  })
+  if (!tableDefinition['startAt']) {
+    await utils.queryInterface.addColumn('videoAbuse', 'startAt', {
+      type: Sequelize.INTEGER,
+      allowNull: true
+    })
+  }
+
+  if (!tableDefinition['endAt']) {
+    await utils.queryInterface.addColumn('videoAbuse', 'endAt', {
+      type: Sequelize.INTEGER,
+      allowNull: true
+    })
+  }
 }
 
 function down (options) {
