@@ -5,9 +5,8 @@ async function up (utils: {
   queryInterface: Sequelize.QueryInterface
   sequelize: Sequelize.Sequelize
 }): Promise<void> {
-  const tableDefinition = await utils.queryInterface.describeTable('user')
 
-  if (!tableDefinition['lastLoginDate']) {
+  {
     const field = {
       type: Sequelize.DATE,
       allowNull: true
