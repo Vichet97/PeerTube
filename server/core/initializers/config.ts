@@ -265,6 +265,7 @@ const CONFIG = {
   },
   OBJECT_STORAGE: {
     ENABLED: config.get<boolean>('object_storage.enabled'),
+    KEEP_LOCAL_FILE_AFTER_MOVE: config.get<number>('object_storage.keep_local_file_after_move') * 60 * 1000,
     MAX_UPLOAD_PART: bytes.parse(config.get<string>('object_storage.max_upload_part')),
     MAX_REQUEST_ATTEMPTS: config.get<number>('object_storage.max_request_attempts'),
     ENDPOINT: config.get<string>('object_storage.endpoint'),
@@ -306,6 +307,21 @@ const CONFIG = {
       BUCKET_NAME: config.get<string>('object_storage.captions.bucket_name'),
       PREFIX: config.get<string>('object_storage.captions.prefix'),
       BASE_URL: config.get<string>('object_storage.captions.base_url')
+    },
+    STORYBOARDS: {
+      BUCKET_NAME: config.get<string>('object_storage.storyboards.bucket_name'),
+      PREFIX: config.get<string>('object_storage.storyboards.prefix'),
+      BASE_URL: config.get<string>('object_storage.storyboards.base_url')
+    },
+    THUMBNAILS: {
+      BUCKET_NAME: config.get<string>('object_storage.thumbnails.bucket_name'),
+      PREFIX: config.get<string>('object_storage.thumbnails.prefix'),
+      BASE_URL: config.get<string>('object_storage.thumbnails.base_url')
+    },
+    TORRENTS: {
+      BUCKET_NAME: config.get<string>('object_storage.torrents.bucket_name'),
+      PREFIX: config.get<string>('object_storage.torrents.prefix'),
+      BASE_URL: config.get<string>('object_storage.torrents.base_url')
     }
   },
   WEBSERVER: {
@@ -882,6 +898,9 @@ const CONFIG = {
       HTTP: {
         get ENABLED () {
           return config.get<boolean>('import.videos.http.enabled')
+        },
+        get PREFERRED_DOWNLOADER () {
+          return config.get<string>('import.videos.http.preferred_downloader')
         },
 
         YOUTUBE_DL_RELEASE: {

@@ -23,6 +23,18 @@ export function buildObjectStorageWebVideoPrivateFileUrl (filename: string) {
   return WEBSERVER.URL + OBJECT_STORAGE_PROXY_PATHS.PRIVATE_WEB_VIDEOS + filename
 }
 
+export function buildObjectStorageThumbnailPrivateFileUrl (video: MVideoUUID, filename: string) {
+  return WEBSERVER.URL + OBJECT_STORAGE_PROXY_PATHS.THUMBNAILS.PRIVATE + video.uuid + `/${filename}`
+}
+
+export function buildObjectStorageStoryboardPrivateFileUrl (video: MVideoUUID, filename: string) {
+  return WEBSERVER.URL + OBJECT_STORAGE_PROXY_PATHS.STORYBOARDS.PRIVATE + video.uuid + `/${filename}`
+}
+
+export function buildObjectStorageCaptionPrivateFileUrl (video: MVideoUUID, filename: string) {
+  return WEBSERVER.URL + OBJECT_STORAGE_PROXY_PATHS.CAPTIONS.PRIVATE + video.uuid + `/${filename}`
+}
+
 // ---------------------------------------------------------------------------
 // Private
 // ---------------------------------------------------------------------------

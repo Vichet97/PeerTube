@@ -6,7 +6,7 @@ import { MVideo } from '@server/types/models/index.js'
 import express from 'express'
 import { PassThrough, pipeline } from 'stream'
 import { injectQueryToPlaylistUrls } from '../hls.js'
-import { getHLSFileReadStream, getWebVideoFileReadStream } from './videos.js'
+import { getCaptionReadStream, getHLSFileReadStream, getStoryboardReadStream, getThumbnailReadStream, getWebVideoFileReadStream } from './videos.js'
 
 import type { GetObjectCommandOutput } from '@aws-sdk/client-s3'
 
@@ -67,6 +67,75 @@ export async function proxifyHLS (options: {
         handleObjectStorageFailure(res, err)
       }
     )
+  } catch (err) {
+    return handleObjectStorageFailure(res, err)
+  }
+}
+
+export async function proxifyThumbnail (options: {
+  req: express.Request
+  res: express.Response
+  filename: string
+}) {
+  const { req, res, filename } = options
+
+  logger.debug('Proxifying thumbnail file %s from object storage.', filename)
+
+  try {
+    const { response: s3Response, stream } = await getThumbnailReadStream({
+      filename,
+      rangeHeader: req.header('range')
+    })
+
+    setS3Headers(res, s3Response)
+
+    return stream.pipe(res)
+  } catch (err) {
+    return handleObjectStorageFailure(res, err)
+  }
+}
+
+export async function proxifyStoryboard (options: {
+  req: express.Request
+  res: express.Response
+  filename: string
+}) {
+  const { req, res, filename } = options
+
+  logger.debug('Proxifying storyboard file %s from object storage.', filename)
+
+  try {
+    const { response: s3Response, stream } = await getStoryboardReadStream({
+      filename,
+      rangeHeader: req.header('range')
+    })
+
+    setS3Headers(res, s3Response)
+
+    return stream.pipe(res)
+  } catch (err) {
+    return handleObjectStorageFailure(res, err)
+  }
+}
+
+export async function proxifyCaption (options: {
+  req: express.Request
+  res: express.Response
+  filename: string
+}) {
+  const { req, res, filename } = options
+
+  logger.debug('Proxifying caption file %s from object storage.', filename)
+
+  try {
+    const { response: s3Response, stream } = await getCaptionReadStream({
+      filename,
+      rangeHeader: req.header('range')
+    })
+
+    setS3Headers(res, s3Response)
+
+    return stream.pipe(res)
   } catch (err) {
     return handleObjectStorageFailure(res, err)
   }

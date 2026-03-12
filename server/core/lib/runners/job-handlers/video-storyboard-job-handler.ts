@@ -1,4 +1,6 @@
 import {
+  FileStorage,
+  type FileStorageType,
   GenerateStoryboardSuccess,
   RunnerJobGenerateStoryboardPayload,
   RunnerJobGenerateStoryboardPrivatePayload,
@@ -11,10 +13,11 @@ import { logger, loggerTagsFactory } from '@server/helpers/logger.js'
 import { CONFIG } from '@server/initializers/config.js'
 import { JOB_PRIORITY, STORYBOARD } from '@server/initializers/constants.js'
 import { VideoPathManager } from '@server/lib/video-path-manager.js'
+import { storeStoryboard } from '@server/lib/object-storage/index.js'
 import { getImageSizeFromWorker } from '@server/lib/worker/parent-process.js'
 import { VideoModel } from '@server/models/video/video.js'
 import { MRunnerJob } from '@server/types/models/runners/index.js'
-import { move } from 'fs-extra/esm'
+import { move, remove } from 'fs-extra/esm'
 import { join } from 'path'
 import { buildSpriteSize, buildTotalSprites, findGridSize, insertStoryboardInDatabase } from '../../storyboard.js'
 import { generateRunnerTranscodingVideoInputFileUrl } from '../runner-urls.js'
@@ -93,6 +96,14 @@ export class VideoStoryboardJobHandler extends AbstractJobHandler<CreateOptions,
     await move(resultPayload.storyboardFile as string, destinationPath)
 
     const { sprites } = runnerJob.payload as RunnerJobGenerateStoryboardPayload
+    const imageSize = await getImageSizeFromWorker(destinationPath)
+    let storage: FileStorageType = FileStorage.FILE_SYSTEM
+
+    if (CONFIG.OBJECT_STORAGE.ENABLED) {
+      await storeStoryboard(destinationPath, destinationFilename)
+      await remove(destinationPath)
+      storage = FileStorage.OBJECT_STORAGE
+    }
 
     await insertStoryboardInDatabase({
       videoUUID: video.uuid,
@@ -101,11 +112,12 @@ export class VideoStoryboardJobHandler extends AbstractJobHandler<CreateOptions,
       filename: destinationFilename,
       destination: destinationPath,
 
-      imageSize: await getImageSizeFromWorker(destinationPath),
+      imageSize,
 
       spriteHeight: sprites.size.height,
       spriteWidth: sprites.size.width,
       spriteDuration: sprites.duration,
+      storage,
 
       federate: true
     })

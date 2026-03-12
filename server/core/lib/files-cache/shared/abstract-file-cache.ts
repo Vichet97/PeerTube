@@ -1,4 +1,4 @@
-import { HttpStatusCode } from '@peertube/peertube-models'
+import { type FileStorageType, HttpStatusCode } from '@peertube/peertube-models'
 import { logger } from '@server/helpers/logger.js'
 import { CachePromise } from '@server/helpers/promise-cache.js'
 import { doRequestAndSaveToFile } from '@server/helpers/requests.js'
@@ -11,8 +11,10 @@ export type FileModel = {
   fileUrl: string
   filename: string
   cached: boolean
+  storage?: FileStorageType
 
   isLocal(): boolean
+  getLocalFileUrl?(): string
 
   save(): Promise<Model>
 }

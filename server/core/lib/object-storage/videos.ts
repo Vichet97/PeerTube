@@ -1,7 +1,7 @@
 import { logger } from '@server/helpers/logger.js'
 import { CONFIG } from '@server/initializers/config.js'
 import { MIMETYPES } from '@server/initializers/constants.js'
-import { MVideo, MVideoCaption, MVideoFile, MVideoPrivacy, MVideoUUID } from '@server/types/models/index.js'
+import { MVideo, MVideoCaption, MVideoFile, MVideoPrivacy, MVideoUUID, MStoryboard, MThumbnail } from '@server/types/models/index.js'
 import { MVideoSource } from '@server/types/models/video/video-source.js'
 import { basename, extname, join } from 'path'
 import { getHLSDirectory } from '../paths.js'
@@ -11,6 +11,9 @@ import {
   generateHLSObjectBaseStorageKey,
   generateHLSObjectStorageKey,
   generateOriginalVideoObjectStorageKey,
+  generateStoryboardObjectStorageKey,
+  generateThumbnailObjectStorageKey,
+  generateTorrentObjectStorageKey,
   generateWebVideoObjectStorageKey
 } from './keys.js'
 import {
@@ -165,6 +168,54 @@ export function removeCaptionObjectStorage (videoCaption: MVideoCaption) {
 
 // ---------------------------------------------------------------------------
 
+export function storeThumbnail (inputPath: string, filename: string) {
+  return storeObject({
+    inputPath,
+    objectStorageKey: generateThumbnailObjectStorageKey(filename),
+    bucketInfo: CONFIG.OBJECT_STORAGE.THUMBNAILS,
+    isPrivate: false,
+    contentType: 'image/jpeg'
+  })
+}
+
+export function removeThumbnailObjectStorage (thumbnail: MThumbnail) {
+  return removeObject(generateThumbnailObjectStorageKey(thumbnail.filename), CONFIG.OBJECT_STORAGE.THUMBNAILS)
+}
+
+// ---------------------------------------------------------------------------
+
+export function storeStoryboard (inputPath: string, filename: string) {
+  return storeObject({
+    inputPath,
+    objectStorageKey: generateStoryboardObjectStorageKey(filename),
+    bucketInfo: CONFIG.OBJECT_STORAGE.STORYBOARDS,
+    isPrivate: false,
+    contentType: 'image/jpeg'
+  })
+}
+
+export function removeStoryboardObjectStorage (storyboard: MStoryboard) {
+  return removeObject(generateStoryboardObjectStorageKey(storyboard.filename), CONFIG.OBJECT_STORAGE.STORYBOARDS)
+}
+
+// ---------------------------------------------------------------------------
+
+export function storeTorrentFile (inputPath: string, filename: string) {
+  return storeObject({
+    inputPath,
+    objectStorageKey: generateTorrentObjectStorageKey(filename),
+    bucketInfo: CONFIG.OBJECT_STORAGE.TORRENTS,
+    isPrivate: false,
+    contentType: 'application/x-bittorrent'
+  })
+}
+
+export function removeTorrentObjectStorage (torrentFilename: string) {
+  return removeObject(generateTorrentObjectStorageKey(torrentFilename), CONFIG.OBJECT_STORAGE.TORRENTS)
+}
+
+// ---------------------------------------------------------------------------
+
 export async function makeHLSFileAvailable (video: MVideoUUID, filename: string, destination: string) {
   const key = generateHLSObjectStorageKey(video, filename)
 
@@ -218,6 +269,22 @@ export async function makeCaptionFileAvailable (filename: string, destination: s
     key,
     destination,
     bucketInfo: CONFIG.OBJECT_STORAGE.CAPTIONS
+  })
+
+  return destination
+}
+
+// ---------------------------------------------------------------------------
+
+export async function makeTorrentFileAvailable (filename: string, destination: string) {
+  const key = generateTorrentObjectStorageKey(filename)
+
+  logger.info('Fetching torrent file %s from object storage to %s.', key, destination, lTags())
+
+  await makeAvailable({
+    key,
+    destination,
+    bucketInfo: CONFIG.OBJECT_STORAGE.TORRENTS
   })
 
   return destination
@@ -282,6 +349,36 @@ export function getCaptionReadStream (options: {
   return createObjectReadStream({
     key,
     bucketInfo: CONFIG.OBJECT_STORAGE.CAPTIONS,
+    rangeHeader
+  })
+}
+
+export function getThumbnailReadStream (options: {
+  filename: string
+  rangeHeader: string
+}) {
+  const { filename, rangeHeader } = options
+
+  const key = generateThumbnailObjectStorageKey(filename)
+
+  return createObjectReadStream({
+    key,
+    bucketInfo: CONFIG.OBJECT_STORAGE.THUMBNAILS,
+    rangeHeader
+  })
+}
+
+export function getStoryboardReadStream (options: {
+  filename: string
+  rangeHeader: string
+}) {
+  const { filename, rangeHeader } = options
+
+  const key = generateStoryboardObjectStorageKey(filename)
+
+  return createObjectReadStream({
+    key,
+    bucketInfo: CONFIG.OBJECT_STORAGE.STORYBOARDS,
     rangeHeader
   })
 }

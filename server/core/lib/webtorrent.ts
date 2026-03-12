@@ -1,5 +1,11 @@
 import { sha1 } from '@peertube/peertube-node-utils'
+import { FileStorage } from '@peertube/peertube-models'
 import { WEBSERVER } from '@server/initializers/constants.js'
+import {
+  makeTorrentFileAvailable,
+  removeTorrentObjectStorage,
+  storeTorrentFile
+} from '@server/lib/object-storage/index.js'
 import { generateTorrentFileName } from '@server/lib/paths.js'
 import { VideoPathManager } from '@server/lib/video-path-manager.js'
 import { createTorrentFromWorker } from '@server/lib/worker/parent-process.js'
@@ -127,7 +133,16 @@ export async function createTorrentAndSetInfoHashFromPath (
 
   // Remove old torrent file if it existed
   if (videoFile.hasTorrent()) {
-    await remove(join(CONFIG.STORAGE.TORRENTS_DIR, videoFile.torrentFilename))
+    if (shouldUseObjectStorageForTorrent(videoFile)) {
+      await removeTorrentObjectStorage(videoFile.torrentFilename)
+    } else {
+      await remove(join(CONFIG.STORAGE.TORRENTS_DIR, videoFile.torrentFilename))
+    }
+  }
+
+  if (shouldUseObjectStorageForTorrent(videoFile)) {
+    await storeTorrentFile(torrentPath, torrentFilename)
+    await remove(torrentPath)
   }
 
   // FIXME: typings: parseTorrent now returns an async result
@@ -144,11 +159,20 @@ export async function updateTorrentMetadata (videoOrPlaylist: MVideo | MStreamin
     return
   }
 
-  const oldTorrentPath = join(CONFIG.STORAGE.TORRENTS_DIR, videoFile.torrentFilename)
+  const oldTorrentFilename = videoFile.torrentFilename
+  const oldTorrentPath = join(CONFIG.STORAGE.TORRENTS_DIR, oldTorrentFilename)
+  const useObjectStorage = shouldUseObjectStorageForTorrent(videoFile)
+  const hasLocalTorrent = await pathExists(oldTorrentPath)
 
-  if (!await pathExists(oldTorrentPath)) {
-    logger.info('Do not update torrent metadata %s of video %s because the file does not exist anymore.', video.uuid, oldTorrentPath)
-    return
+  if (useObjectStorage) {
+    if (!hasLocalTorrent) {
+      await makeTorrentFileAvailable(oldTorrentFilename, oldTorrentPath)
+    }
+  } else {
+    if (!hasLocalTorrent) {
+      logger.info('Do not update torrent metadata %s of video %s because the file does not exist anymore.', video.uuid, oldTorrentPath)
+      return
+    }
   }
 
   const torrentContent = await readFile(oldTorrentPath)
@@ -168,7 +192,19 @@ export async function updateTorrentMetadata (videoOrPlaylist: MVideo | MStreamin
   logger.info('Updating torrent metadata %s -> %s.', oldTorrentPath, newTorrentPath)
 
   await writeFile(newTorrentPath, bencode.encode(decoded))
-  await remove(oldTorrentPath)
+
+  if (useObjectStorage) {
+    await storeTorrentFile(newTorrentPath, newTorrentFilename)
+
+    if (oldTorrentFilename !== newTorrentFilename) {
+      await removeTorrentObjectStorage(oldTorrentFilename)
+      await remove(oldTorrentPath)
+    }
+
+    await remove(newTorrentPath)
+  } else if (oldTorrentPath !== newTorrentPath) {
+    await remove(oldTorrentPath)
+  }
 
   videoFile.torrentFilename = newTorrentFilename
   videoFile.infoHash = sha1(bencode.encode(decoded.info))
@@ -255,4 +291,8 @@ function buildInfoName (video: MVideo, videoFile: MVideoFile) {
   const videoName = video.name.replace(/[/\\?%*:|"<>]/g, '-')
 
   return `${videoName} ${videoFile.resolution}p${videoFile.extname}`
+}
+
+function shouldUseObjectStorageForTorrent (videoFile: MVideoFile) {
+  return CONFIG.OBJECT_STORAGE.ENABLED && videoFile.storage === FileStorage.OBJECT_STORAGE
 }

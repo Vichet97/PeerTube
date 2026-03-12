@@ -1,10 +1,13 @@
-import { Storyboard } from '@peertube/peertube-models'
+import { FileStorage, type FileStorageType, Storyboard } from '@peertube/peertube-models'
 import { CONFIG } from '@server/initializers/config.js'
 import { MStoryboard, MStoryboardVideo, MVideo } from '@server/types/models/index.js'
+import { generateStoryboardObjectStorageKey } from '@server/lib/object-storage/keys.js'
+import { buildObjectStoragePublicFileUrl, buildObjectStorageStoryboardPrivateFileUrl } from '@server/lib/object-storage/urls.js'
+import { removeStoryboardObjectStorage } from '@server/lib/object-storage/videos.js'
 import { remove } from 'fs-extra/esm'
 import { join } from 'path'
 import { Op, Transaction } from 'sequelize'
-import { AfterDestroy, AllowNull, BelongsTo, Column, CreatedAt, DataType, ForeignKey, Table, UpdatedAt } from 'sequelize-typescript'
+import { AfterDestroy, AllowNull, BelongsTo, Column, CreatedAt, DataType, Default, ForeignKey, Table, UpdatedAt } from 'sequelize-typescript'
 import { logger } from '../../helpers/logger.js'
 import { CONSTRAINTS_FIELDS, FILES_CACHE, LAZY_STATIC_PATHS, WEBSERVER } from '../../initializers/constants.js'
 import { SequelizeModel } from '../shared/index.js'
@@ -56,6 +59,11 @@ export class StoryboardModel extends SequelizeModel<StoryboardModel> {
   @Column
   declare cached: boolean
 
+  @AllowNull(false)
+  @Default(FileStorage.FILE_SYSTEM)
+  @Column
+  declare storage: FileStorageType
+
   @ForeignKey(() => VideoModel)
   @Column
   declare videoId: number
@@ -96,7 +104,12 @@ export class StoryboardModel extends SequelizeModel<StoryboardModel> {
     const query = {
       where: {
         filename
-      }
+      },
+      include: [
+        {
+          model: VideoModel.unscoped()
+        }
+      ]
     }
 
     return StoryboardModel.findOne(query)
@@ -130,6 +143,20 @@ export class StoryboardModel extends SequelizeModel<StoryboardModel> {
   // ---------------------------------------------------------------------------
 
   getLocalFileUrl () {
+    if (this.isLocal() && this.storage === FileStorage.OBJECT_STORAGE) {
+      if (
+        this.Video?.hasPrivateStaticPath() &&
+        CONFIG.OBJECT_STORAGE.PROXY.PROXIFY_PRIVATE_FILES === true
+      ) {
+        return buildObjectStorageStoryboardPrivateFileUrl(this.Video, this.filename)
+      }
+
+      return buildObjectStoragePublicFileUrl({
+        bucket: CONFIG.OBJECT_STORAGE.STORYBOARDS,
+        key: generateStoryboardObjectStorageKey(this.filename)
+      })
+    }
+
     // Remote files are cached by our instance
     return WEBSERVER.URL + this.getFileStaticPath()
   }
@@ -151,19 +178,27 @@ export class StoryboardModel extends SequelizeModel<StoryboardModel> {
   }
 
   removeFile () {
-    const path = this.cached
-      ? this.getFSCachedPath()
-      : this.getFSPath()
+    if (this.cached) {
+      return remove(this.getFSCachedPath())
+    }
 
+    if (this.storage === FileStorage.OBJECT_STORAGE) {
+      return removeStoryboardObjectStorage(this)
+    }
+
+    const path = this.getFSPath()
     logger.info('Removing storyboard file ' + path)
-
     return remove(path)
   }
 
   toFormattedJSON (this: MStoryboardVideo): Storyboard {
+    const storyboardPath = this.isLocal() && this.storage === FileStorage.OBJECT_STORAGE
+      ? this.getLocalFileUrl()
+      : this.getFileStaticPath()
+
     return {
       fileUrl: this.getLocalFileUrl(),
-      storyboardPath: this.getFileStaticPath(),
+      storyboardPath,
 
       totalHeight: this.totalHeight,
       totalWidth: this.totalWidth,

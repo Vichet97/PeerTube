@@ -1,5 +1,5 @@
 import { FFmpegImage } from '@peertube/peertube-ffmpeg'
-import { GenerateStoryboardPayload, VideoFileStream } from '@peertube/peertube-models'
+import { FileStorage, type FileStorageType, GenerateStoryboardPayload, VideoFileStream } from '@peertube/peertube-models'
 import { getFFmpegCommandWrapperOptions } from '@server/helpers/ffmpeg/index.js'
 import { generateImageFilename } from '@server/helpers/image-utils.js'
 import { logger, loggerTagsFactory } from '@server/helpers/logger.js'
@@ -7,8 +7,10 @@ import { CONFIG } from '@server/initializers/config.js'
 import { STORYBOARD } from '@server/initializers/constants.js'
 import { VideoPathManager } from '@server/lib/video-path-manager.js'
 import { getImageSizeFromWorker } from '@server/lib/worker/parent-process.js'
+import { storeStoryboard } from '@server/lib/object-storage/index.js'
 import { VideoModel } from '@server/models/video/video.js'
 import { Job } from 'bullmq'
+import { remove } from 'fs-extra/esm'
 import { join } from 'path'
 import { buildSpriteSize, buildTotalSprites, findGridSize, insertStoryboardInDatabase } from '../../storyboard.js'
 
@@ -78,6 +80,15 @@ export async function processGenerateStoryboard (job: Job): Promise<void> {
         }
       })
 
+      const imageSize = await getImageSizeFromWorker(destination)
+      let storage: FileStorageType = FileStorage.FILE_SYSTEM
+
+      if (CONFIG.OBJECT_STORAGE.ENABLED) {
+        await storeStoryboard(destination, filename)
+        await remove(destination)
+        storage = FileStorage.OBJECT_STORAGE
+      }
+
       await insertStoryboardInDatabase({
         videoUUID: video.uuid,
         lTags,
@@ -85,11 +96,12 @@ export async function processGenerateStoryboard (job: Job): Promise<void> {
         filename,
         destination,
 
-        imageSize: await getImageSizeFromWorker(destination),
+        imageSize,
 
         spriteHeight,
         spriteWidth,
         spriteDuration,
+        storage,
 
         federate: payload.federate
       })

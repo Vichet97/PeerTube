@@ -25,3 +25,15 @@ export function generateCaptionObjectStorageKey (filename: string) {
 export function generateUserExportObjectStorageKey (filename: string) {
   return filename
 }
+
+export function generateThumbnailObjectStorageKey (filename: string) {
+  return filename
+}
+
+export function generateStoryboardObjectStorageKey (filename: string) {
+  return filename
+}
+
+export function generateTorrentObjectStorageKey (filename: string) {
+  return filename
+}

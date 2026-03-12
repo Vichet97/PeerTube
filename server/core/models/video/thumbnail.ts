@@ -1,6 +1,9 @@
-import { ActivityIconObject, Thumbnail, type ThumbnailAspectRatio } from '@peertube/peertube-models'
+import { ActivityIconObject, FileStorage, type FileStorageType, Thumbnail, type ThumbnailAspectRatio } from '@peertube/peertube-models'
 import { AttributesOnly } from '@peertube/peertube-typescript-utils'
 import { CONFIG } from '@server/initializers/config.js'
+import { generateThumbnailObjectStorageKey } from '@server/lib/object-storage/keys.js'
+import { buildObjectStoragePublicFileUrl, buildObjectStorageThumbnailPrivateFileUrl } from '@server/lib/object-storage/urls.js'
+import { removeThumbnailObjectStorage } from '@server/lib/object-storage/videos.js'
 import { MThumbnail } from '@server/types/models/index.js'
 import { remove } from 'fs-extra/esm'
 import { extname, join } from 'path'
@@ -29,7 +32,8 @@ export const thumbnailAPIAttributes = [
   'fileUrl',
   'width',
   'height',
-  'aspectRatio'
+  'aspectRatio',
+  'storage'
 ] as const satisfies (keyof AttributesOnly<ThumbnailModel>)[]
 
 @Table({
@@ -79,6 +83,11 @@ export class ThumbnailModel extends SequelizeModel<ThumbnailModel> {
   @AllowNull(false)
   @Column
   declare cached: boolean
+
+  @AllowNull(false)
+  @Default(FileStorage.FILE_SYSTEM)
+  @Column
+  declare storage: FileStorageType
 
   @ForeignKey(() => VideoModel)
   @Column
@@ -131,7 +140,12 @@ export class ThumbnailModel extends SequelizeModel<ThumbnailModel> {
 
   static loadByFilename (filename: string): Promise<MThumbnail> {
     const query = {
-      where: { filename }
+      where: { filename },
+      include: [
+        {
+          model: VideoModel.unscoped()
+        }
+      ]
     }
 
     return ThumbnailModel.findOne(query)
@@ -159,16 +173,34 @@ export class ThumbnailModel extends SequelizeModel<ThumbnailModel> {
   }
 
   removeFile () {
-    const path = this.cached
-      ? this.getFSCachedPath()
-      : this.getFSPath()
+    if (this.cached) {
+      return remove(this.getFSCachedPath())
+    }
 
+    if (this.storage === FileStorage.OBJECT_STORAGE) {
+      return removeThumbnailObjectStorage(this)
+    }
+
+    const path = this.getFSPath()
     logger.info('Removing thumbnail file ' + path)
-
     return remove(path)
   }
 
   getLocalFileUrl () {
+    if (this.isLocal() && this.storage === FileStorage.OBJECT_STORAGE) {
+      if (
+        this.Video?.hasPrivateStaticPath() &&
+        CONFIG.OBJECT_STORAGE.PROXY.PROXIFY_PRIVATE_FILES === true
+      ) {
+        return buildObjectStorageThumbnailPrivateFileUrl(this.Video, this.filename)
+      }
+
+      return buildObjectStoragePublicFileUrl({
+        bucket: CONFIG.OBJECT_STORAGE.THUMBNAILS,
+        key: generateThumbnailObjectStorageKey(this.filename)
+      })
+    }
+
     // Remote files are cached by our instance
     return WEBSERVER.URL + this.getFileStaticPath()
   }

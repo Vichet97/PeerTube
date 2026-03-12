@@ -17,6 +17,7 @@ import {
   buildObjectStoragePublicFileUrl,
   buildObjectStorageWebVideoPrivateFileUrl,
   generateHLSObjectStorageKey,
+  removeTorrentObjectStorage,
   generateWebVideoObjectStorageKey
 } from '@server/lib/object-storage/index.js'
 import { getFSTorrentFilePath } from '@server/lib/paths.js'
@@ -606,6 +607,11 @@ export class VideoFileModel extends SequelizeModel<VideoFileModel> {
 
   removeTorrent () {
     if (!this.torrentFilename) return null
+
+    if (this.storage === FileStorage.OBJECT_STORAGE && CONFIG.OBJECT_STORAGE.ENABLED) {
+      return removeTorrentObjectStorage(this.torrentFilename)
+        .catch(err => logger.warn('Cannot delete torrent %s from object storage.', this.torrentFilename, { err }))
+    }
 
     const torrentPath = getFSTorrentFilePath(this)
     return remove(torrentPath)

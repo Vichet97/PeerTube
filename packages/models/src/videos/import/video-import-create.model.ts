@@ -20,5 +20,9 @@ export interface VideoImportCreate extends VideoCreateUpdateCommon {
   // Clearkeys for Clearkey DRM in JSON format (e.g. {"kid": "hexkey"} or [{"kid": "...", "k": "..."}])
   clearkeys?: string
 
+  // Force using N_m3u8DL-RE (true) or yt-dlp (false) for this import.
+  // Clearkeys always force N_m3u8DL-RE regardless of this value.
+  useNm3u8dlRe?: boolean
+
   channelId: number // Required
 }

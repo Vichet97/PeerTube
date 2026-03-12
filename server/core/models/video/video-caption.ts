@@ -2,7 +2,11 @@ import { removeVTTExt } from '@peertube/peertube-core-utils'
 import { FileStorage, type FileStorageType, VideoCaption, VideoCaptionObject } from '@peertube/peertube-models'
 import { buildUUID } from '@peertube/peertube-node-utils'
 import { generateCaptionObjectStorageKey, generateHLSObjectStorageKey } from '@server/lib/object-storage/keys.js'
-import { buildObjectStoragePublicFileUrl } from '@server/lib/object-storage/urls.js'
+import {
+  buildObjectStorageCaptionPrivateFileUrl,
+  buildObjectStorageHLSPrivateFileUrl,
+  buildObjectStoragePublicFileUrl
+} from '@server/lib/object-storage/urls.js'
 import { removeCaptionObjectStorage, removeHLSFileObjectStorageByFilename } from '@server/lib/object-storage/videos.js'
 import { VideoPathManager } from '@server/lib/video-path-manager.js'
 import {
@@ -389,6 +393,15 @@ export class VideoCaptionModel extends SequelizeModel<VideoCaptionModel> {
 
   getLocalFileUrl (this: MVideoCaptionUrl) {
     if (this.isLocal() && this.storage === FileStorage.OBJECT_STORAGE) {
+      const video = (this as MVideoCaptionUrl & { Video?: MVideoPrivacy }).Video
+
+      if (
+        video?.hasPrivateStaticPath() &&
+        CONFIG.OBJECT_STORAGE.PROXY.PROXIFY_PRIVATE_FILES === true
+      ) {
+        return buildObjectStorageCaptionPrivateFileUrl(video, this.filename)
+      }
+
       return buildObjectStoragePublicFileUrl({
         bucket: CONFIG.OBJECT_STORAGE.CAPTIONS,
         key: generateCaptionObjectStorageKey(this.filename)
@@ -406,6 +419,13 @@ export class VideoCaptionModel extends SequelizeModel<VideoCaptionModel> {
     if (!this.isLocal()) return this.m3u8Url
 
     if (this.storage === FileStorage.OBJECT_STORAGE) {
+      if (
+        video.hasPrivateStaticPath() &&
+        CONFIG.OBJECT_STORAGE.PROXY.PROXIFY_PRIVATE_FILES === true
+      ) {
+        return buildObjectStorageHLSPrivateFileUrl(video, this.m3u8Filename)
+      }
+
       return buildObjectStoragePublicFileUrl({
         bucket: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS, // M3U8 caption file is in the streaming playlists bucket
         key: generateHLSObjectStorageKey(video, this.m3u8Filename)

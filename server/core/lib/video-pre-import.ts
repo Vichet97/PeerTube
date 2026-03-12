@@ -181,8 +181,14 @@ export async function buildYoutubeDLImport (options: {
     ? guessLanguageFromReq(req, res)
     : user.getLanguage()
 
-  const useNm3u8dlRe = isMpdOrM3u8Url(targetUrl) && 
-    (!!importDataOverride?.clearkeys || (importDataOverride?.customHeaders && Object.keys(importDataOverride.customHeaders).length > 0))
+  const hasClearkeys = !!importDataOverride?.clearkeys
+  const explicitDownloaderOverride = importDataOverride?.useNm3u8dlRe
+  const preferredDownloader = CONFIG.IMPORT.VIDEOS.HTTP.PREFERRED_DOWNLOADER
+  const useNm3u8dlRe = hasClearkeys
+    ? true
+    : explicitDownloaderOverride !== undefined && explicitDownloaderOverride !== null
+      ? explicitDownloaderOverride
+      : (preferredDownloader === 'n-m3u8dl-re' && isMpdOrM3u8Url(targetUrl))
 
   let youtubeDLInfo: YoutubeDLInfo
 

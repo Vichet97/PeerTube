@@ -972,6 +972,18 @@ export const OBJECT_STORAGE_PROXY_PATHS = {
   LEGACY_PRIVATE_WEB_VIDEOS: '/object-storage-proxy/webseed/private/',
   PRIVATE_WEB_VIDEOS: '/object-storage-proxy/web-videos/private/',
 
+  THUMBNAILS: {
+    PRIVATE: '/object-storage-proxy/thumbnails/private/'
+  },
+
+  STORYBOARDS: {
+    PRIVATE: '/object-storage-proxy/storyboards/private/'
+  },
+
+  CAPTIONS: {
+    PRIVATE: '/object-storage-proxy/captions/private/'
+  },
+
   STREAMING_PLAYLISTS: {
     PRIVATE_HLS: '/object-storage-proxy/streaming-playlists/hls/private/'
   }

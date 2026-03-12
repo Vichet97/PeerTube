@@ -1,7 +1,8 @@
 import { sortBy } from '@peertube/peertube-core-utils'
-import { ThumbnailAspectRatio, VideoFileStream } from '@peertube/peertube-models'
+import { FileStorage, ThumbnailAspectRatio, VideoFileStream } from '@peertube/peertube-models'
 import { generateThumbnailFromVideo } from '@server/helpers/ffmpeg/ffmpeg-image.js'
 import { logger, loggerTagsFactory } from '@server/helpers/logger.js'
+import { storeThumbnail } from '@server/lib/object-storage/index.js'
 import Bluebird from 'bluebird'
 import { FfprobeData } from 'fluent-ffmpeg'
 import { remove } from 'fs-extra/esm'
@@ -210,8 +211,20 @@ export function createLocalVideoThumbnailsFromVideo (options: {
         width,
         aspectRatio,
         automaticallyGenerated: true,
-        cached: false
+        cached: false,
+        // Keep local files during chained generation because smaller thumbnails can
+        // be generated from the biggest one (`biggestImagePath`) in this same loop.
+        deleteAfterObjectStorageUpload: false
       })
+    }).then(async thumbnails => {
+      if (CONFIG.OBJECT_STORAGE.ENABLED) {
+        await Promise.all(
+          thumbnails.map(t => remove(join(CONFIG.STORAGE.THUMBNAILS_DIR, t.filename))
+            .catch(err => logger.warn('Cannot remove local thumbnail %s after object storage upload.', t.filename, { err, ...lTags(video.uuid) })))
+        )
+      }
+
+      return thumbnails
     })
   })
 }
@@ -382,6 +395,7 @@ async function createThumbnailFromFunction (parameters: {
   cached: boolean
   automaticallyGenerated?: boolean
   fileUrl?: string
+  deleteAfterObjectStorageUpload?: boolean
 }) {
   const {
     thumbnailCreator,
@@ -391,7 +405,8 @@ async function createThumbnailFromFunction (parameters: {
     aspectRatio,
     cached,
     automaticallyGenerated = null,
-    fileUrl = null
+    fileUrl = null,
+    deleteAfterObjectStorageUpload = true
   } = parameters
 
   const thumbnail: MThumbnail = new ThumbnailModel()
@@ -405,6 +420,17 @@ async function createThumbnailFromFunction (parameters: {
   thumbnail.aspectRatio = aspectRatio
 
   await thumbnailCreator()
+
+  if (!thumbnail.fileUrl && CONFIG.OBJECT_STORAGE.ENABLED) {
+    const thumbnailPath = join(CONFIG.STORAGE.THUMBNAILS_DIR, filename)
+
+    await storeThumbnail(thumbnailPath, filename)
+    if (deleteAfterObjectStorageUpload) {
+      await remove(thumbnailPath)
+    }
+
+    thumbnail.storage = FileStorage.OBJECT_STORAGE
+  }
 
   return thumbnail
 }

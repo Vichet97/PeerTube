@@ -1,3 +1,4 @@
+import { FileStorage, type FileStorageType } from '@peertube/peertube-models'
 import { ffprobePromise, getVideoStreamDimensionsInfo } from '@peertube/peertube-ffmpeg'
 import { retryTransactionWrapper } from '@server/helpers/database-utils.js'
 import { LoggerTags, logger } from '@server/helpers/logger.js'
@@ -64,9 +65,10 @@ export async function insertStoryboardInDatabase (options: {
   spriteHeight: number
   spriteWidth: number
   spriteDuration: number
+  storage?: FileStorageType
   federate: boolean
 }) {
-  const { videoUUID, lTags, imageSize, spriteHeight, spriteWidth, spriteDuration, destination, filename, federate } = options
+  const { videoUUID, lTags, imageSize, spriteHeight, spriteWidth, spriteDuration, destination, filename, federate, storage = FileStorage.FILE_SYSTEM } = options
 
   await retryTransactionWrapper(() => {
     return sequelizeTypescript.transaction(async transaction => {
@@ -87,6 +89,7 @@ export async function insertStoryboardInDatabase (options: {
         spriteHeight,
         spriteWidth,
         spriteDuration,
+        storage,
         videoId: video.id,
         cached: false
       }, { transaction })

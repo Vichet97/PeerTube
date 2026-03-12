@@ -1,11 +1,15 @@
 import { FileStorage, VideoStateType } from '@peertube/peertube-models'
 import { logger, LoggerTags, loggerTagsFactory } from '@server/helpers/logger.js'
+import { CONFIG } from '@server/initializers/config.js'
 import { P2P_MEDIA_LOADER_PEER_VERSION } from '@server/initializers/constants.js'
 import { buildCaptionM3U8Content } from '@server/lib/hls.js'
 import {
   storeHLSFileFromContent,
   storeHLSFileFromFilename,
   storeOriginalVideoFile,
+  storeStoryboard,
+  storeThumbnail,
+  storeTorrentFile,
   storeVideoCaption,
   storeWebVideoFile
 } from '@server/lib/object-storage/index.js'
@@ -16,11 +20,11 @@ import { moveToFailedMoveToObjectStorageState, moveToNextState } from '@server/l
 import { updateTorrentMetadata } from '@server/lib/webtorrent.js'
 import { VideoCaptionModel } from '@server/models/video/video-caption.js'
 import { VideoModel } from '@server/models/video/video.js'
-import { MStreamingPlaylistVideo, MVideo, MVideoCaption, MVideoFile, MVideoWithAllFiles } from '@server/types/models/index.js'
+import { MStreamingPlaylistVideo, MVideo, MVideoCaption, MVideoFile, MVideoWithAllFiles, MThumbnail, MStoryboard } from '@server/types/models/index.js'
 import { MVideoSource } from '@server/types/models/video/video-source.js'
 import { remove } from 'fs-extra/esm'
 import { rmdir } from 'fs/promises'
-import { join } from 'path'
+import { dirname, join, resolve } from 'path'
 import { federateVideoIfNeeded } from '../activitypub/videos/federate.js'
 import { moveCaptionToStorage } from './shared/move-caption.js'
 import { moveVideoToStorage, onMoveVideoToStorageFailure } from './shared/move-video.js'
@@ -48,7 +52,10 @@ export async function moveVideoToObjectStorage (options: {
     moveWebVideoFiles,
     moveHLSFiles,
     moveVideoSourceFile,
-    moveCaptionFiles
+    moveCaptionFiles,
+    moveThumbnailFiles,
+    moveStoryboardFiles,
+    moveTorrentFiles
   })
 
   if (options.moveVideoState) {
@@ -100,7 +107,7 @@ async function moveVideoSourceFile (source: MVideoSource) {
 
   logger.debug('Removing original video file ' + sourcePath + ' because it\'s now on object storage', lTagsBase())
 
-  await remove(sourcePath)
+  await removeLocalFileAfterMove(sourcePath)
 }
 
 // ---------------------------------------------------------------------------
@@ -119,7 +126,7 @@ async function moveCaptionFiles (captions: MVideoCaption[], hls: MStreamingPlayl
       await caption.save()
 
       logger.debug(`Removing video caption file ${captionPath} because it's now on object storage`, lTagsBase())
-      await remove(captionPath)
+      await removeLocalFileAfterMove(captionPath)
     }
 
     if (hls) {
@@ -142,7 +149,7 @@ async function moveCaptionFiles (captions: MVideoCaption[], hls: MStreamingPlayl
 
       if (m3u8PathToRemove) {
         logger.debug(`Removing video caption playlist file ${m3u8PathToRemove} because it's now on object storage`, lTagsBase())
-        await remove(m3u8PathToRemove)
+        await removeLocalFileAfterMove(m3u8PathToRemove)
       }
     }
   }
@@ -185,7 +192,7 @@ async function moveHLSFiles (video: MVideoWithAllFiles) {
 
       await onVideoFileMoved({ videoOrPlaylist: Object.assign(playlist, { Video: video }), file, oldPath })
 
-      await remove(join(getHLSDirectory(video), playlistFilename))
+      await removeLocalFileAfterMove(join(getHLSDirectory(video), playlistFilename))
     }
 
     if (playlist.storage === FileStorage.FILE_SYSTEM) {
@@ -195,8 +202,8 @@ async function moveHLSFiles (video: MVideoWithAllFiles) {
 
       await playlist.save()
 
-      await remove(join(getHLSDirectory(video), playlist.playlistFilename))
-      await remove(join(getHLSDirectory(video), playlist.segmentsSha256Filename))
+      await removeLocalFileAfterMove(join(getHLSDirectory(video), playlist.playlistFilename))
+      await removeLocalFileAfterMove(join(getHLSDirectory(video), playlist.segmentsSha256Filename))
     }
 
     if (updatedFile === true) {
@@ -227,5 +234,117 @@ async function onVideoFileMoved (options: {
   await file.save()
 
   logger.debug('Removing %s because it\'s now on object storage', oldPath, lTagsBase())
-  await remove(oldPath)
+  await removeLocalFileAfterMove(oldPath)
+}
+
+// ---------------------------------------------------------------------------
+
+async function moveThumbnailFiles (thumbnails: MThumbnail[]) {
+  for (const thumbnail of thumbnails) {
+    if (thumbnail.storage !== FileStorage.FILE_SYSTEM) continue
+
+    const thumbnailPath = thumbnail.getFSPath()
+    await storeThumbnail(thumbnailPath, thumbnail.filename)
+
+    thumbnail.storage = FileStorage.OBJECT_STORAGE
+    await thumbnail.save()
+
+    logger.debug(`Removing thumbnail file ${thumbnailPath} because it's now on object storage`, lTagsBase())
+    await removeLocalFileAfterMove(thumbnailPath)
+  }
+}
+
+// ---------------------------------------------------------------------------
+
+async function moveStoryboardFiles (storyboards: MStoryboard[]) {
+  for (const storyboard of storyboards) {
+    if (storyboard.storage !== FileStorage.FILE_SYSTEM) continue
+
+    const storyboardPath = storyboard.getFSPath()
+    await storeStoryboard(storyboardPath, storyboard.filename)
+
+    storyboard.storage = FileStorage.OBJECT_STORAGE
+    await storyboard.save()
+
+    logger.debug(`Removing storyboard file ${storyboardPath} because it's now on object storage`, lTagsBase())
+    await removeLocalFileAfterMove(storyboardPath)
+  }
+}
+
+// ---------------------------------------------------------------------------
+
+async function moveTorrentFiles (video: MVideoWithAllFiles) {
+  const allFiles = [
+    ...video.VideoFiles,
+    ...(video.VideoStreamingPlaylists || []).flatMap(p => p.VideoFiles)
+  ]
+
+  for (const file of allFiles) {
+    if (!file.torrentFilename) continue
+
+    const torrentPath = join(CONFIG.STORAGE.TORRENTS_DIR, file.torrentFilename)
+
+    try {
+      await storeTorrentFile(torrentPath, file.torrentFilename)
+
+      logger.debug(`Removing torrent file ${torrentPath} because it's now on object storage`, lTagsBase())
+      await removeLocalFileAfterMove(torrentPath)
+    } catch (err) {
+      logger.warn(`Cannot move torrent file ${torrentPath} to object storage`, { err, ...lTagsBase() })
+    }
+  }
+}
+
+async function removeLocalFileAfterMove (path: string) {
+  const delayMs = CONFIG.OBJECT_STORAGE.KEEP_LOCAL_FILE_AFTER_MOVE
+
+  if (!delayMs) {
+    await remove(path)
+    await removeParentDirIfEmpty(path)
+    return
+  }
+
+  logger.info(
+    'Keeping local file %s for %d ms after moving to object storage before deletion.',
+    path,
+    delayMs,
+    lTagsBase()
+  )
+
+  const timer = setTimeout(() => {
+    remove(path)
+      .then(async () => {
+        logger.debug('Removed delayed local file %s after object storage move.', path, lTagsBase())
+        await removeParentDirIfEmpty(path)
+      })
+      .catch(err => logger.warn('Cannot remove delayed local file %s.', path, { err, ...lTagsBase() }))
+  }, delayMs)
+
+  timer.unref?.()
+}
+
+async function removeParentDirIfEmpty (path: string) {
+  const parent = resolve(dirname(path))
+
+  // Keep top-level storage directories in place even if they are empty.
+  const preservedRoots = new Set([
+    CONFIG.STORAGE.WEB_VIDEOS_DIR,
+    CONFIG.STORAGE.STREAMING_PLAYLISTS_DIR,
+    CONFIG.STORAGE.ORIGINAL_VIDEO_FILES_DIR,
+    CONFIG.STORAGE.THUMBNAILS_DIR,
+    CONFIG.STORAGE.STORYBOARDS_DIR,
+    CONFIG.STORAGE.CAPTIONS_DIR,
+    CONFIG.STORAGE.TORRENTS_DIR
+  ].map(p => resolve(p)))
+
+  if (preservedRoots.has(parent)) return
+
+  try {
+    await rmdir(parent)
+    logger.debug('Removed empty local directory %s after object storage move.', parent, lTagsBase())
+  } catch (err) {
+    if (err?.code === 'ENOTEMPTY' || err?.code === 'ENOENT') return
+
+    logger.warn('Cannot remove local directory %s after object storage move.', parent, { err, ...lTagsBase() })
+  }
 }

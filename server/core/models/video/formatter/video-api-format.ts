@@ -71,6 +71,9 @@ export function videoModelToFormattedJSON (video: MVideoFormattable, options: Vi
     ? video.UserVideoHistories[0]
     : undefined
 
+  const thumbnails = (video.Thumbnails || [])
+    .map(t => Object.assign(t, { Video: video }))
+
   const videoObject: Video = {
     id: video.id,
     uuid: video.uuid,
@@ -119,7 +122,7 @@ export function videoModelToFormattedJSON (video: MVideoFormattable, options: Vi
     thumbnailPath: video.getSmallestThumbnailStaticPath('16:9'),
     previewPath: video.getBestThumbnailStaticPath('16:9'),
 
-    thumbnails: (video.Thumbnails || []).map(t => t.toFormattedJSON()),
+    thumbnails: thumbnails.map(t => t.toFormattedJSON()),
 
     embedPath: video.getEmbedStaticPath(),
     createdAt: video.createdAt,

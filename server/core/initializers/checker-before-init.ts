@@ -114,6 +114,7 @@ export function checkMissedConfig () {
     'thumbnails.generation_from_video.frames_to_analyze',
     'thumbnails.sizes',
     'import.videos.http.enabled',
+    'import.videos.http.preferred_downloader',
     'import.videos.torrent.enabled',
     'import.videos.concurrency',
     'import.videos.timeout',

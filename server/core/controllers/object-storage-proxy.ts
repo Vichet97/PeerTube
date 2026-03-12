@@ -1,5 +1,5 @@
 import { OBJECT_STORAGE_PROXY_PATHS } from '@server/initializers/constants.js'
-import { proxifyHLS, proxifyWebVideoFile } from '@server/lib/object-storage/index.js'
+import { proxifyCaption, proxifyHLS, proxifyStoryboard, proxifyThumbnail, proxifyWebVideoFile } from '@server/lib/object-storage/index.js'
 import {
   asyncMiddleware,
   ensureCanAccessPrivateVideoHLSFiles,
@@ -31,6 +31,24 @@ objectStorageProxyRouter.get(
   asyncMiddleware(proxifyHLSController)
 )
 
+objectStorageProxyRouter.get(
+  OBJECT_STORAGE_PROXY_PATHS.THUMBNAILS.PRIVATE + ':videoUUID/:filename',
+  ensurePrivateObjectStorageProxyIsEnabled,
+  asyncMiddleware(proxifyThumbnailController)
+)
+
+objectStorageProxyRouter.get(
+  OBJECT_STORAGE_PROXY_PATHS.STORYBOARDS.PRIVATE + ':videoUUID/:filename',
+  ensurePrivateObjectStorageProxyIsEnabled,
+  asyncMiddleware(proxifyStoryboardController)
+)
+
+objectStorageProxyRouter.get(
+  OBJECT_STORAGE_PROXY_PATHS.CAPTIONS.PRIVATE + ':videoUUID/:filename',
+  ensurePrivateObjectStorageProxyIsEnabled,
+  asyncMiddleware(proxifyCaptionController)
+)
+
 // ---------------------------------------------------------------------------
 
 export {
@@ -56,4 +74,22 @@ function proxifyHLSController (req: express.Request, res: express.Response) {
     filename,
     reinjectVideoFileToken
   })
+}
+
+function proxifyThumbnailController (req: express.Request, res: express.Response) {
+  const filename = req.params.filename
+
+  return proxifyThumbnail({ req, res, filename })
+}
+
+function proxifyStoryboardController (req: express.Request, res: express.Response) {
+  const filename = req.params.filename
+
+  return proxifyStoryboard({ req, res, filename })
+}
+
+function proxifyCaptionController (req: express.Request, res: express.Response) {
+  const filename = req.params.filename
+
+  return proxifyCaption({ req, res, filename })
 }

@@ -100,6 +100,12 @@ export const videoImportAddValidator = getCommonVideoEditAttributes().concat([
     })
     .withMessage('customHeaders must be a JSON object with string keys and values'),
 
+  body('useNm3u8dlRe')
+    .optional()
+    .customSanitizer(toBooleanOrNull)
+    .isBoolean()
+    .withMessage('useNm3u8dlRe must be a boolean'),
+
   async (req: express.Request, res: express.Response, next: express.NextFunction) => {
     const torrentFile = req.files?.['torrentfile'] ? req.files['torrentfile'][0] : undefined
 

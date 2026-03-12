@@ -202,6 +202,10 @@ object_storage:
   # Maximum amount to upload in one request to object storage
   max_upload_part: 100MB
 
+  # Keep local files for a while after they are uploaded/moved to object storage.
+  # Value is in minutes (integer). Useful to avoid short race conditions for in-flight streaming requests.
+  keep_local_file_after_move: 1
+
   # Maximum number of attempts to make a request to object storage
   # Some object storage providers (for instance Backblaze) expects the client to retry upload upon 5xx errors
   # If you're using such a provider then you can increase this value
@@ -246,16 +250,6 @@ object_storage:
     bucket_name: 'vod'
     prefix: 'captions/'
     base_url: ''
-
-  previews:
-    bucket_name: 'vod'
-    prefix: 'previews/'
-    base_url: '' 
-  
-  redundancy:
-    bucket_name: 'vod'
-    prefix: 'redundancy/'
-    base_url: '' 
 
   storyboards:
     bucket_name: 'vod'
@@ -379,7 +373,7 @@ security:
   # Set x-powered-by HTTP header to "PeerTube"
   # Can help remote software to know this is a PeerTube instance
   powered_by_header:
-    enabled: true
+    enabled: false
 
 tracker:
   # If you disable the tracker, you disable the P2P on your PeerTube instance
@@ -863,6 +857,13 @@ import:
       # We recommend to use a HTTP proxy if you enable HTTP import to prevent private URL access from this server
       # See https://docs.joinpeertube.org/maintain/configuration#security for more information
       enabled: false
+
+      # Preferred downloader for HTTP imports.
+      # Supported values:
+      #  - yt-dlp
+      #  - n-m3u8dl-re
+      # Clearkey imports always use n-m3u8dl-re regardless of this setting.
+      preferred_downloader: 'yt-dlp'
 
       youtube_dl_release:
         # Direct download URL to youtube-dl binary

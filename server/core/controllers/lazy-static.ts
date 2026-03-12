@@ -1,6 +1,7 @@
-import { HttpStatusCode } from '@peertube/peertube-models'
+import { FileStorage, HttpStatusCode } from '@peertube/peertube-models'
 import { generateRequestStream } from '@server/helpers/requests.js'
 import { CONFIG } from '@server/initializers/config.js'
+import { buildObjectStoragePublicFileUrl, generateTorrentObjectStorageKey } from '@server/lib/object-storage/index.js'
 import { VideoFileModel } from '@server/models/video/video-file.js'
 import cors from 'cors'
 import express from 'express'
@@ -115,6 +116,15 @@ async function getTorrent (req: express.Request, res: express.Response) {
   if (!file) return res.sendStatus(HttpStatusCode.NOT_FOUND_404)
 
   if (file.getVideo().isLocal()) {
+    if (file.storage === FileStorage.OBJECT_STORAGE) {
+      const torrentUrl = buildObjectStoragePublicFileUrl({
+        bucket: CONFIG.OBJECT_STORAGE.TORRENTS,
+        key: generateTorrentObjectStorageKey(file.torrentFilename)
+      })
+
+      return res.redirect(torrentUrl)
+    }
+
     return res.sendFile(join(CONFIG.STORAGE.TORRENTS_DIR, file.torrentFilename), { maxAge: STATIC_MAX_AGE.SERVER })
   }
 

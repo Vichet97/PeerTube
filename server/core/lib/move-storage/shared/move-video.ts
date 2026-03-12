@@ -5,8 +5,10 @@ import { VideoCaptionModel } from '@server/models/video/video-caption.js'
 import { VideoJobInfoModel } from '@server/models/video/video-job-info.js'
 import { VideoSourceModel } from '@server/models/video/video-source.js'
 import { VideoModel } from '@server/models/video/video.js'
-import { MStreamingPlaylistVideoUUID, MVideo, MVideoCaption, MVideoWithAllFiles } from '@server/types/models/index.js'
+import { MStreamingPlaylistVideoUUID, MVideo, MVideoCaption, MVideoWithAllFiles, MThumbnail, MStoryboard } from '@server/types/models/index.js'
 import { MVideoSource } from '@server/types/models/video/video-source.js'
+import { StoryboardModel } from '@server/models/video/storyboard.js'
+import { ThumbnailModel } from '@server/models/video/thumbnail.js'
 
 export async function moveVideoToStorage (options: {
   videoUUID: string
@@ -18,6 +20,9 @@ export async function moveVideoToStorage (options: {
   moveHLSFiles: (video: MVideoWithAllFiles) => Promise<void>
   moveVideoSourceFile: (source: MVideoSource) => Promise<void>
   moveCaptionFiles: (captions: MVideoCaption[], hls: MStreamingPlaylistVideoUUID) => Promise<void>
+  moveThumbnailFiles?: (thumbnails: MThumbnail[]) => Promise<void>
+  moveStoryboardFiles?: (storyboards: MStoryboard[]) => Promise<void>
+  moveTorrentFiles?: (video: MVideoWithAllFiles) => Promise<void>
 }) {
   const {
     loggerTags,
@@ -26,6 +31,9 @@ export async function moveVideoToStorage (options: {
     moveHLSFiles,
     moveWebVideoFiles,
     moveCaptionFiles,
+    moveThumbnailFiles,
+    moveStoryboardFiles,
+    moveTorrentFiles,
     targetStorage
   } = options
 
@@ -44,7 +52,7 @@ export async function moveVideoToStorage (options: {
   const lTags = lTagsBase(video.uuid, video.url)
 
   try {
-    const { source, captions, hls, webFiles } = await filterVideoResourcesToBeMoved(video, targetStorage)
+    const { source, captions, hls, webFiles, thumbnails, storyboards } = await filterVideoResourcesToBeMoved(video, targetStorage)
 
     if (captions.length !== 0) {
       logger.debug(`Moving ${captions.length} captions of ${video.uuid}.`, lTags)
@@ -69,6 +77,24 @@ export async function moveVideoToStorage (options: {
       logger.debug(`Moving HLS playlist of ${video.uuid}.`, lTags)
 
       await moveHLSFiles(video)
+    }
+
+    if (thumbnails.length !== 0 && moveThumbnailFiles) {
+      logger.debug(`Moving ${thumbnails.length} thumbnails of ${video.uuid}.`, lTags)
+
+      await moveThumbnailFiles(thumbnails)
+    }
+
+    if (storyboards.length !== 0 && moveStoryboardFiles) {
+      logger.debug(`Moving ${storyboards.length} storyboards of ${video.uuid}.`, lTags)
+
+      await moveStoryboardFiles(storyboards)
+    }
+
+    if (moveTorrentFiles) {
+      logger.debug(`Moving torrent files of ${video.uuid}.`, lTags)
+
+      await moveTorrentFiles(video)
     }
 
     const pendingMove = await VideoJobInfoModel.decrease(video.uuid, 'pendingMove')
@@ -100,6 +126,8 @@ export async function filterVideoResourcesToBeMoved (videoArg: MVideo, targetSto
   const video = await VideoModel.loadFull(videoArg.id)
   const captions = await VideoCaptionModel.listVideoCaptions(video.id)
   const source = await VideoSourceModel.loadLatest(video.id)
+  const thumbnails = await ThumbnailModel.findAll({ where: { videoId: video.id } })
+  const storyboards = await StoryboardModel.findAll({ where: { videoId: video.id } })
 
   const hls = video.getHLSPlaylist()
 
@@ -124,12 +152,15 @@ export async function filterVideoResourcesToBeMoved (videoArg: MVideo, targetSto
       }
 
       return false
-    })
+    }),
+
+    thumbnails: thumbnails.filter(t => t.storage !== targetStorage),
+    storyboards: storyboards.filter(s => s.storage !== targetStorage)
   }
 }
 
 export async function hasVideoResourcesToBeMoved (video: MVideo, targetStorage: FileStorageType) {
-  const { captions, hls, source, webFiles } = await filterVideoResourcesToBeMoved(video, targetStorage)
+  const { captions, hls, source, webFiles, thumbnails, storyboards } = await filterVideoResourcesToBeMoved(video, targetStorage)
 
-  return captions.length !== 0 || !!hls || !!source || webFiles.length !== 0
+  return captions.length !== 0 || !!hls || !!source || webFiles.length !== 0 || thumbnails.length !== 0 || storyboards.length !== 0
 }
