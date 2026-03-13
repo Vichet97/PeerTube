@@ -326,19 +326,27 @@ export class YoutubeDLCLI {
       setTimeout(() => subProcess.kill(), timeout)
     }
 
-    const progressRegex = /\[download\]\s+(\d+(?:\.\d+)?)%/
+    const progressRegexes = [
+      /\[download\]\s+(\d+(?:\.\d+)?)%/,
+      /\((\d+(?:\.\d+)?)%\)/,
+      /\b(\d+(?:\.\d+)?)%\b/
+    ]
     let lastReportedPercent = -1
 
     const parseProgressChunk = (chunk: Buffer) => {
       const lines = chunk.toString().split(/\r?\n/)
       for (const line of lines) {
-        const match = line.match(progressRegex)
-        if (match) {
+        for (const progressRegex of progressRegexes) {
+          const match = line.match(progressRegex)
+          if (!match) continue
+
           const percent = Math.min(100, Math.floor(parseFloat(match[1])))
           if (percent > lastReportedPercent && percent <= 100) {
             lastReportedPercent = percent
             onProgress(percent)
           }
+
+          break
         }
       }
     }
