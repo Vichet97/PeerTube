@@ -865,6 +865,21 @@ import:
       # Clearkey imports always use n-m3u8dl-re regardless of this setting.
       preferred_downloader: 'yt-dlp'
 
+      # yt-dlp download performance tuning
+      yt_dlp:
+        # Number of concurrent HTTP fragment downloads per import
+        concurrent_fragments: 10
+
+        # Use aria2c as external downloader for better multi-connection throughput
+        aria2c:
+          enabled: true
+          # Command or absolute path (example: /usr/bin/aria2c)
+          binary_path: 'aria2c'
+          # Connections per file/server used by aria2c
+          split: 16
+          # Minimum segment size per connection
+          min_split_size: '1M'
+
       youtube_dl_release:
         # Direct download URL to youtube-dl binary
         # Github releases API is also supported
@@ -896,6 +911,8 @@ import:
       # yt-dlp refuses DRM content; N_m3u8DL-RE can download+decrypt with --key kid:key
       # Download from https://github.com/nilaoda/N_m3u8DL-RE/releases (e.g. N_m3u8DL-RE for macOS)
       n_m3u8dl_re:
+        # Parallel segment download workers
+        thread_count: 16
         # Path to pre-installed binary (ignored when release.url is set). Set to null to use storage/bin/<platform>/N_m3u8DL-RE
         binary_path: null
         release:

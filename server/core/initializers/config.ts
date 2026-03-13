@@ -915,6 +915,36 @@ const CONFIG = {
           }
         },
 
+        YT_DLP: {
+          get CONCURRENT_FRAGMENTS () {
+            return config.has('import.videos.http.yt_dlp.concurrent_fragments')
+              ? config.get<number>('import.videos.http.yt_dlp.concurrent_fragments')
+              : 10
+          },
+          ARIA2C: {
+            get ENABLED () {
+              return config.has('import.videos.http.yt_dlp.aria2c.enabled')
+                ? config.get<boolean>('import.videos.http.yt_dlp.aria2c.enabled')
+                : false
+            },
+            get BINARY_PATH () {
+              return config.has('import.videos.http.yt_dlp.aria2c.binary_path')
+                ? config.get<string>('import.videos.http.yt_dlp.aria2c.binary_path')
+                : 'aria2c'
+            },
+            get SPLIT () {
+              return config.has('import.videos.http.yt_dlp.aria2c.split')
+                ? config.get<number>('import.videos.http.yt_dlp.aria2c.split')
+                : 16
+            },
+            get MIN_SPLIT_SIZE () {
+              return config.has('import.videos.http.yt_dlp.aria2c.min_split_size')
+                ? config.get<string>('import.videos.http.yt_dlp.aria2c.min_split_size')
+                : '1M'
+            }
+          }
+        },
+
         get FORCE_IPV4 () {
           return config.get<boolean>('import.videos.http.force_ipv4')
         },
@@ -940,6 +970,11 @@ const CONFIG = {
                 ? config.get<string>('import.videos.http.n_m3u8dl_re.release.url')
                 : null
             }
+          },
+          get THREAD_COUNT () {
+            return config.has('import.videos.http.n_m3u8dl_re.thread_count')
+              ? config.get<number>('import.videos.http.n_m3u8dl_re.thread_count')
+              : 16
           }
         },
 

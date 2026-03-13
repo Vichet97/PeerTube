@@ -276,6 +276,8 @@ export class YoutubeDLCLI {
     completeArgs = this.wrapWithProxyOptions(completeArgs)
     completeArgs = this.wrapWithIPOptions(completeArgs)
     completeArgs = this.wrapWithFFmpegOptions(completeArgs)
+    completeArgs = this.wrapWithAria2cOptions(completeArgs)
+    completeArgs = this.wrapWithPerformanceOptions(completeArgs)
 
     const youtubeDLBinaryPath = getYoutubeDLBinaryPath()
     const subProcessBinary = this.getSubProcessBinary(youtubeDLBinaryPath)
@@ -310,6 +312,8 @@ export class YoutubeDLCLI {
     completeArgs = this.wrapWithProxyOptions(completeArgs)
     completeArgs = this.wrapWithIPOptions(completeArgs)
     completeArgs = this.wrapWithFFmpegOptions(completeArgs)
+    completeArgs = this.wrapWithAria2cOptions(completeArgs)
+    completeArgs = this.wrapWithPerformanceOptions(completeArgs)
 
     const youtubeDLBinaryPath = getYoutubeDLBinaryPath()
     const subProcessBinary = this.getSubProcessBinary(youtubeDLBinaryPath)
@@ -401,6 +405,31 @@ export class YoutubeDLCLI {
     }
 
     return args
+  }
+
+  private wrapWithPerformanceOptions (args: string[]) {
+    if (CONFIG.IMPORT.VIDEOS.HTTP.YOUTUBE_DL_RELEASE.NAME !== 'yt-dlp') return args
+
+    const concurrentFragments = CONFIG.IMPORT.VIDEOS.HTTP.YT_DLP.CONCURRENT_FRAGMENTS
+
+    if (!Number.isFinite(concurrentFragments) || concurrentFragments <= 1) return args
+
+    return [ '--concurrent-fragments', String(concurrentFragments) ].concat(args)
+  }
+
+  private wrapWithAria2cOptions (args: string[]) {
+    if (CONFIG.IMPORT.VIDEOS.HTTP.YOUTUBE_DL_RELEASE.NAME !== 'yt-dlp') return args
+    if (!CONFIG.IMPORT.VIDEOS.HTTP.YT_DLP.ARIA2C.ENABLED) return args
+
+    const binaryPath = CONFIG.IMPORT.VIDEOS.HTTP.YT_DLP.ARIA2C.BINARY_PATH || 'aria2c'
+    const split = CONFIG.IMPORT.VIDEOS.HTTP.YT_DLP.ARIA2C.SPLIT
+    const minSplitSize = CONFIG.IMPORT.VIDEOS.HTTP.YT_DLP.ARIA2C.MIN_SPLIT_SIZE
+
+    if (!Number.isFinite(split) || split <= 0) return args
+
+    const downloaderArgs = `aria2c:-x ${split} -s ${split} -k ${minSplitSize}`
+
+    return [ '--downloader', binaryPath, '--downloader-args', downloaderArgs ].concat(args)
   }
 
   private getSubProcessBinary (youtubeDLBinaryPath: string) {

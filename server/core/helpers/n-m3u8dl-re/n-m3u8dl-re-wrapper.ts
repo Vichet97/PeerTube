@@ -4,6 +4,7 @@ import { basename, dirname } from 'path'
 import { NM3U8DLRECLI } from './n-m3u8dl-re-cli.js'
 import { logger, loggerTagsFactory } from '../logger.js'
 import { generateVideoImportTmpPath } from '../utils.js'
+import { CONFIG } from '@server/initializers/config.js'
 
 const lTags = loggerTagsFactory('n-m3u8dl-re')
 
@@ -69,6 +70,11 @@ export async function downloadWithNm3u8dlRe (options: {
     '--save-dir', workDir,
     '--no-ansi-color'
   ]
+
+  const threadCount = CONFIG.IMPORT.VIDEOS.HTTP.N_M3U8DL_RE.THREAD_COUNT
+  if (Number.isFinite(threadCount) && threadCount > 1) {
+    args.push('--thread-count', String(threadCount))
+  }
 
   for (const keyArg of keyPairs) {
     args.push('--key', keyArg)
