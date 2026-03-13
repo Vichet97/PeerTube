@@ -120,10 +120,30 @@ export abstract class AbstractTranscriber {
       const reason = err instanceof Error ? err.message : 'unknown error'
       this.logger.warn(
         `Cannot execute transcription engine binary ${primaryBinary} (${reason}). ` +
-        `Falling back to ${fallback.command} -m ${fallback.module}.`
+        `Falling back to Python module ${fallback.module}.`
       )
 
-      await $$`${fallback.command} ${[ '-m', fallback.module, ...args ]}`
+      let lastFallbackError: unknown
+
+      for (const pythonCommand of this.getPythonCommandCandidates()) {
+        try {
+          await $$`${pythonCommand} ${[ '-m', fallback.module, ...args ]}`
+          return
+        } catch (fallbackErr) {
+          lastFallbackError = fallbackErr
+
+          const message = String((fallbackErr as any)?.message || '')
+          const missingModule = message.includes(`No module named ${fallback.module}`)
+
+          if (this.isMissingExecutableError(fallbackErr) || missingModule) {
+            continue
+          }
+
+          throw fallbackErr
+        }
+      }
+
+      throw lastFallbackError ?? err
     }
   }
 
@@ -154,8 +174,8 @@ export abstract class AbstractTranscriber {
 
     const installStrategies: [ string, string[] ][] = [
       [ 'pip3', [ 'install', '-U', '-t', directory, packageSpec ] ],
-      [ 'python3', [ '-m', 'pip', 'install', '-U', '-t', directory, packageSpec ] ],
-      [ 'pip', [ 'install', '-U', '-t', directory, packageSpec ] ]
+      [ 'pip', [ 'install', '-U', '-t', directory, packageSpec ] ],
+      ...this.getPythonCommandCandidates().map(command => [ command, [ '-m', 'pip', 'install', '-U', '-t', directory, packageSpec ] ] as [ string, string[] ])
     ]
 
     let lastError: unknown
@@ -169,9 +189,16 @@ export abstract class AbstractTranscriber {
       }
     }
 
-    throw lastError instanceof Error
-      ? lastError
-      : new Error(`Cannot install ${packageSpec}: no pip command worked.`)
+    const reason = lastError instanceof Error ? lastError.message : 'unknown error'
+    throw new Error(
+      `Cannot install ${packageSpec}: all pip/python install strategies failed. Last error: ${reason}`
+    )
+  }
+
+  private getPythonCommandCandidates () {
+    return process.platform === 'win32'
+      ? [ 'python', 'python3', 'py' ]
+      : [ 'python3', 'python' ]
   }
 
   abstract transcribe (options: TranscribeArgs): Promise<TranscriptFile>
