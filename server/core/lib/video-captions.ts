@@ -148,21 +148,7 @@ export async function generateSubtitle (options: {
     await ensureDir(outputPath)
 
     const binDirectory = join(DIRECTORIES.LOCAL_PIP_DIRECTORY, 'bin')
-
-    // Lazy load the transcriber
-    if (!transcriber) {
-      transcriber = transcriberFactory.createFromEngineName({
-        engineName: CONFIG.VIDEO_TRANSCRIPTION.ENGINE,
-        enginePath: CONFIG.VIDEO_TRANSCRIPTION.ENGINE_PATH,
-        logger,
-        binDirectory
-      })
-
-      if (!CONFIG.VIDEO_TRANSCRIPTION.ENGINE_PATH) {
-        logger.info(`Installing transcriber ${transcriber.engine.name} to generate subtitles`, lTags())
-        await transcriber.install(DIRECTORIES.LOCAL_PIP_DIRECTORY)
-      }
-    }
+    const currentTranscriber = await getOrCreateTranscriber(binDirectory)
 
     inputFileMutexReleaser = await VideoPathManager.Instance.lockFiles(options.video.uuid)
 
@@ -189,7 +175,7 @@ export async function generateSubtitle (options: {
 
       logger.info(`Running transcription for ${video.uuid} in ${outputPath}`, lTags(video.uuid))
 
-      const transcriptFile = await transcriber.transcribe({
+      const transcriptionArgs = {
         mediaFilePath: inputPath,
 
         model: CONFIG.VIDEO_TRANSCRIPTION.MODEL_PATH
@@ -198,8 +184,25 @@ export async function generateSubtitle (options: {
 
         transcriptDirectory: outputPath,
 
-        format: 'vtt'
-      })
+        format: 'vtt' as const
+      }
+
+      let transcriptFile
+
+      try {
+        transcriptFile = await currentTranscriber.transcribe(transcriptionArgs)
+      } catch (err) {
+        if (!shouldRetryTranscriberInstall(err)) throw err
+        if (CONFIG.VIDEO_TRANSCRIPTION.ENGINE_PATH) throw err
+
+        logger.warn(
+          `Transcriber runtime is incomplete for engine ${currentTranscriber.engine.name}. ` +
+          'Re-installing dependencies before retrying once.'
+        )
+
+        await currentTranscriber.install(DIRECTORIES.LOCAL_PIP_DIRECTORY)
+        transcriptFile = await currentTranscriber.transcribe(transcriptionArgs)
+      }
 
       const refreshedVideo = await VideoModel.loadFull(video.uuid)
       if (!refreshedVideo) {
@@ -216,6 +219,35 @@ export async function generateSubtitle (options: {
     VideoJobInfoModel.decrease(options.video.uuid, 'pendingTranscription')
       .catch(err => logger.error('Cannot decrease pendingTranscription job count', { err, ...lTags(options.video.uuid) }))
   }
+}
+
+async function getOrCreateTranscriber (binDirectory: string) {
+  if (transcriber) return transcriber
+
+  const createdTranscriber = transcriberFactory.createFromEngineName({
+    engineName: CONFIG.VIDEO_TRANSCRIPTION.ENGINE,
+    enginePath: CONFIG.VIDEO_TRANSCRIPTION.ENGINE_PATH,
+    logger,
+    binDirectory
+  })
+
+  if (!CONFIG.VIDEO_TRANSCRIPTION.ENGINE_PATH) {
+    logger.info(`Installing transcriber ${createdTranscriber.engine.name} to generate subtitles`, lTags())
+    await createdTranscriber.install(DIRECTORIES.LOCAL_PIP_DIRECTORY)
+  }
+
+  transcriber = createdTranscriber
+  return transcriber
+}
+
+function shouldRetryTranscriberInstall (err: unknown) {
+  if (!err || typeof err !== 'object') return false
+
+  const code = (err as any).code
+  if (code === 'ENOENT') return true
+
+  const message = String((err as any).message || '')
+  return message.includes('No module named whisper_ctranslate2') || message.includes('No module named whisper')
 }
 
 export async function onTranscriptionEnded (options: {
