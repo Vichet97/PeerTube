@@ -17,14 +17,11 @@ export class OpenaiTranscriber extends AbstractTranscriber {
   }: TranscribeArgs): Promise<TranscriptFile> {
     this.assertLanguageDetectionAvailable(language)
 
-    const $$ = this.getExec(this.getExecEnv())
-
     const languageArgs = language ? [ '--language', language ] : []
 
     this.createRun(runId)
     this.startRun()
-
-    await $$`${this.getEngineBinary()} ${[
+    await this.runEngineCommand([
       mediaFilePath,
       '--word_timestamps',
       'True',
@@ -35,7 +32,7 @@ export class OpenaiTranscriber extends AbstractTranscriber {
       '--output_dir',
       transcriptDirectory,
       ...languageArgs
-    ]}`
+    ])
     this.stopRun()
 
     return new TranscriptFile({
@@ -64,9 +61,7 @@ export class OpenaiTranscriber extends AbstractTranscriber {
   // ---------------------------------------------------------------------------
 
   async install (directory: string) {
-    const $$ = this.getExec()
-
-    await $$`pip3 install -U -t ${[ directory ]} openai-whisper==${this.engine.version}`
+    await this.installPythonPackage(directory, 'openai-whisper', this.engine.version)
   }
 
   protected getExecEnv () {

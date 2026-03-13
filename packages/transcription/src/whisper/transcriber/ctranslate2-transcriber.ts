@@ -19,8 +19,6 @@ export class Ctranslate2Transcriber extends OpenaiTranscriber {
   }: TranscribeArgs): Promise<TranscriptFile> {
     this.assertLanguageDetectionAvailable(language)
 
-    const $$ = this.getExec(this.getExecEnv())
-
     if (model.path) {
       assert(await lstat(model.path).then(stats => stats.isDirectory()), 'Model path must be a path to a directory.')
     }
@@ -30,7 +28,7 @@ export class Ctranslate2Transcriber extends OpenaiTranscriber {
 
     this.createRun(runId)
     this.startRun()
-    await $$`${this.getEngineBinary()} ${[
+    await this.runEngineCommand([
       mediaFilePath,
       ...modelArgs,
       '--word_timestamps',
@@ -46,7 +44,7 @@ export class Ctranslate2Transcriber extends OpenaiTranscriber {
       '--output_dir',
       transcriptDirectory,
       ...languageArgs
-    ]}`
+    ])
     this.stopRun()
 
     return new TranscriptFile({
@@ -61,8 +59,6 @@ export class Ctranslate2Transcriber extends OpenaiTranscriber {
   }
 
   async install (directory: string) {
-    const $$ = this.getExec()
-
-    await $$`pip3 install -U -t ${directory} whisper-ctranslate2==${this.engine.version}`
+    await this.installPythonPackage(directory, 'whisper-ctranslate2', this.engine.version)
   }
 }
