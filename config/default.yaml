@@ -874,7 +874,11 @@ import:
         aria2c:
           enabled: true
           # Command or absolute path (example: /usr/bin/aria2c)
+          # If command is unavailable and binary_path is "aria2c", PeerTube auto-downloads aria2c in storage/bin/<platform>/
           binary_path: 'aria2c'
+          release:
+            # GitHub releases API or direct binary/archive URL
+            url: 'https://api.github.com/repos/aria2/aria2/releases'
           # Connections per file/server used by aria2c
           split: 8
           # Minimum segment size per connection

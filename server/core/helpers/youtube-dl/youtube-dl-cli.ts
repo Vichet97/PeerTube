@@ -4,16 +4,18 @@ import { CONFIG } from '@server/initializers/config.js'
 import {
   buildPlatformBinaryPath,
   getBinPlatformFolder,
+  getPlatformExecutableName,
   resolvePlatformBinaryPathWithLegacyFallback
 } from '@server/helpers/binaries/platform-binaries.js'
 import { execa, Options as ExecaNodeOptions } from 'execa'
-import { ensureDir, pathExists } from 'fs-extra/esm'
-import { chmod, writeFile } from 'fs/promises'
+import { ensureDir, pathExists, remove } from 'fs-extra/esm'
+import { chmod, readdir, readFile, writeFile } from 'fs/promises'
 import { OptionsOfBufferResponseBody } from 'got'
-import { dirname } from 'path'
+import { basename, dirname, join } from 'path'
 import { logger, loggerTagsFactory } from '../logger.js'
 import { getProxy, isProxyEnabled } from '../proxy.js'
 import { isBinaryResponse, unsafeSSRFGot } from '../requests.js'
+import { unzip } from '../unzip.js'
 
 type ProcessOptions = Pick<ExecaNodeOptions, 'cwd' | 'maxBuffer'>
 
@@ -59,6 +61,116 @@ function getYoutubeDLBinaryPath () {
 
 function getYoutubeDLDownloadPath () {
   return buildPlatformBinaryPath(CONFIG.STORAGE.BIN_DIR, getYoutubeDLBinaryName())
+}
+
+function getAria2cManagedBinaryPath () {
+  const binaryName = getPlatformExecutableName('aria2c')
+  return resolvePlatformBinaryPathWithLegacyFallback(CONFIG.STORAGE.BIN_DIR, binaryName, [ 'aria2c', 'aria2c.exe' ])
+}
+
+function getAria2cAssetNeedles () {
+  const platform = getBinPlatformFolder()
+  if (platform === 'windows') return [ 'win-64bit' ]
+  if (platform === 'linux-amd64') return [ 'linux-gnu-64bit', 'linux-musl-64bit' ]
+  if (platform === 'linux-arm64') return [ 'linux-aarch64', 'linux-arm64' ]
+  if (platform === 'macos') return [ 'osx-darwin', 'darwin' ]
+
+  return [ 'linux-gnu-64bit' ]
+}
+
+function getAria2cArchiveSuffixes () {
+  return [ '.zip', '.tar.gz', '.tar.bz2', '.tar.xz' ]
+}
+
+async function extractArchive (archivePath: string, destination: string) {
+  if (archivePath.endsWith('.zip')) {
+    await unzip({
+      source: archivePath,
+      destination,
+      maxSize: 1024 * 1024 * 1024,
+      maxFiles: 20_000
+    })
+    return
+  }
+
+  await execa('tar', [ '-xf', archivePath, '-C', destination ])
+}
+
+async function findBinaryInDirectory (directory: string, binaryNames: string[]): Promise<string | undefined> {
+  const entries = await readdir(directory, { withFileTypes: true })
+
+  for (const entry of entries) {
+    const entryPath = join(directory, entry.name)
+
+    if (entry.isDirectory()) {
+      const nested = await findBinaryInDirectory(entryPath, binaryNames)
+      if (nested) return nested
+      continue
+    }
+
+    if (binaryNames.includes(entry.name)) return entryPath
+  }
+
+  return undefined
+}
+
+async function updateAria2cBinary () {
+  const releaseUrl = CONFIG.IMPORT.VIDEOS.HTTP.YT_DLP.ARIA2C.RELEASE.URL
+  logger.info('Updating aria2c binary from %s.', releaseUrl, lTags())
+
+  const gotOptions: OptionsOfBufferResponseBody = {
+    context: { bodyKBLimit: 100_000 },
+    responseType: 'buffer' as 'buffer'
+  }
+
+  let gotResult = await unsafeSSRFGot(releaseUrl, gotOptions)
+  if (!isBinaryResponse(gotResult)) {
+    const json = JSON.parse(gotResult.body.toString())
+    const latest = json.find(release => release.prerelease === false) ?? json[0]
+    if (!latest) throw new Error('Cannot find latest release for aria2')
+
+    const needles = getAria2cAssetNeedles()
+    const suffixes = getAria2cArchiveSuffixes()
+    const releaseAsset = latest.assets.find((asset: { name: string }) => {
+      return needles.some(needle => asset.name.includes(needle)) &&
+        suffixes.some(suffix => asset.name.endsWith(suffix))
+    })
+    if (!releaseAsset) throw new Error(`Cannot find aria2 release asset for ${needles.join(', ')}`)
+
+    gotResult = await unsafeSSRFGot(releaseAsset.browser_download_url, gotOptions)
+    if (!isBinaryResponse(gotResult)) throw new Error('Not a binary response')
+
+    const tempDirectory = join(CONFIG.STORAGE.TMP_PERSISTENT_DIR, 'aria2c')
+    const archivePath = join(tempDirectory, releaseAsset.name)
+    const extractDirectory = join(tempDirectory, basename(releaseAsset.name, '.tar.gz'))
+
+    await ensureDir(extractDirectory)
+    await writeFile(archivePath, gotResult.body)
+
+    try {
+      await extractArchive(archivePath, extractDirectory)
+
+      const expectedBinaryNames = [ getPlatformExecutableName('aria2c'), 'aria2c', 'aria2c.exe' ]
+      const extractedBinaryPath = await findBinaryInDirectory(extractDirectory, expectedBinaryNames)
+      if (!extractedBinaryPath) throw new Error('Cannot find aria2c binary in extracted archive')
+
+      const managedBinaryPath = getAria2cManagedBinaryPath()
+      await ensureDir(dirname(managedBinaryPath))
+      await writeFile(managedBinaryPath, await readFile(extractedBinaryPath))
+      await chmod(managedBinaryPath, 0o755)
+    } finally {
+      await remove(tempDirectory)
+    }
+
+    logger.info('aria2c updated %s.', getAria2cManagedBinaryPath(), lTags())
+    return
+  }
+
+  const managedBinaryPath = getAria2cManagedBinaryPath()
+  await ensureDir(dirname(managedBinaryPath))
+  await writeFile(managedBinaryPath, gotResult.body)
+  await chmod(managedBinaryPath, 0o755)
+  logger.info('aria2c updated %s.', managedBinaryPath, lTags())
 }
 
 export class YoutubeDLCLI {
@@ -276,7 +388,7 @@ export class YoutubeDLCLI {
     completeArgs = this.wrapWithProxyOptions(completeArgs)
     completeArgs = this.wrapWithIPOptions(completeArgs)
     completeArgs = this.wrapWithFFmpegOptions(completeArgs)
-    completeArgs = this.wrapWithAria2cOptions(completeArgs)
+    completeArgs = await this.wrapWithAria2cOptions(completeArgs)
     completeArgs = this.wrapWithPerformanceOptions(completeArgs)
 
     const youtubeDLBinaryPath = getYoutubeDLBinaryPath()
@@ -312,7 +424,7 @@ export class YoutubeDLCLI {
     completeArgs = this.wrapWithProxyOptions(completeArgs)
     completeArgs = this.wrapWithIPOptions(completeArgs)
     completeArgs = this.wrapWithFFmpegOptions(completeArgs)
-    completeArgs = this.wrapWithAria2cOptions(completeArgs)
+    completeArgs = await this.wrapWithAria2cOptions(completeArgs)
     completeArgs = this.wrapWithPerformanceOptions(completeArgs)
 
     const youtubeDLBinaryPath = getYoutubeDLBinaryPath()
@@ -425,11 +537,20 @@ export class YoutubeDLCLI {
     return [ '--concurrent-fragments', String(concurrentFragments) ].concat(args)
   }
 
-  private wrapWithAria2cOptions (args: string[]) {
+  private async wrapWithAria2cOptions (args: string[]) {
     if (CONFIG.IMPORT.VIDEOS.HTTP.YOUTUBE_DL_RELEASE.NAME !== 'yt-dlp') return args
     if (!CONFIG.IMPORT.VIDEOS.HTTP.YT_DLP.ARIA2C.ENABLED) return args
 
-    const binaryPath = CONFIG.IMPORT.VIDEOS.HTTP.YT_DLP.ARIA2C.BINARY_PATH || 'aria2c'
+    const preferredBinaryPath = CONFIG.IMPORT.VIDEOS.HTTP.YT_DLP.ARIA2C.BINARY_PATH || 'aria2c'
+    const binaryPath = await this.safeGetAria2cBinaryPath(preferredBinaryPath)
+    if (!binaryPath) {
+      logger.warn(
+        'aria2c is enabled but unavailable (including auto-download). Falling back to yt-dlp default downloader.',
+        lTags()
+      )
+      return args
+    }
+
     const split = CONFIG.IMPORT.VIDEOS.HTTP.YT_DLP.ARIA2C.SPLIT
     const minSplitSize = CONFIG.IMPORT.VIDEOS.HTTP.YT_DLP.ARIA2C.MIN_SPLIT_SIZE
 
@@ -438,6 +559,37 @@ export class YoutubeDLCLI {
     const downloaderArgs = `aria2c:-x ${split} -s ${split} -k ${minSplitSize}`
 
     return [ '--downloader', binaryPath, '--downloader-args', downloaderArgs ].concat(args)
+  }
+
+  private async safeGetAria2cBinaryPath (preferredBinaryPath: string): Promise<string | null> {
+    if (preferredBinaryPath && preferredBinaryPath !== 'aria2c') return preferredBinaryPath
+
+    try {
+      await execa(preferredBinaryPath, [ '--version' ], { timeout: 3000 })
+      return preferredBinaryPath
+    } catch {
+      const managedBinaryPath = getAria2cManagedBinaryPath()
+      if (await pathExists(managedBinaryPath)) return managedBinaryPath
+
+      try {
+        await updateAria2cBinary()
+      } catch (err) {
+        logger.warn(
+          'Cannot auto-download aria2c binary. Falling back to yt-dlp default downloader.',
+          { err, ...lTags() }
+        )
+        return null
+      }
+
+      if (await pathExists(managedBinaryPath)) return managedBinaryPath
+
+      logger.warn(
+        'aria2c auto-download finished but binary is still missing at %s. Falling back to yt-dlp default downloader.',
+        managedBinaryPath,
+        lTags()
+      )
+      return null
+    }
   }
 
   private getSubProcessBinary (youtubeDLBinaryPath: string) {

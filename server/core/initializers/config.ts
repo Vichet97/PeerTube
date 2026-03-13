@@ -941,6 +941,14 @@ const CONFIG = {
               return config.has('import.videos.http.yt_dlp.aria2c.min_split_size')
                 ? config.get<string>('import.videos.http.yt_dlp.aria2c.min_split_size')
                 : '1M'
+            },
+            RELEASE: {
+              get URL () {
+                return config.has('import.videos.http.yt_dlp.aria2c.release.url') &&
+                  config.get<string>('import.videos.http.yt_dlp.aria2c.release.url')
+                  ? config.get<string>('import.videos.http.yt_dlp.aria2c.release.url')
+                  : 'https://api.github.com/repos/aria2/aria2/releases'
+              }
             }
           }
         },
