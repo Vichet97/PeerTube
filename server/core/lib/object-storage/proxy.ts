@@ -169,7 +169,6 @@ function setS3Headers (
   setHeaderIfDefined(res, 'Content-Type', s3Response.ContentType)
   setHeaderIfDefined(res, 'Accept-Ranges', s3Response.AcceptRanges)
   setHeaderIfDefined(res, 'ETag', s3Response.ETag)
-  setHeaderIfDefined(res, 'Cache-Control', s3Response.CacheControl)
   if (s3Response.LastModified) {
     res.setHeader('Last-Modified', s3Response.LastModified.toUTCString())
   }
