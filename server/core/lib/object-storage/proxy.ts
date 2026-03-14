@@ -51,7 +51,7 @@ export async function proxifyHLS (options: {
       rangeHeader: req.header('range')
     })
 
-    setS3Headers(res, s3Response)
+    setS3Headers(res, s3Response, { allowContentLength: !reinjectVideoFileToken })
 
     const streamReplacer = reinjectVideoFileToken
       ? new StreamReplacer(line => injectQueryToPlaylistUrls(line, buildReinjectVideoFileTokenQuery(req, filename.endsWith('master.m3u8'))))
@@ -159,9 +159,33 @@ function handleObjectStorageFailure (res: express.Response, err: Error) {
   })
 }
 
-function setS3Headers (res: express.Response, s3Response: GetObjectCommandOutput) {
+function setS3Headers (
+  res: express.Response,
+  s3Response: GetObjectCommandOutput,
+  options: { allowContentLength?: boolean } = {}
+) {
+  const { allowContentLength = true } = options
+
+  setHeaderIfDefined(res, 'Content-Type', s3Response.ContentType)
+  setHeaderIfDefined(res, 'Accept-Ranges', s3Response.AcceptRanges)
+  setHeaderIfDefined(res, 'ETag', s3Response.ETag)
+  setHeaderIfDefined(res, 'Cache-Control', s3Response.CacheControl)
+  if (s3Response.LastModified) {
+    res.setHeader('Last-Modified', s3Response.LastModified.toUTCString())
+  }
+
+  if (allowContentLength && s3Response.ContentLength !== undefined) {
+    res.setHeader('Content-Length', String(s3Response.ContentLength))
+  }
+
   if (s3Response.$metadata.httpStatusCode === HttpStatusCode.PARTIAL_CONTENT_206) {
-    res.setHeader('Content-Range', s3Response.ContentRange)
+    setHeaderIfDefined(res, 'Content-Range', s3Response.ContentRange)
     res.status(HttpStatusCode.PARTIAL_CONTENT_206)
   }
+}
+
+function setHeaderIfDefined (res: express.Response, key: string, value: string | undefined) {
+  if (!value) return
+
+  res.setHeader(key, value)
 }
