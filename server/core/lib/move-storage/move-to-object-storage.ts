@@ -22,7 +22,7 @@ import { VideoCaptionModel } from '@server/models/video/video-caption.js'
 import { VideoModel } from '@server/models/video/video.js'
 import { MStreamingPlaylistVideo, MVideo, MVideoCaption, MVideoFile, MVideoWithAllFiles, MThumbnail, MStoryboard } from '@server/types/models/index.js'
 import { MVideoSource } from '@server/types/models/video/video-source.js'
-import { remove } from 'fs-extra/esm'
+import { pathExists, remove } from 'fs-extra/esm'
 import { rmdir } from 'fs/promises'
 import { dirname, join, resolve } from 'path'
 import { federateVideoIfNeeded } from '../activitypub/videos/federate.js'
@@ -283,6 +283,12 @@ async function moveTorrentFiles (video: MVideoWithAllFiles) {
     if (!file.torrentFilename) continue
 
     const torrentPath = join(CONFIG.STORAGE.TORRENTS_DIR, file.torrentFilename)
+
+    // Skip if local torrent was already moved to object storage by updateTorrentMetadata in onVideoFileMoved
+    if (!await pathExists(torrentPath)) {
+      logger.debug(`Torrent file ${torrentPath} not found locally, already on object storage`, lTagsBase())
+      continue
+    }
 
     try {
       await storeTorrentFile(torrentPath, file.torrentFilename)

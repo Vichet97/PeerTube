@@ -63,10 +63,15 @@ export async function updateStreamingPlaylistsInfohashesIfNeeded () {
 export async function updateM3U8AndShaPlaylist (video: MVideo, playlist: MStreamingPlaylist) {
   try {
     let playlistWithFiles = await updateMasterHLSPlaylist(video, playlist)
+    if (!playlistWithFiles) return
+
     playlistWithFiles = await updateSha256VODSegments(video, playlist)
+    if (!playlistWithFiles) return
 
     // Refresh playlist, operations can take some time
     playlistWithFiles = await VideoStreamingPlaylistModel.loadWithVideoAndFiles(playlist.id)
+    if (!playlistWithFiles) return
+
     playlistWithFiles.assignP2PMediaLoaderInfoHashes(video, playlistWithFiles.VideoFiles)
     await playlistWithFiles.save()
 
@@ -81,9 +86,11 @@ export async function updateM3U8AndShaPlaylist (video: MVideo, playlist: MStream
 // Avoid concurrency issues when updating streaming playlist files
 const playlistFilesQueue = new PQueue({ concurrency: 1 })
 
-function updateMasterHLSPlaylist (video: MVideo, playlistArg: MStreamingPlaylist): Promise<MStreamingPlaylistFilesVideo> {
+function updateMasterHLSPlaylist (video: MVideo, playlistArg: MStreamingPlaylist): Promise<MStreamingPlaylistFilesVideo | null> {
   return playlistFilesQueue.add(async () => {
     const playlist = await VideoStreamingPlaylistModel.loadWithVideoAndFiles(playlistArg.id)
+    if (!playlist) return null
+
     const captions = await VideoCaptionModel.listVideoCaptions(video.id)
 
     const extMediaAudio: string[] = []
@@ -178,11 +185,12 @@ function updateMasterHLSPlaylist (video: MVideo, playlistArg: MStreamingPlaylist
 
 // ---------------------------------------------------------------------------
 
-function updateSha256VODSegments (video: MVideo, playlistArg: MStreamingPlaylist): Promise<MStreamingPlaylistFilesVideo> {
+function updateSha256VODSegments (video: MVideo, playlistArg: MStreamingPlaylist): Promise<MStreamingPlaylistFilesVideo | null> {
   return playlistFilesQueue.add(async () => {
     const json: { [filename: string]: { [range: string]: string } } = {}
 
     const playlist = await VideoStreamingPlaylistModel.loadWithVideoAndFiles(playlistArg.id)
+    if (!playlist) return null
 
     // For all the resolutions available for this video
     for (const file of playlist.VideoFiles) {

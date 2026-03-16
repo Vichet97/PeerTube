@@ -236,22 +236,45 @@ function buildKey (key: string, bucketInfo: BucketInfo) {
 async function createObjectReadStream (options: {
   key: string
   bucketInfo: BucketInfo
-  rangeHeader: string
+  rangeHeader?: string
+  abortSignal?: AbortSignal
+  requestTimeoutMs?: number
 }) {
-  const { key, bucketInfo, rangeHeader } = options
+  const { key, bucketInfo, rangeHeader, abortSignal, requestTimeoutMs } = options
 
   const { GetObjectCommand } = await import('@aws-sdk/client-s3')
+
+  const timeoutController = requestTimeoutMs ? new AbortController() : null
+  const effectiveSignal = (() => {
+    if (abortSignal && timeoutController) {
+      const combined = new AbortController()
+      const onAbort = () => combined.abort()
+      abortSignal.addEventListener('abort', onAbort)
+      timeoutController.signal.addEventListener('abort', onAbort)
+      return combined.signal
+    }
+    return abortSignal ?? timeoutController?.signal
+  })()
+
+  let timeoutId: ReturnType<typeof setTimeout> | undefined
+  if (timeoutController && requestTimeoutMs) {
+    timeoutId = setTimeout(() => timeoutController!.abort(), requestTimeoutMs)
+  }
 
   const command = new GetObjectCommand({
     Bucket: bucketInfo.BUCKET_NAME,
     Key: buildKey(key, bucketInfo),
-    Range: rangeHeader
+    ...(rangeHeader && { Range: rangeHeader })
   })
 
   const client = await getClient()
-  const response = await client.send(command)
+  const sendOptions = effectiveSignal ? { abortSignal: effectiveSignal } : {}
+  const response = await client.send(command, sendOptions)
     .catch(err => {
       throw parseS3Error(err)
+    })
+    .finally(() => {
+      if (timeoutId) clearTimeout(timeoutId)
     })
 
   return {
@@ -388,14 +411,14 @@ async function applyOnPrefix (options: {
       throw parseS3Error(err)
     })
 
-  if (isArray(listedObjects.Contents) !== true) {
-    const message = `Cannot apply function on ${commandPrefix} prefix in bucket ${bucketInfo.BUCKET_NAME}: no files listed.`
-
-    logger.error(message, { response: listedObjects, ...lTags() })
-    throw new Error(message)
+  // Empty prefix (no files) is success, not an error (e.g. HLS not yet uploaded)
+  const contents = listedObjects.Contents
+  if (!isArray(contents) || contents.length === 0) {
+    logger.debug('No files in prefix %s in bucket %s, nothing to apply.', commandPrefix, bucketInfo.BUCKET_NAME, lTags())
+    return
   }
 
-  await Bluebird.map(listedObjects.Contents, object => {
+  await Bluebird.map(contents, object => {
     const command = commandBuilder(object)
 
     return s3Client.send(command)

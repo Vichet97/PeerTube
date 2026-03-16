@@ -182,6 +182,10 @@ export function removeThumbnailObjectStorage (thumbnail: MThumbnail) {
   return removeObject(generateThumbnailObjectStorageKey(thumbnail.filename), CONFIG.OBJECT_STORAGE.THUMBNAILS)
 }
 
+export function removeThumbnailObjectStorageByFilename (filename: string) {
+  return removeObject(generateThumbnailObjectStorageKey(filename), CONFIG.OBJECT_STORAGE.THUMBNAILS)
+}
+
 // ---------------------------------------------------------------------------
 
 export function storeStoryboard (inputPath: string, filename: string) {
@@ -196,6 +200,10 @@ export function storeStoryboard (inputPath: string, filename: string) {
 
 export function removeStoryboardObjectStorage (storyboard: MStoryboard) {
   return removeObject(generateStoryboardObjectStorageKey(storyboard.filename), CONFIG.OBJECT_STORAGE.STORYBOARDS)
+}
+
+export function removeStoryboardObjectStorageByFilename (filename: string) {
+  return removeObject(generateStoryboardObjectStorageKey(filename), CONFIG.OBJECT_STORAGE.STORYBOARDS)
 }
 
 // ---------------------------------------------------------------------------
@@ -294,92 +302,116 @@ export async function makeTorrentFileAvailable (filename: string, destination: s
 
 export function getWebVideoFileReadStream (options: {
   filename: string
-  rangeHeader: string
+  rangeHeader?: string
+  abortSignal?: AbortSignal
+  requestTimeoutMs?: number
 }) {
-  const { filename, rangeHeader } = options
+  const { filename, rangeHeader, abortSignal, requestTimeoutMs } = options
 
   const key = generateWebVideoObjectStorageKey(filename)
 
   return createObjectReadStream({
     key,
     bucketInfo: CONFIG.OBJECT_STORAGE.WEB_VIDEOS,
-    rangeHeader
+    rangeHeader,
+    abortSignal,
+    requestTimeoutMs
   })
 }
 
 export function getHLSFileReadStream (options: {
   video: MVideoUUID
   filename: string
-  rangeHeader: string
+  rangeHeader?: string
+  abortSignal?: AbortSignal
+  requestTimeoutMs?: number
 }) {
-  const { video, filename, rangeHeader } = options
+  const { video, filename, rangeHeader, abortSignal, requestTimeoutMs } = options
 
   const key = generateHLSObjectStorageKey(video, filename)
 
   return createObjectReadStream({
     key,
     bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS,
-    rangeHeader
+    rangeHeader,
+    abortSignal,
+    requestTimeoutMs
   })
 }
 
 export function getOriginalFileReadStream (options: {
   keptOriginalFilename: string
-  rangeHeader: string
+  rangeHeader?: string
+  abortSignal?: AbortSignal
+  requestTimeoutMs?: number
 }) {
-  const { keptOriginalFilename, rangeHeader } = options
+  const { keptOriginalFilename, rangeHeader, abortSignal, requestTimeoutMs } = options
 
   const key = generateOriginalVideoObjectStorageKey(keptOriginalFilename)
 
   return createObjectReadStream({
     key,
     bucketInfo: CONFIG.OBJECT_STORAGE.ORIGINAL_VIDEO_FILES,
-    rangeHeader
+    rangeHeader,
+    abortSignal,
+    requestTimeoutMs
   })
 }
 
 export function getCaptionReadStream (options: {
   filename: string
-  rangeHeader: string
+  rangeHeader?: string
+  abortSignal?: AbortSignal
+  requestTimeoutMs?: number
 }) {
-  const { filename, rangeHeader } = options
+  const { filename, rangeHeader, abortSignal, requestTimeoutMs } = options
 
   const key = generateCaptionObjectStorageKey(filename)
 
   return createObjectReadStream({
     key,
     bucketInfo: CONFIG.OBJECT_STORAGE.CAPTIONS,
-    rangeHeader
+    rangeHeader,
+    abortSignal,
+    requestTimeoutMs
   })
 }
 
 export function getThumbnailReadStream (options: {
   filename: string
-  rangeHeader: string
+  rangeHeader?: string
+  abortSignal?: AbortSignal
+  requestTimeoutMs?: number
 }) {
-  const { filename, rangeHeader } = options
+  const { filename, rangeHeader, abortSignal, requestTimeoutMs } = options
 
   const key = generateThumbnailObjectStorageKey(filename)
 
   return createObjectReadStream({
     key,
     bucketInfo: CONFIG.OBJECT_STORAGE.THUMBNAILS,
-    rangeHeader
+    rangeHeader,
+    abortSignal,
+    requestTimeoutMs
   })
 }
 
 export function getStoryboardReadStream (options: {
   filename: string
-  rangeHeader: string
+  rangeHeader?: string
+  abortSignal?: AbortSignal
+  requestTimeoutMs?: number
 }) {
-  const { filename, rangeHeader } = options
+  const { filename, rangeHeader, abortSignal, requestTimeoutMs } = options
 
   const key = generateStoryboardObjectStorageKey(filename)
 
   return createObjectReadStream({
     key,
     bucketInfo: CONFIG.OBJECT_STORAGE.STORYBOARDS,
-    rangeHeader
+    rangeHeader,
+    abortSignal,
+    requestTimeoutMs
   })
 }
 

@@ -280,7 +280,11 @@ const CONFIG = {
       SECRET_ACCESS_KEY: config.get<string>('object_storage.credentials.secret_access_key')
     },
     PROXY: {
-      PROXIFY_PRIVATE_FILES: config.get<boolean>('object_storage.proxy.proxify_private_files')
+      PROXIFY_PRIVATE_FILES: config.get<boolean>('object_storage.proxy.proxify_private_files'),
+      REQUEST_TIMEOUT_MS: (() => {
+        const seconds = config.get<number>('object_storage.proxy.request_timeout')
+        return seconds > 0 ? seconds * 1000 : undefined
+      })()
     },
     WEB_VIDEOS: {
       BUCKET_NAME: config.get<string>('object_storage.web_videos.bucket_name'),

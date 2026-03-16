@@ -32,8 +32,8 @@ export async function processGenerateStoryboard (job: Job): Promise<void> {
   try {
     const video = await VideoModel.loadFull(payload.videoUUID)
     if (!video) {
-      logger.info(`Video ${payload.videoUUID} does not exist anymore, skipping storyboard generation.`, lTags)
-      return
+      logger.info('Storyboard job %s cancelled: video %s does not exist (video was deleted).', job.id, payload.videoUUID, lTags)
+      throw new Error('Video was deleted - transcoding job cancelled')
     }
 
     const inputFile = video.getMaxQualityFile(VideoFileStream.VIDEO)
@@ -82,6 +82,14 @@ export async function processGenerateStoryboard (job: Job): Promise<void> {
 
       const imageSize = await getImageSizeFromWorker(destination)
       let storage: FileStorageType = FileStorage.FILE_SYSTEM
+
+      // Check if video was deleted during ffmpeg run; avoid uploading orphan to object storage
+      const videoStillExists = await VideoModel.loadFull(payload.videoUUID)
+      if (!videoStillExists) {
+        logger.info('Storyboard job %s: video %s deleted during generation, skipping upload.', job.id, payload.videoUUID, lTags)
+        await remove(destination)
+        return
+      }
 
       if (CONFIG.OBJECT_STORAGE.ENABLED) {
         await storeStoryboard(destination, filename)

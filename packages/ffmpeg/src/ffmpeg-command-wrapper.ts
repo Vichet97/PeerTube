@@ -24,6 +24,11 @@ export interface FFmpegCommandWrapperOptions {
   updateJobProgress?: (progress?: number) => void
   onEnd?: () => void
   onError?: (err: Error) => void
+
+  /** When aborted, kill ffmpeg immediately. Used for video-deletion cancellation. */
+  abortSignal?: AbortSignal
+  /** Called when runCommand promise settles (success or failure). Use to clear timers. */
+  onSettled?: () => void
 }
 
 export class FFmpegCommandWrapper {
@@ -42,6 +47,8 @@ export class FFmpegCommandWrapper {
   private readonly updateJobProgress: (progress?: number) => void
   private readonly onEnd?: () => void
   private readonly onError?: (err: Error) => void
+  private readonly abortSignal?: AbortSignal
+  private readonly onSettled?: () => void
 
   private command: FfmpegCommand
 
@@ -58,6 +65,8 @@ export class FFmpegCommandWrapper {
 
     this.onEnd = options.onEnd
     this.onError = options.onError
+    this.abortSignal = options.abortSignal
+    this.onSettled = options.onSettled
   }
 
   getAvailableEncoders () {
@@ -118,28 +127,55 @@ export class FFmpegCommandWrapper {
 
     return new Promise<void>((res, rej) => {
       let shellCommand: string
+      let promiseSettled = false
+      let abortCheckInterval: ReturnType<typeof setInterval> | undefined
+
+      const settleReject = (err: Error) => {
+        if (promiseSettled) return
+        promiseSettled = true
+        if (abortCheckInterval) clearInterval(abortCheckInterval)
+        if (this.onSettled) this.onSettled()
+        if (this.onError) this.onError(err)
+        rej(err)
+      }
+
+      const settleResolve = () => {
+        if (promiseSettled) return
+        promiseSettled = true
+        if (abortCheckInterval) clearInterval(abortCheckInterval)
+        if (this.onSettled) this.onSettled()
+        if (this.onEnd) this.onEnd()
+        res()
+      }
+
+      if (this.abortSignal) {
+        abortCheckInterval = setInterval(() => {
+          if (this.abortSignal!.aborted) {
+            this.command.kill('SIGKILL')
+            settleReject(new Error('Video was deleted - transcoding job cancelled'))
+          }
+        }, 150)
+      }
 
       this.command.on('start', cmdline => {
         shellCommand = cmdline
       })
 
       this.command.on('error', (err: Error & { stdout?: string, stderr?: string }, stdout, stderr) => {
+        if (promiseSettled) return
+
         if (silent !== true) this.logger.error('Error in ffmpeg.', { err, stdout, stderr, shellCommand, ...this.lTags })
 
         err.stdout = stdout
         err.stderr = stderr
 
-        if (this.onError) this.onError(err)
-
-        rej(err)
+        settleReject(err)
       })
 
       this.command.on('end', (stdout, stderr) => {
         this.logger.debug('FFmpeg command ended.', { stdout, stderr, shellCommand, ...this.lTags })
 
-        if (this.onEnd) this.onEnd()
-
-        res()
+        settleResolve()
       })
 
       if (this.updateJobProgress) {
@@ -151,7 +187,13 @@ export class FFmpegCommandWrapper {
           if (percent < 0) percent = 0
           if (percent > 100) percent = 100
 
-          this.updateJobProgress(percent)
+          try {
+            this.updateJobProgress(percent)
+          } catch (err) {
+            // Progress callback may throw to abort (e.g. video deleted); catch and reject instead of uncaught crash
+            this.command.kill('SIGKILL')
+            settleReject(err instanceof Error ? err : new Error(String(err)))
+          }
         })
       }
 

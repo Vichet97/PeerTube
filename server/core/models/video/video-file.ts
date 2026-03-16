@@ -608,14 +608,28 @@ export class VideoFileModel extends SequelizeModel<VideoFileModel> {
   removeTorrent () {
     if (!this.torrentFilename) return null
 
-    if (this.storage === FileStorage.OBJECT_STORAGE && CONFIG.OBJECT_STORAGE.ENABLED) {
-      return removeTorrentObjectStorage(this.torrentFilename)
-        .catch(err => logger.warn('Cannot delete torrent %s from object storage.', this.torrentFilename, { err }))
+    const promises: Promise<any>[] = []
+
+    // Always try object storage when enabled: moveTorrentFiles may have uploaded the torrent
+    // even when the web video/HLS file was not moved (e.g. pending transcription).
+    if (CONFIG.OBJECT_STORAGE.ENABLED) {
+      promises.push(
+        removeTorrentObjectStorage(this.torrentFilename)
+          .catch(err => logger.warn('Cannot delete torrent %s from object storage.', this.torrentFilename, { err }))
+      )
     }
 
-    const torrentPath = getFSTorrentFilePath(this)
-    return remove(torrentPath)
-      .catch(err => logger.warn('Cannot delete torrent %s.', torrentPath, { err }))
+    if (this.storage === FileStorage.FILE_SYSTEM) {
+      const torrentPath = getFSTorrentFilePath(this)
+      promises.push(
+        remove(torrentPath)
+          .catch(err => logger.warn('Cannot delete torrent %s.', torrentPath, { err }))
+      )
+    }
+
+    if (promises.length === 0) return null
+
+    return Promise.all(promises)
   }
 
   hasSameUniqueKeysThan (other: MVideoFile) {

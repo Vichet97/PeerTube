@@ -3,6 +3,7 @@ import { ffprobePromise, getVideoStreamDimensionsInfo } from '@peertube/peertube
 import { retryTransactionWrapper } from '@server/helpers/database-utils.js'
 import { LoggerTags, logger } from '@server/helpers/logger.js'
 import { deleteFileAndCatch } from '@server/helpers/utils.js'
+import { removeStoryboardObjectStorageByFilename } from '@server/lib/object-storage/videos.js'
 import { STORYBOARD } from '@server/initializers/constants.js'
 import { sequelizeTypescript } from '@server/initializers/database.js'
 import { StoryboardModel } from '@server/models/video/storyboard.js'
@@ -76,6 +77,10 @@ export async function insertStoryboardInDatabase (options: {
       if (!video) {
         logger.info(`Video ${videoUUID} does not exist anymore, skipping storyboard generation.`, lTags)
         deleteFileAndCatch(destination)
+        if (storage === FileStorage.OBJECT_STORAGE) {
+          removeStoryboardObjectStorageByFilename(filename)
+            .catch(err => logger.warn('Cannot remove orphaned storyboard %s from object storage (video was deleted).', filename, { err, ...lTags }))
+        }
         return
       }
 

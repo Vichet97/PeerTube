@@ -18,6 +18,14 @@ export function buildNextVideoState (currentState?: VideoStateType) {
     throw new Error('Video is already in its final state')
   }
 
+  // Move succeeded after previous failure: next state is PUBLISHED
+  if (
+    currentState === VideoState.TO_MOVE_TO_EXTERNAL_STORAGE_FAILED ||
+    currentState === VideoState.TO_MOVE_TO_FILE_SYSTEM_FAILED
+  ) {
+    return VideoState.PUBLISHED
+  }
+
   if (
     currentState !== VideoState.TO_EDIT &&
     currentState !== VideoState.TO_TRANSCODE &&

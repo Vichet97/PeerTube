@@ -195,6 +195,7 @@ export function checkMissedConfig () {
     'object_storage.upload_acl.public',
     'object_storage.upload_acl.private',
     'object_storage.proxy.proxify_private_files',
+    'object_storage.proxy.request_timeout',
     'object_storage.credentials.access_key_id',
     'object_storage.credentials.secret_access_key',
     'object_storage.max_upload_part',

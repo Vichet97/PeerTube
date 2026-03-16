@@ -181,6 +181,8 @@ const jobTypes: JobType[] = [
 
 const silentFailure = new Set<JobType>([ 'activitypub-http-unicast' ])
 
+const CANCELLED_REASON = 'Video was deleted - transcoding job cancelled'
+
 class JobQueue {
   private static instance: JobQueue
 
@@ -253,10 +255,12 @@ class JobQueue {
     const worker = new Worker(handlerName, processor, workerOptions)
 
     worker.on('failed', (job, err) => {
-      const logLevel = silentFailure.has(handlerName)
+      let logLevel: 'debug' | 'info' | 'error' = silentFailure.has(handlerName)
         ? 'debug'
         : 'error'
-
+      if (logLevel === 'error' && err?.message === CANCELLED_REASON) {
+        logLevel = 'info'
+      }
       logger.log(logLevel, 'Cannot execute job %s in queue %s.', job.id, handlerName, { payload: job.data, err })
 
       if (errorHandlers[handlerName]) {
@@ -441,6 +445,11 @@ class JobQueue {
     const states = this.buildStateFilter(state)
     const filteredJobTypes = this.buildTypeFilter(jobType)
 
+    // When filtering failed/cancelled we over-fetch because we filter by failedReason
+    const fetchLimit = (state === 'failed' || state === 'cancelled')
+      ? Math.min(10000, start + count + 2000)
+      : start + count
+
     let results: Job[] = []
 
     for (const jobType of filteredJobTypes) {
@@ -451,9 +460,18 @@ class JobQueue {
         continue
       }
 
-      const jobs = await queue.getJobs(states, 0, start + count, asc)
+      const jobs = await queue.getJobs(states as Parameters<Queue['getJobs']>[0], 0, fetchLimit, asc)
 
       results = results.concat(jobs)
+    }
+
+    if (state === 'failed' || state === 'cancelled') {
+      const wantCancelled = state === 'cancelled'
+      results = results.filter((j: Job) => {
+        const isCancelled = typeof j.failedReason === 'string' &&
+          j.failedReason.includes('Video was deleted - transcoding job cancelled')
+        return wantCancelled ? isCancelled : !isCancelled
+      })
     }
 
     results.sort((j1: any, j2: any) => {
@@ -469,8 +487,27 @@ class JobQueue {
   }
 
   async count (state: JobState, jobType?: JobType): Promise<number> {
-    const states = this.buildStateFilter(state)
     const filteredJobTypes = this.buildTypeFilter(jobType)
+
+    if (state === 'failed' || state === 'cancelled') {
+      const states = this.buildStateFilter(state)
+      let total = 0
+      for (const type of filteredJobTypes) {
+        const queue = this.queues[type]
+        if (!queue) continue
+        const jobs = await queue.getJobs(states as Parameters<Queue['getJobs']>[0], 0, 10000, true)
+        const wantCancelled = state === 'cancelled'
+        const count = jobs.filter((j: Job) => {
+          const isCancelled = typeof j.failedReason === 'string' &&
+            j.failedReason.includes('Video was deleted - transcoding job cancelled')
+          return wantCancelled ? isCancelled : !isCancelled
+        }).length
+        total += count
+      }
+      return total
+    }
+
+    const states = this.buildStateFilter(state)
 
     let total = 0
 
@@ -493,6 +530,9 @@ class JobQueue {
 
   private buildStateFilter (state?: JobState) {
     if (!state) return Array.from(jobStates)
+
+    // Cancelled jobs are stored as 'failed' in BullMQ; we filter by failedReason in listForApi/count
+    if (state === 'cancelled') return [ 'failed' ]
 
     const states = [ state ]
 
@@ -531,6 +571,73 @@ class JobQueue {
 
     if (progresses.length === 0) return 0
     return Math.round(progresses.reduce((a, b) => a + b, 0) / progresses.length)
+  }
+
+  /**
+   * Remove all jobs relevant to a video (waiting, delayed, active).
+   * Called when a video is deleted so jobs are gracefully cancelled.
+   * Active jobs are attempted; if removal fails (e.g. job locked), the worker will exit and throw
+   * "Video was deleted - transcoding job cancelled" so the job appears as failed with that reason.
+   */
+  async removeAllVideoJobsForVideo (videoUUID: string, videoId: number): Promise<void> {
+    const CANCELLED_REASON = 'Video was deleted - transcoding job cancelled'
+    const states = [ 'waiting', 'delayed', 'prioritized', 'waiting-children', 'active' ] as const
+    let removedCount = 0
+
+    const queueConfigs: { name: JobType; match: (data: any) => boolean }[] = [
+      { name: 'video-transcoding', match: (d) => d.videoUUID === videoUUID },
+      { name: 'transcoding-job-builder', match: (d) => d.videoUUID === videoUUID },
+      { name: 'move-to-object-storage', match: (d) => 'videoUUID' in d && d.videoUUID === videoUUID },
+      { name: 'move-to-file-system', match: (d) => 'videoUUID' in d && d.videoUUID === videoUUID },
+      { name: 'video-transcription', match: (d) => d.videoUUID === videoUUID },
+      { name: 'generate-video-storyboard', match: (d) => d.videoUUID === videoUUID },
+      { name: 'federate-video', match: (d) => d.videoUUID === videoUUID },
+      { name: 'video-studio-edition', match: (d) => d.videoUUID === videoUUID },
+      { name: 'manage-video-torrent', match: (d) => d.videoId === videoId }
+    ]
+
+    for (const { name: queueName, match } of queueConfigs) {
+      const queue = this.queues[queueName]
+      if (!queue) continue
+
+      for (const state of states) {
+        try {
+          const jobs = await queue.getJobs([ state ], 0, 500, true)
+          const matchingJobs = jobs.filter((j: Job) => match(j.data))
+
+          for (const job of matchingJobs) {
+            try {
+              await job.remove()
+              removedCount++
+            } catch (err) {
+              if (state === 'active') {
+                logger.debug(
+                  'Could not remove active job %s for video %s (worker may still be processing; it will fail with: %s).',
+                  job.id,
+                  videoUUID,
+                  CANCELLED_REASON
+                )
+              } else {
+                logger.warn('Cannot remove job %s for deleted video %s.', job.id, videoUUID, { err })
+              }
+            }
+          }
+        } catch (err) {
+          if ((err as any)?.message?.includes('Could not find queue') !== true) {
+            logger.warn('Cannot list %s jobs for video %s removal.', queueName, videoUUID, { err })
+          }
+        }
+      }
+    }
+
+    if (removedCount > 0) {
+      logger.info(
+        'Cancelled %d job(s) for deleted video %s (reason: %s).',
+        removedCount,
+        videoUUID,
+        CANCELLED_REASON
+      )
+    }
   }
 
   // ---------------------------------------------------------------------------

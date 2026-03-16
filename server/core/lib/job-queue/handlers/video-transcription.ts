@@ -13,8 +13,8 @@ export async function processVideoTranscription (job: Job) {
 
   const video = await VideoModel.load(payload.videoUUID)
   if (!video) {
-    logger.info('Do not process transcription job %d, video does not exist.', job.id, lTags(payload.videoUUID))
-    return
+    logger.info('Transcription job %s cancelled: video %s does not exist (video was deleted).', job.id, payload.videoUUID, lTags(payload.videoUUID))
+    throw new Error('Video was deleted - transcoding job cancelled')
   }
 
   return generateSubtitle({ video })

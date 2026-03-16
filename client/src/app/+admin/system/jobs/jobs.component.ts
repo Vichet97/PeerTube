@@ -44,7 +44,7 @@ export class JobsComponent implements OnInit {
   readonly table = viewChild<TableComponent<Job, ColumnName>>('table')
 
   jobState: JobStateClient = 'all'
-  jobStates: JobStateClient[] = [ 'all', 'active', 'completed', 'failed', 'waiting', 'delayed' ]
+  jobStates: JobStateClient[] = [ 'all', 'active', 'completed', 'failed', 'cancelled', 'waiting', 'delayed' ]
   jobStateItems: SelectOptionsItem[] = this.jobStates.map(s => ({
     id: s,
     label: s,
@@ -123,6 +123,9 @@ export class JobsComponent implements OnInit {
       case 'prioritized':
       case 'paused':
         return [ 'pt-badge', 'badge-brown' ]
+
+      case 'cancelled':
+        return [ 'pt-badge', 'badge-grey' ]
 
       case 'failed':
         return [ 'pt-badge', 'badge-red' ]

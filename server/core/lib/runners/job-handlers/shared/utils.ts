@@ -47,7 +47,15 @@ export async function hasMissingHLSStreams (options: {
   const { videoId, inputStreams, transcodingRequestAt } = options
 
   const video = await VideoModel.loadFull(videoId)
-  const hlsFiles = video.getHLSPlaylist().VideoFiles
+  if (!video) {
+    // Video was deleted during transcoding (e.g. user deleted while job was running)
+    return false
+  }
+
+  const hlsPlaylist = video.getHLSPlaylist()
+  if (!hlsPlaylist) return true
+
+  const hlsFiles = hlsPlaylist.VideoFiles
 
   for (const inputStream of inputStreams) {
     const hasStream = hlsFiles.some(f => {

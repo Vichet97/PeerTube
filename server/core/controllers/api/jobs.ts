@@ -86,10 +86,16 @@ async function listJobs (req: express.Request, res: express.Response) {
   return res.json(result)
 }
 
+const CANCELLED_REASON = 'Video was deleted - transcoding job cancelled'
+
 async function formatJob (job: BullJob, state?: JobState): Promise<Job> {
+  let displayState = state || await job.getState()
+  if (displayState === 'failed' && typeof job.failedReason === 'string' && job.failedReason.includes(CANCELLED_REASON)) {
+    displayState = 'cancelled'
+  }
   return {
     id: job.id,
-    state: state || await job.getState(),
+    state: displayState,
     type: job.queueName as JobType,
     data: job.data,
     parent: job.parent

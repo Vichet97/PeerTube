@@ -1,4 +1,4 @@
-import { Activity, ActivityAudience, ActivitypubHttpBroadcastPayload, ContextType } from '@peertube/peertube-models'
+import { Activity, ActivityAudience, ActivitypubHttpBroadcastPayload, ContextType, VideoPrivacy } from '@peertube/peertube-models'
 import { ActorFollowHealthCache } from '@server/lib/actor-follow-health-cache.js'
 import { getServerActor } from '@server/models/application/application.js'
 import { VideoShareModel } from '@server/models/video/video-share.js'
@@ -36,6 +36,12 @@ async function sendVideoRelatedActivity (activityBuilder: (audience: ActivityAud
   }
 
   const video = await VideoModel.loadByUrlAndPopulateAccount(options.video.url, transaction)
+
+  // Don't federate View activity for private/internal videos
+  if (contextType === 'View' && (video.privacy === VideoPrivacy.PRIVATE || video.privacy === VideoPrivacy.INTERNAL)) {
+    return undefined
+  }
+
   const actorsInvolvedInVideo = await getActorsInvolvedInVideo(video, transaction)
 
   const audience = getVideoAudience({

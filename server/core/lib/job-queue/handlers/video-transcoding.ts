@@ -37,10 +37,9 @@ async function processVideoTranscoding (job: Job) {
   logger.info('Processing transcoding job %s.', job.id, lTags(payload.videoUUID))
 
   const video = await VideoModel.loadFull(payload.videoUUID)
-  // No video, maybe deleted?
   if (!video) {
-    logger.info(`Do not process job ${job.id}, video does not exist.`, lTags(payload.videoUUID))
-    return undefined
+    logger.info('Transcoding job %s cancelled: video %s does not exist (video was deleted).', job.id, payload.videoUUID, lTags(payload.videoUUID))
+    throw new Error('Video was deleted - transcoding job cancelled')
   }
 
   const user = await UserModel.loadByChannelActorId(video.VideoChannel.Actor.id)
@@ -57,8 +56,19 @@ async function processVideoTranscoding (job: Job) {
   try {
     await handler(job, payload, video, user)
   } catch (error) {
-    await moveToFailedTranscodingState(video)
+    // Video may have been deleted during transcoding; treat as graceful cancellation, not failure
+    const videoStillExists = await VideoModel.loadFull(payload.videoUUID)
+    if (!videoStillExists) {
+      logger.info(
+        'Transcoding job %s cancelled: video %s was deleted during transcoding.',
+        job.id,
+        payload.videoUUID,
+        lTags(payload.videoUUID)
+      )
+      throw new Error('Video was deleted - transcoding job cancelled')
+    }
 
+    await moveToFailedTranscodingState(videoStillExists)
     await VideoJobInfoModel.decrease(video.uuid, 'pendingTranscode')
 
     throw error
@@ -146,7 +156,14 @@ async function handleHLSJob (job: Job, payload: HLSTranscodingPayload, videoArg:
     inputFileMutexReleaser()
   }
 
-  logger.info('HLS transcoding job for %s ended.', video.uuid, lTags(video.uuid), { payload })
+  // Video may have been deleted during transcoding; re-load to avoid operating on stale/deleted data
+  const videoStillExists = await VideoModel.loadFull(videoArg.uuid)
+  if (!videoStillExists) {
+    logger.info('Transcoding job cancelled: video %s was deleted during HLS transcoding.', videoArg.uuid, lTags(videoArg.uuid))
+    throw new Error('Video was deleted - transcoding job cancelled')
+  }
+
+  logger.info('HLS transcoding job for %s ended.', videoStillExists.uuid, lTags(videoStillExists.uuid), { payload })
 
   const missingStream = await hasMissingHLSStreams({
     inputStreams: payload.inputStreams,
@@ -159,16 +176,16 @@ async function handleHLSJob (job: Job, payload: HLSTranscodingPayload, videoArg:
       ? [ VideoResolution.H_NOVIDEO ]
       : []
 
-    logger.info('Removing Web Video files of %s now we have a HLS version of it.', video.uuid, {
+    logger.info('Removing Web Video files of %s now we have a HLS version of it.', videoStillExists.uuid, {
       resolutionExceptions,
-      ...lTags(video.uuid)
+      ...lTags(videoStillExists.uuid)
     })
 
-    await removeAllWebVideoFiles(video, { resolutionExceptions })
+    await removeAllWebVideoFiles(videoStillExists, { resolutionExceptions })
   }
 
   // Splitted audio, wait audio & video generation before moving the video in its next state
   const moveVideoToNextState = payload.canMoveVideoState && !missingStream
 
-  await onTranscodingEnded({ isNewVideo: payload.isNewVideo, moveVideoToNextState, video })
+  await onTranscodingEnded({ isNewVideo: payload.isNewVideo, moveVideoToNextState, video: videoStillExists })
 }

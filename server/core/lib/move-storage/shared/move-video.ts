@@ -1,5 +1,6 @@
 import { FileStorage, FileStorageType } from '@peertube/peertube-models'
 import { LoggerTags, logger, loggerTagsFactory } from '@server/helpers/logger.js'
+import { getHLSDirectory } from '@server/lib/paths.js'
 import { VideoPathManager } from '@server/lib/video-path-manager.js'
 import { VideoCaptionModel } from '@server/models/video/video-caption.js'
 import { VideoJobInfoModel } from '@server/models/video/video-job-info.js'
@@ -9,6 +10,8 @@ import { MStreamingPlaylistVideoUUID, MVideo, MVideoCaption, MVideoWithAllFiles,
 import { MVideoSource } from '@server/types/models/video/video-source.js'
 import { StoryboardModel } from '@server/models/video/storyboard.js'
 import { ThumbnailModel } from '@server/models/video/thumbnail.js'
+import { pathExists } from 'fs-extra/esm'
+import { join } from 'path'
 
 export async function moveVideoToStorage (options: {
   videoUUID: string
@@ -133,16 +136,33 @@ export async function filterVideoResourcesToBeMoved (videoArg: MVideo, targetSto
 
   const moveHLS = hls && (hls.storage !== targetStorage || hls.VideoFiles.some(f => f.storage !== targetStorage))
 
+  // Only include HLS if the master playlist file exists on disk.
+  // HLS transcoding may still be in progress (e.g. Web Video finished first), so DB playlistFilename can be stale.
+  let hlsReady = false
+  if (moveHLS && hls.storage === FileStorage.FILE_SYSTEM) {
+    const masterPlaylistPath = join(getHLSDirectory(video), hls.playlistFilename)
+    hlsReady = await pathExists(masterPlaylistPath)
+  } else if (moveHLS) {
+    hlsReady = true
+  }
+
+  // Do not move the video source while transcription is pending.
+  // Transcription may need local access to the original file (e.g. Whisper metadata).
+  const jobInfo = await VideoJobInfoModel.load(video.id)
+  const hasPendingTranscription = jobInfo && jobInfo.pendingTranscription > 0
+
   return {
-    source: source?.keptOriginalFilename && source.storage !== targetStorage
+    source: source?.keptOriginalFilename && source.storage !== targetStorage && !hasPendingTranscription
       ? source
       : undefined,
 
-    hls: moveHLS
+    hls: moveHLS && hlsReady && !hasPendingTranscription
       ? hls
       : undefined,
 
-    webFiles: video.VideoFiles.filter(f => f.storage !== targetStorage),
+    webFiles: hasPendingTranscription
+      ? []
+      : video.VideoFiles.filter(f => f.storage !== targetStorage),
     captions: captions.filter(c => {
       if (c.storage !== targetStorage) return true
 

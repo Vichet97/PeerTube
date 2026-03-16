@@ -21,6 +21,10 @@ async function processTranscodingJobBuilder (job: Job) {
 
   if (payload.optimizeJob) {
     const video = await VideoModel.loadFull(payload.videoUUID)
+    if (!video) {
+      logger.info('Transcoding job builder %s cancelled: video %s does not exist (video was deleted).', job.id, payload.videoUUID)
+      throw new Error('Video was deleted - transcoding job cancelled')
+    }
     const user = await UserModel.loadByVideoId(video.id)
     const videoFile = video.getMaxQualityFile(VideoFileStream.VIDEO) || video.getMaxQualityFile(VideoFileStream.AUDIO)
 

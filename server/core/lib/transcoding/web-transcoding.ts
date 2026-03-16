@@ -52,7 +52,7 @@ export async function optimizeOriginalVideofile (options: {
       const fps = computeOutputFPS({ inputFPS: inputVideoFile.fps, resolution, isOriginResolution: true, type: 'vod' })
 
       // Could be very long!
-      await buildFFmpegVOD(job).transcode({
+      await buildFFmpegVOD({ job, videoUUID: video.uuid }).transcode({
         type: transcodeType,
 
         videoInputPath,
@@ -110,7 +110,7 @@ export async function transcodeNewWebVideoResolution (options: {
         fps
       }
 
-      await buildFFmpegVOD(job).transcode(transcodeOptions)
+      await buildFFmpegVOD({ job, videoUUID: video.uuid }).transcode(transcodeOptions)
 
       return onWebVideoFileTranscoding({ video, videoOutputPath })
     })
@@ -162,7 +162,7 @@ export async function mergeAudioVideofile (options: {
       }
 
       try {
-        await buildFFmpegVOD(job).transcode(transcodeOptions)
+        await buildFFmpegVOD({ job, videoUUID: video.uuid }).transcode(transcodeOptions)
 
         await remove(tmpThumbnailPath)
       } catch (err) {

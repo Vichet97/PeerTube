@@ -6,6 +6,8 @@ import { MVideo } from '@server/types/models/index.js'
 import express from 'express'
 import { PassThrough, pipeline } from 'stream'
 import { injectQueryToPlaylistUrls } from '../hls.js'
+import { CONFIG } from '@server/initializers/config.js'
+import { createRequestAbortContext } from './proxy-utils.js'
 import { getCaptionReadStream, getHLSFileReadStream, getStoryboardReadStream, getThumbnailReadStream, getWebVideoFileReadStream } from './videos.js'
 
 import type { GetObjectCommandOutput } from '@aws-sdk/client-s3'
@@ -19,16 +21,30 @@ export async function proxifyWebVideoFile (options: {
 
   logger.debug('Proxifying Web Video file %s from object storage.', filename)
 
+  const { abortController, cleanup, registerStream } = createRequestAbortContext(req, res)
+  const timeoutMs = CONFIG.OBJECT_STORAGE.PROXY?.REQUEST_TIMEOUT_MS
+
   try {
     const { response: s3Response, stream } = await getWebVideoFileReadStream({
       filename,
-      rangeHeader: req.header('range')
+      rangeHeader: req.header('range'),
+      abortSignal: abortController.signal,
+      requestTimeoutMs: timeoutMs
     })
 
+    registerStream(stream)
     setS3Headers(res, s3Response)
 
-    return stream.pipe(res)
+    return pipeline(
+      stream,
+      res,
+      err => {
+        cleanup()
+        if (err) handleObjectStorageFailure(res, err)
+      }
+    )
   } catch (err) {
+    cleanup()
     return handleObjectStorageFailure(res, err)
   }
 }
@@ -44,13 +60,19 @@ export async function proxifyHLS (options: {
 
   logger.debug('Proxifying HLS file %s from object storage.', filename)
 
+  const { abortController, cleanup, registerStream } = createRequestAbortContext(req, res)
+  const timeoutMs = CONFIG.OBJECT_STORAGE.PROXY?.REQUEST_TIMEOUT_MS
+
   try {
     const { response: s3Response, stream } = await getHLSFileReadStream({
       video,
       filename,
-      rangeHeader: req.header('range')
+      rangeHeader: req.header('range'),
+      abortSignal: abortController.signal,
+      requestTimeoutMs: timeoutMs
     })
 
+    registerStream(stream)
     setS3Headers(res, s3Response, { allowContentLength: !reinjectVideoFileToken })
 
     const streamReplacer = reinjectVideoFileToken
@@ -62,12 +84,12 @@ export async function proxifyHLS (options: {
       streamReplacer,
       res,
       err => {
-        if (!err) return
-
-        handleObjectStorageFailure(res, err)
+        cleanup()
+        if (err) handleObjectStorageFailure(res, err)
       }
     )
   } catch (err) {
+    cleanup()
     return handleObjectStorageFailure(res, err)
   }
 }
@@ -81,16 +103,30 @@ export async function proxifyThumbnail (options: {
 
   logger.debug('Proxifying thumbnail file %s from object storage.', filename)
 
+  const { abortController, cleanup, registerStream } = createRequestAbortContext(req, res)
+  const timeoutMs = CONFIG.OBJECT_STORAGE.PROXY?.REQUEST_TIMEOUT_MS
+
   try {
     const { response: s3Response, stream } = await getThumbnailReadStream({
       filename,
-      rangeHeader: req.header('range')
+      rangeHeader: req.header('range'),
+      abortSignal: abortController.signal,
+      requestTimeoutMs: timeoutMs
     })
 
+    registerStream(stream)
     setS3Headers(res, s3Response)
 
-    return stream.pipe(res)
+    return pipeline(
+      stream,
+      res,
+      err => {
+        cleanup()
+        if (err) handleObjectStorageFailure(res, err)
+      }
+    )
   } catch (err) {
+    cleanup()
     return handleObjectStorageFailure(res, err)
   }
 }
@@ -104,16 +140,30 @@ export async function proxifyStoryboard (options: {
 
   logger.debug('Proxifying storyboard file %s from object storage.', filename)
 
+  const { abortController, cleanup, registerStream } = createRequestAbortContext(req, res)
+  const timeoutMs = CONFIG.OBJECT_STORAGE.PROXY?.REQUEST_TIMEOUT_MS
+
   try {
     const { response: s3Response, stream } = await getStoryboardReadStream({
       filename,
-      rangeHeader: req.header('range')
+      rangeHeader: req.header('range'),
+      abortSignal: abortController.signal,
+      requestTimeoutMs: timeoutMs
     })
 
+    registerStream(stream)
     setS3Headers(res, s3Response)
 
-    return stream.pipe(res)
+    return pipeline(
+      stream,
+      res,
+      err => {
+        cleanup()
+        if (err) handleObjectStorageFailure(res, err)
+      }
+    )
   } catch (err) {
+    cleanup()
     return handleObjectStorageFailure(res, err)
   }
 }
@@ -127,16 +177,30 @@ export async function proxifyCaption (options: {
 
   logger.debug('Proxifying caption file %s from object storage.', filename)
 
+  const { abortController, cleanup, registerStream } = createRequestAbortContext(req, res)
+  const timeoutMs = CONFIG.OBJECT_STORAGE.PROXY?.REQUEST_TIMEOUT_MS
+
   try {
     const { response: s3Response, stream } = await getCaptionReadStream({
       filename,
-      rangeHeader: req.header('range')
+      rangeHeader: req.header('range'),
+      abortSignal: abortController.signal,
+      requestTimeoutMs: timeoutMs
     })
 
+    registerStream(stream)
     setS3Headers(res, s3Response)
 
-    return stream.pipe(res)
+    return pipeline(
+      stream,
+      res,
+      err => {
+        cleanup()
+        if (err) handleObjectStorageFailure(res, err)
+      }
+    )
   } catch (err) {
+    cleanup()
     return handleObjectStorageFailure(res, err)
   }
 }
@@ -146,7 +210,21 @@ export async function proxifyCaption (options: {
 // ---------------------------------------------------------------------------
 
 function handleObjectStorageFailure (res: express.Response, err: Error) {
-  if (err.name === 'NoSuchKey') {
+  if (res.writableEnded || res.headersSent) {
+    logger.debug('Skipping error response: client disconnected or response already sent', { err: err?.message })
+    return
+  }
+
+  // Client disconnect / abort: do not log as error
+  const errWithCode = err as NodeJS.ErrnoException
+  const isClientDisconnect = err?.name === 'AbortError' ||
+    errWithCode?.code === 'ERR_STREAM_PREMATURE_CLOSE'
+  if (isClientDisconnect) {
+    logger.debug('Client disconnected during object storage proxy', { err: err?.message })
+    return
+  }
+
+  if (err?.name === 'NoSuchKey') {
     logger.debug('Could not find key in object storage to proxify private HLS video file.', { err })
     return res.sendStatus(HttpStatusCode.NOT_FOUND_404)
   }

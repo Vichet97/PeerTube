@@ -11,6 +11,8 @@ import { getFormattedObjects } from '../../../helpers/utils.js'
 import { VIDEO_CATEGORIES, VIDEO_LANGUAGES, VIDEO_LICENCES, VIDEO_PRIVACIES } from '../../../initializers/constants.js'
 import { sequelizeTypescript } from '../../../initializers/database.js'
 import { JobQueue } from '../../../lib/job-queue/index.js'
+import { Redis } from '../../../lib/redis.js'
+import { VideoJobInfoModel } from '../../../models/video/video-job-info.js'
 import { Hooks } from '../../../lib/plugins/hooks.js'
 import {
   apiRateLimiter,
@@ -219,6 +221,15 @@ async function listVideos (req: express.Request, res: express.Response) {
 
 async function removeVideo (req: express.Request, res: express.Response) {
   const videoInstance = res.locals.videoAll
+
+  // Set Redis flag so active transcoding workers can detect deletion and exit promptly
+  await Redis.Instance.setVideoDeletionFlag(videoInstance.uuid)
+
+  // Abort all video-related jobs and remove queued jobs so they don't run after video is deleted
+  await VideoJobInfoModel.abortAllTasks(videoInstance.uuid, 'pendingTranscode')
+  await VideoJobInfoModel.abortAllTasks(videoInstance.uuid, 'pendingMove')
+  await VideoJobInfoModel.abortAllTasks(videoInstance.uuid, 'pendingTranscription')
+  await JobQueue.Instance.removeAllVideoJobsForVideo(videoInstance.uuid, videoInstance.id)
 
   await sequelizeTypescript.transaction(async t => {
     await videoInstance.destroy({ transaction: t })

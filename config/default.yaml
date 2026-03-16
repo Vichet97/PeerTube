@@ -194,6 +194,10 @@ object_storage:
     # PeerTube proxies private file requests (required when ACLs are null)
     proxify_private_files: true
 
+    # Timeout in seconds for S3 GetObject requests. Prevents freeze when object storage is slow or hung.
+    # 0 = no timeout (not recommended for production)
+    request_timeout: 120
+
   credentials:
     # Match RUSTFS_ACCESS_KEY / RUSTFS_SECRET_KEY in docker-compose.yml
     access_key_id: 'peertube'
@@ -204,7 +208,7 @@ object_storage:
 
   # Keep local files for a while after they are uploaded/moved to object storage.
   # Value is in minutes (integer). Useful to avoid short race conditions for in-flight streaming requests.
-  keep_local_file_after_move: 1
+  keep_local_file_after_move: 10
 
   # Maximum number of attempts to make a request to object storage
   # Some object storage providers (for instance Backblaze) expects the client to retry upload upon 5xx errors

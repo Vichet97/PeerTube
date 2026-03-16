@@ -369,6 +369,19 @@ class Redis {
     return this.deleteKey('resumable-upload-' + uploadId)
   }
 
+  /* ************ Video deletion flag (for cancelling active transcoding jobs) ************ */
+
+  private static VIDEO_DELETION_FLAG_TTL = 3600000 // 1 hour
+
+  setVideoDeletionFlag (videoUUID: string) {
+    return this.setValue('video-deletion-flag-' + videoUUID, '1', Redis.VIDEO_DELETION_FLAG_TTL)
+  }
+
+  async isVideoDeletionFlagSet (videoUUID: string) {
+    const value = await this.getValue('video-deletion-flag-' + videoUUID)
+    return !!value
+  }
+
   /* ************ AP resource unavailability ************ */
 
   async addAPUnavailability (url: string) {

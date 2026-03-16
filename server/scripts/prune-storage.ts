@@ -65,6 +65,9 @@ class ObjectStoragePruner {
     await this.findFilesToDelete(CONFIG.OBJECT_STORAGE.ORIGINAL_VIDEO_FILES, this.doesOriginalFileExistFactory())
     await this.findFilesToDelete(CONFIG.OBJECT_STORAGE.USER_EXPORTS, this.doesUserExportFileExistFactory())
     await this.findFilesToDelete(CONFIG.OBJECT_STORAGE.CAPTIONS, this.doesCaptionFileExistFactory())
+    await this.findFilesToDelete(CONFIG.OBJECT_STORAGE.TORRENTS, this.doesTorrentFileExistFactory())
+    await this.findFilesToDelete(CONFIG.OBJECT_STORAGE.THUMBNAILS, this.doesThumbnailObjectStorageExistFactory())
+    await this.findFilesToDelete(CONFIG.OBJECT_STORAGE.STORYBOARDS, this.doesStoryboardObjectStorageExistFactory())
 
     if (this.keysToDelete.length === 0) {
       console.log('No unknown object storage files to delete.')
@@ -148,6 +151,32 @@ class ObjectStoragePruner {
       const filename = this.sanitizeKey(key, CONFIG.OBJECT_STORAGE.CAPTIONS)
 
       return VideoCaptionModel.doesOwnedFileExist(filename, FileStorage.OBJECT_STORAGE)
+    }
+  }
+
+  private doesTorrentFileExistFactory () {
+    return (key: string) => {
+      const filename = this.sanitizeKey(key, CONFIG.OBJECT_STORAGE.TORRENTS)
+
+      return VideoFileModel.doesOwnedTorrentFileExist(basename(filename))
+    }
+  }
+
+  private doesThumbnailObjectStorageExistFactory () {
+    return async (key: string) => {
+      const filename = this.sanitizeKey(key, CONFIG.OBJECT_STORAGE.THUMBNAILS)
+      const thumbnail = await ThumbnailModel.loadByFilename(basename(filename))
+
+      return !!(thumbnail && thumbnail.storage === FileStorage.OBJECT_STORAGE)
+    }
+  }
+
+  private doesStoryboardObjectStorageExistFactory () {
+    return async (key: string) => {
+      const filename = this.sanitizeKey(key, CONFIG.OBJECT_STORAGE.STORYBOARDS)
+      const storyboard = await StoryboardModel.loadByFilename(basename(filename))
+
+      return !!(storyboard && storyboard.storage === FileStorage.OBJECT_STORAGE)
     }
   }
 

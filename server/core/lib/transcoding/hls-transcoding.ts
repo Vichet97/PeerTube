@@ -208,7 +208,7 @@ async function generateHlsPlaylistCommon (options: {
     }
   }
 
-  await buildFFmpegVOD(job).transcode(transcodeOptions)
+  await buildFFmpegVOD({ job, videoUUID: video.uuid }).transcode(transcodeOptions)
 
   await onHLSVideoFileTranscoding({
     video,

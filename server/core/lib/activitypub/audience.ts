@@ -38,7 +38,7 @@ export function getVideoAudience (options: {
     return _buildUnlistedAudience()
   }
 
-  if (skipPrivacyCheck) {
+  if (skipPrivacyCheck || privacy === VideoPrivacy.PRIVATE || privacy === VideoPrivacy.INTERNAL) {
     return _buildPrivateAudience()
   }
 

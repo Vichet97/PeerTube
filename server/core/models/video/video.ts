@@ -30,6 +30,7 @@ import {
   removeHLSFileObjectStorageByFilename,
   removeHLSObjectStorage,
   removeOriginalFileObjectStorage,
+  removeThumbnailObjectStorageByFilename,
   removeWebVideoObjectStorage
 } from '@server/lib/object-storage/index.js'
 import { tracer } from '@server/lib/opentelemetry/tracing.js'
@@ -859,6 +860,27 @@ export class VideoModel extends SequelizeModel<VideoModel> {
     logger.info('Removing files of video ' + instance.url)
 
     if (instance.isLocal()) {
+      // Retry object storage cleanup after 5s on failure (handles race conditions / transient S3 errors)
+      const withRetry = async <T>(fn: () => Promise<T>) => {
+        try {
+          return await fn()
+        } catch (err) {
+          await wait(5000)
+          return fn()
+        }
+      }
+
+      // Explicitly remove thumbnails and storyboard from object storage before destroy.
+      // DB CASCADE may not trigger model hooks, so we ensure cleanup here.
+      const thumbnails = await instance.$get('Thumbnails', { transaction: options.transaction })
+      for (const t of thumbnails) {
+        tasks.push(withRetry(() => t.removeFile().then(() => {})).catch(err => logger.error('Cannot remove thumbnail file %s.', t.filename, { err })))
+      }
+      const storyboard = await StoryboardModel.loadByVideo(instance.id, options.transaction)
+      if (storyboard) {
+        tasks.push(withRetry(() => storyboard.removeFile().then(() => {})).catch(err => logger.error('Cannot remove storyboard file %s.', storyboard.filename, { err })))
+      }
+
       if (!Array.isArray(instance.VideoFiles)) {
         instance.VideoFiles = await instance.$get('VideoFiles', { transaction: options.transaction })
       }
@@ -876,6 +898,39 @@ export class VideoModel extends SequelizeModel<VideoModel> {
       for (const p of instance.VideoStreamingPlaylists) {
         // Captions will be automatically deleted
         tasks.push(instance.removeAllStreamingPlaylistFiles({ playlist: p, deleteCaptionPlaylists: false }))
+      }
+
+      // Remove orphaned files in object storage (e.g. from incomplete transcoding before DB records existed).
+      // Retry after 5s on failure (transient S3/race conditions).
+      if (CONFIG.OBJECT_STORAGE.ENABLED) {
+        const retryAfter5s = async (fn: () => Promise<any>): Promise<void> => {
+          try {
+            await fn()
+          } catch {
+            await wait(5000)
+            await fn()
+          }
+        }
+        tasks.push(
+          retryAfter5s(() => removeHLSObjectStorage(instance).then(() => {}))
+            .catch(err => logger.warn('Cannot remove HLS from object storage for video %s.', instance.uuid, { err }))
+        )
+        tasks.push(
+          retryAfter5s(() => removeThumbnailObjectStorageByFilename(instance.uuid + '.jpg').then(() => {}))
+            .catch(err => logger.debug('No thumbnail %s in object storage (or already removed).', instance.uuid + '.jpg', { err }))
+        )
+        // Delayed second pass: transcoding workers may upload thumbnails/HLS up to ~10s after deletion.
+        // Run cleanup again after 20s to catch late uploads.
+        const videoUUID = instance.uuid
+        const videoForDelayedCleanup = instance
+        tasks.push(
+          wait(20000)
+            .then(async () => {
+              await removeThumbnailObjectStorageByFilename(videoUUID + '.jpg')
+              await removeHLSObjectStorage(videoForDelayedCleanup)
+            })
+            .catch(err => logger.debug('Delayed object storage cleanup for video %s (may already be removed).', videoUUID, { err }))
+        )
       }
 
       // Remove source files

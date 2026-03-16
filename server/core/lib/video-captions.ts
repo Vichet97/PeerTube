@@ -20,7 +20,9 @@ import { dirname, join } from 'path'
 import { federateVideoIfNeeded } from './activitypub/videos/federate.js'
 import { buildCaptionM3U8Content, updateM3U8AndShaPlaylist } from './hls.js'
 import { JobQueue } from './job-queue/job-queue.js'
+import { hasVideoResourcesToBeMoved } from './move-storage/shared/move-video.js'
 import { Notifier } from './notifier/notifier.js'
+import { buildMoveVideoJob } from './video-jobs.js'
 import { TranscriptionJobHandler } from './runners/index.js'
 import { VideoPathManager } from './video-path-manager.js'
 
@@ -188,6 +190,7 @@ export async function generateSubtitle (options: {
       }
 
       let transcriptFile
+      let lastError: unknown
 
       try {
         transcriptFile = await currentTranscriber.transcribe(transcriptionArgs)
@@ -195,13 +198,27 @@ export async function generateSubtitle (options: {
         if (!shouldRetryTranscriberInstall(err)) throw err
         if (CONFIG.VIDEO_TRANSCRIPTION.ENGINE_PATH) throw err
 
+        lastError = err
         logger.warn(
           `Transcriber runtime is incomplete for engine ${currentTranscriber.engine.name}. ` +
-          'Re-installing dependencies before retrying once.'
+          'Re-installing dependencies before retrying once.',
+          { err, ...lTags(video.uuid) }
         )
 
         await currentTranscriber.install(DIRECTORIES.LOCAL_PIP_DIRECTORY)
-        transcriptFile = await currentTranscriber.transcribe(transcriptionArgs)
+
+        transcriber = undefined
+        const freshTranscriber = await getOrCreateTranscriber(binDirectory)
+
+        try {
+          transcriptFile = await freshTranscriber.transcribe(transcriptionArgs)
+        } catch (retryErr) {
+          logger.error(
+            `Transcription failed again after reinstall for ${video.uuid}. Original error: ${String((lastError as Error)?.message)}`,
+            { retryErr, ...lTags(video.uuid) }
+          )
+          throw retryErr
+        }
       }
 
       const refreshedVideo = await VideoModel.loadFull(video.uuid)
@@ -243,10 +260,15 @@ async function getOrCreateTranscriber (binDirectory: string) {
 function shouldRetryTranscriberInstall (err: unknown) {
   if (!err || typeof err !== 'object') return false
 
-  const code = (err as any).code
-  if (code === 'ENOENT') return true
+  const e = err as NodeJS.ErrnoException
+  const message = String(e?.message || '')
 
-  const message = String((err as any).message || '')
+  // ENOENT when opening a file (e.g. output .json) = output missing, not runtime incomplete
+  if (e?.code === 'ENOENT' && e?.syscall === 'open') return false
+
+  // Missing binary at spawn time
+  if (e?.code === 'ENOENT') return true
+
   return message.includes('No module named whisper_ctranslate2') || message.includes('No module named whisper')
 }
 
@@ -294,6 +316,11 @@ export async function onTranscriptionEnded (options: {
   })
 
   Notifier.Instance.notifyOfGeneratedVideoTranscription(caption)
+
+  // Trigger move-to-object-storage for source/web/HLS that were deferred while transcription was pending
+  if (CONFIG.OBJECT_STORAGE.ENABLED && await hasVideoResourcesToBeMoved(video, FileStorage.OBJECT_STORAGE)) {
+    await JobQueue.Instance.createJob(await buildMoveVideoJob({ type: 'move-to-object-storage', video }))
+  }
 
   logger.info(`Transcription ended for ${video.uuid}`, lTags(video.uuid, ...customLTags))
 }

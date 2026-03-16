@@ -8,11 +8,17 @@ class StreamReplacer extends Transform {
     super()
   }
 
+  private static readonly MAX_LINE_LENGTH = 64 * 1024 // 64 KiB
+
   _transform (chunk: Buffer, _encoding: BufferEncoding, done: TransformCallback) {
     try {
       this.pendingChunk = this.pendingChunk?.length
         ? Buffer.concat([ this.pendingChunk, chunk ])
         : chunk
+
+      if (this.pendingChunk.length > StreamReplacer.MAX_LINE_LENGTH) {
+        return done(new Error('StreamReplacer: line too long'))
+      }
 
       let index: number
 

@@ -14,7 +14,10 @@ export function processFederateVideo (job: Job) {
   return retryTransactionWrapper(() => {
     return sequelizeTypescript.transaction(async t => {
       const video = await VideoModel.loadFull(payload.videoUUID, t)
-      if (!video) return
+      if (!video) {
+        logger.info('Federate video job %s cancelled: video %s does not exist (video was deleted).', job.id, payload.videoUUID)
+        throw new Error('Video was deleted - transcoding job cancelled')
+      }
 
       return federateVideoIfNeeded(video, payload.isNewVideoForFederation, t)
     })
