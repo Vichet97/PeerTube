@@ -208,7 +208,7 @@ object_storage:
 
   # Keep local files for a while after they are uploaded/moved to object storage.
   # Value is in minutes (integer). Useful to avoid short race conditions for in-flight streaming requests.
-  keep_local_file_after_move: 10
+  keep_local_file_after_move: 1
 
   # Maximum number of attempts to make a request to object storage
   # Some object storage providers (for instance Backblaze) expects the client to retry upload upon 5xx errors
