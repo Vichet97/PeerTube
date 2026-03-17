@@ -186,13 +186,13 @@ object_storage:
   force_path_style: true
 
   upload_acl:
-    # RustFS has limited ACL support - use null
-    public: null
+    # Bucket is publicly readable; public files get public-read ACL
+    public: 'public-read'
     private: null
 
   proxy:
-    # PeerTube proxies private file requests (required when ACLs are null)
-    proxify_private_files: true
+    # Set to true if you have private videos and need auth; false to use direct bucket URLs
+    proxify_private_files: false
 
     # Timeout in seconds for S3 GetObject requests. Prevents freeze when object storage is slow or hung.
     # 0 = no timeout (not recommended for production)
