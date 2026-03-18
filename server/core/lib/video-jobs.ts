@@ -106,7 +106,7 @@ export async function addVideoJobsAfterCreation (options: {
 }) {
   const { video, videoFile, generateTranscription } = options
 
-  const jobs: (CreateJobArgument & CreateJobOptions)[] = [
+  const jobs: ((CreateJobArgument & CreateJobOptions) | undefined)[] = [
     {
       type: 'manage-video-torrent' as 'manage-video-torrent',
       payload: {
@@ -135,39 +135,45 @@ export async function addVideoJobsAfterCreation (options: {
     }
   ]
 
+  const criticalJobs: Promise<unknown>[] = []
+
   // No transcoding, move the file directly on object storage
   if (video.state === VideoState.TO_MOVE_TO_EXTERNAL_STORAGE) {
-    jobs.push(
-      await buildMoveVideoJob({
+    criticalJobs.push(
+      buildMoveVideoJob({
         type: 'move-to-object-storage',
         video,
         moveVideoState: {
           isNewVideo: true,
           previousVideoState: undefined
         }
-      })
+      }).then(job => JobQueue.Instance.createJob(job))
     )
   }
 
   if (video.state === VideoState.TO_TRANSCODE) {
-    jobs.push({
-      type: 'transcoding-job-builder' as 'transcoding-job-builder',
-      payload: {
-        videoUUID: video.uuid,
-        optimizeJob: {
-          isNewVideo: true
+    criticalJobs.push(
+      JobQueue.Instance.createJob({
+        type: 'transcoding-job-builder' as 'transcoding-job-builder',
+        payload: {
+          videoUUID: video.uuid,
+          optimizeJob: {
+            isNewVideo: true
+          }
         }
-      }
-    })
+      })
+    )
   }
-
-  await JobQueue.Instance.createSequentialJobFlow(...jobs)
-
-  await addRemoteStoryboardJobIfNeeded(video)
 
   if (generateTranscription === true) {
-    await createTranscriptionTaskIfNeeded(video)
+    criticalJobs.push(createTranscriptionTaskIfNeeded(video))
   }
+
+  await Promise.all([
+    ...jobs.map(job => JobQueue.Instance.createJob(job)),
+    ...criticalJobs,
+    addRemoteStoryboardJobIfNeeded(video)
+  ])
 }
 
 export async function addVideoJobsAfterUpdate (options: {

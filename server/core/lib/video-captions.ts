@@ -22,6 +22,7 @@ import { buildCaptionM3U8Content, updateM3U8AndShaPlaylist } from './hls.js'
 import { JobQueue } from './job-queue/job-queue.js'
 import { hasVideoResourcesToBeMoved } from './move-storage/shared/move-video.js'
 import { Notifier } from './notifier/notifier.js'
+import { cleanupStagedTranscriptionAudio, prepareStagedTranscriptionAudio } from './transcription-audio-staging.js'
 import { buildMoveVideoJob } from './video-jobs.js'
 import { TranscriptionJobHandler } from './runners/index.js'
 import { VideoPathManager } from './video-path-manager.js'
@@ -160,9 +161,8 @@ export async function generateSubtitle (options: {
       return undefined
     }
 
-    const file = video.getMaxQualityFile(VideoFileStream.AUDIO)
-
-    if (!file) {
+    const stagedAudioPath = await prepareStagedTranscriptionAudio(video)
+    if (!stagedAudioPath) {
       logger.info(
         `Do not run transcription for ${video.uuid} in ${outputPath} because it does not contain an audio stream`,
         { video, ...lTags(video.uuid) }
@@ -171,66 +171,66 @@ export async function generateSubtitle (options: {
       return
     }
 
-    await VideoPathManager.Instance.makeAvailableVideoFile(file, async inputPath => {
-      // Release input file mutex now we are going to run the command
-      setTimeout(() => inputFileMutexReleaser(), 1000)
+    // Release input file mutex now we are going to run the command.
+    // Transcription now uses staged audio, so source/web/HLS can be moved independently.
+    setTimeout(() => inputFileMutexReleaser(), 1000)
 
-      logger.info(`Running transcription for ${video.uuid} in ${outputPath}`, lTags(video.uuid))
+    logger.info(`Running transcription for ${video.uuid} in ${outputPath}`, lTags(video.uuid))
 
-      const transcriptionArgs = {
-        mediaFilePath: inputPath,
+    const transcriptionArgs = {
+      mediaFilePath: stagedAudioPath,
 
-        model: CONFIG.VIDEO_TRANSCRIPTION.MODEL_PATH
-          ? await TranscriptionModel.fromPath(CONFIG.VIDEO_TRANSCRIPTION.MODEL_PATH)
-          : new WhisperBuiltinModel(CONFIG.VIDEO_TRANSCRIPTION.MODEL),
+      model: CONFIG.VIDEO_TRANSCRIPTION.MODEL_PATH
+        ? await TranscriptionModel.fromPath(CONFIG.VIDEO_TRANSCRIPTION.MODEL_PATH)
+        : new WhisperBuiltinModel(CONFIG.VIDEO_TRANSCRIPTION.MODEL),
 
-        transcriptDirectory: outputPath,
+      transcriptDirectory: outputPath,
 
-        format: 'vtt' as const
-      }
+      format: 'vtt' as const
+    }
 
-      let transcriptFile
-      let lastError: unknown
+    let transcriptFile
+    let lastError: unknown
+
+    try {
+      transcriptFile = await currentTranscriber.transcribe(transcriptionArgs)
+    } catch (err) {
+      if (!shouldRetryTranscriberInstall(err)) throw err
+      if (CONFIG.VIDEO_TRANSCRIPTION.ENGINE_PATH) throw err
+
+      lastError = err
+      logger.warn(
+        `Transcriber runtime is incomplete for engine ${currentTranscriber.engine.name}. ` +
+        'Re-installing dependencies before retrying once.',
+        { err, ...lTags(video.uuid) }
+      )
+
+      await currentTranscriber.install(DIRECTORIES.LOCAL_PIP_DIRECTORY)
+
+      transcriber = undefined
+      const freshTranscriber = await getOrCreateTranscriber(binDirectory)
 
       try {
-        transcriptFile = await currentTranscriber.transcribe(transcriptionArgs)
-      } catch (err) {
-        if (!shouldRetryTranscriberInstall(err)) throw err
-        if (CONFIG.VIDEO_TRANSCRIPTION.ENGINE_PATH) throw err
-
-        lastError = err
-        logger.warn(
-          `Transcriber runtime is incomplete for engine ${currentTranscriber.engine.name}. ` +
-          'Re-installing dependencies before retrying once.',
-          { err, ...lTags(video.uuid) }
+        transcriptFile = await freshTranscriber.transcribe(transcriptionArgs)
+      } catch (retryErr) {
+        logger.error(
+          `Transcription failed again after reinstall for ${video.uuid}. Original error: ${String((lastError as Error)?.message)}`,
+          { retryErr, ...lTags(video.uuid) }
         )
-
-        await currentTranscriber.install(DIRECTORIES.LOCAL_PIP_DIRECTORY)
-
-        transcriber = undefined
-        const freshTranscriber = await getOrCreateTranscriber(binDirectory)
-
-        try {
-          transcriptFile = await freshTranscriber.transcribe(transcriptionArgs)
-        } catch (retryErr) {
-          logger.error(
-            `Transcription failed again after reinstall for ${video.uuid}. Original error: ${String((lastError as Error)?.message)}`,
-            { retryErr, ...lTags(video.uuid) }
-          )
-          throw retryErr
-        }
+        throw retryErr
       }
+    }
 
-      const refreshedVideo = await VideoModel.loadFull(video.uuid)
-      if (!refreshedVideo) {
-        logger.info(`Do not process transcription for video ${video.uuid}: it does not exist anymore.`, lTags(video.uuid))
-        return
-      }
+    const refreshedVideo = await VideoModel.loadFull(video.uuid)
+    if (!refreshedVideo) {
+      logger.info(`Do not process transcription for video ${video.uuid}: it does not exist anymore.`, lTags(video.uuid))
+      return
+    }
 
-      await onTranscriptionEnded({ video: refreshedVideo, language: transcriptFile.language, vttPath: transcriptFile.path })
-    })
+    await onTranscriptionEnded({ video: refreshedVideo, language: transcriptFile.language, vttPath: transcriptFile.path })
   } finally {
     if (outputPath) await remove(outputPath)
+    await cleanupStagedTranscriptionAudio(options.video.uuid)
     if (inputFileMutexReleaser) inputFileMutexReleaser()
 
     VideoJobInfoModel.decrease(options.video.uuid, 'pendingTranscription')
@@ -317,7 +317,7 @@ export async function onTranscriptionEnded (options: {
 
   Notifier.Instance.notifyOfGeneratedVideoTranscription(caption)
 
-  // Trigger move-to-object-storage for source/web/HLS that were deferred while transcription was pending
+  // Trigger move-to-object-storage if there are still resources remaining on file system.
   if (CONFIG.OBJECT_STORAGE.ENABLED && await hasVideoResourcesToBeMoved(video, FileStorage.OBJECT_STORAGE)) {
     await JobQueue.Instance.createJob(await buildMoveVideoJob({ type: 'move-to-object-storage', video }))
   }

@@ -160,6 +160,10 @@ export function removeOriginalFileObjectStorage (videoSource: MVideoSource) {
   return removeObject(generateOriginalVideoObjectStorageKey(videoSource.keptOriginalFilename), CONFIG.OBJECT_STORAGE.ORIGINAL_VIDEO_FILES)
 }
 
+export function removeOriginalFileObjectStorageByFilename (filename: string) {
+  return removeObject(generateOriginalVideoObjectStorageKey(filename), CONFIG.OBJECT_STORAGE.ORIGINAL_VIDEO_FILES)
+}
+
 // ---------------------------------------------------------------------------
 
 export function removeCaptionObjectStorage (videoCaption: MVideoCaption) {

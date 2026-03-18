@@ -14,10 +14,11 @@ import {
   MVideoPrivacy,
   MVideoWithFile
 } from '@server/types/models/index.js'
+import { MVideoSource } from '@server/types/models/video/video-source.js'
 import { Mutex } from 'async-mutex'
 import { remove } from 'fs-extra/esm'
 import { extname, join } from 'path'
-import { makeHLSFileAvailable, makeWebVideoFileAvailable } from './object-storage/index.js'
+import { makeHLSFileAvailable, makeOriginalFileAvailable, makeWebVideoFileAvailable } from './object-storage/index.js'
 import { getHLSDirectory, getHLSResolutionPlaylistFilename } from './paths.js'
 import { isVideoInPrivateDirectory } from './video-privacy.js'
 
@@ -97,6 +98,30 @@ class VideoPathManager {
 
   async makeAvailableVideoFile<T> (videoFile: MVideoFileVideo | MVideoFileStreamingPlaylistVideo, cb: MakeAvailableCB<T>) {
     return this.makeAvailableVideoFiles([ videoFile ], paths => cb(paths[0]))
+  }
+
+  async makeAvailableVideoSource<T> (videoSource: MVideoSource, cb: MakeAvailableCB<T>) {
+    if (videoSource.storage === FileStorage.FILE_SYSTEM) {
+      return this.makeAvailableFactory({
+        createMethods: [
+          {
+            method: () => this.getFSOriginalVideoFilePath(videoSource.keptOriginalFilename),
+            clean: false
+          }
+        ],
+        cbContext: paths => cb(paths[0])
+      })
+    }
+
+    return this.makeAvailableFactory({
+      createMethods: [
+        {
+          method: () => makeOriginalFileAvailable(videoSource.keptOriginalFilename, this.buildTMPDestination(videoSource.keptOriginalFilename)),
+          clean: true
+        }
+      ],
+      cbContext: paths => cb(paths[0])
+    })
   }
 
   async makeAvailableMaxQualityFiles<T> (

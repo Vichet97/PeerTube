@@ -200,8 +200,8 @@ object_storage:
 
   credentials:
     # Match RUSTFS_ACCESS_KEY / RUSTFS_SECRET_KEY in docker-compose.yml
-    access_key_id: '********'
-    secret_access_key: '********'
+    access_key_id: 'peertube'
+    secret_access_key: '016997791aA'
 
   # Maximum amount to upload in one request to object storage
   max_upload_part: 100MB

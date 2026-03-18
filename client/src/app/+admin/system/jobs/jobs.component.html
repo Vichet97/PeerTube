@@ -10,31 +10,88 @@
   [customParseQueryParams]="customParseQueryParams"
   [customUpdateUrl]="customUpdateUrl"
   >
-  <ng-template #totalTitle let-totalRecords>
-    <ng-container i18n>{ totalRecords, plural, =0 {No job} =1 {1 job} other {{{ totalRecords | myNumberFormatter }} jobs}}</ng-container>
-  </ng-template>
+  <ng-template #captionLeft>
+    <div class="jobs-toolbar">
+      <div class="jobs-toolbar-filters">
+        <div class="filter-block search-block">
+          <label class="filter-label" i18n>Search jobs</label>
+          <my-advanced-input-filter
+            i18n-placeholder
+            placeholder="Search by job ID, video UUID, short UUID or title"
+            (search)="table.onSearch($event)"
+          ></my-advanced-input-filter>
+        </div>
 
-  <ng-template #captionRight>
-    <div class="select-filter-block">
-      <label for="jobType" i18n>Job type</label>
+        <div class="filter-block select-filter-block">
+          <label for="jobType" i18n>Job type</label>
 
-      <my-select-options
-        class="select-job-type" inputId="jobType" filter="true"
-        [items]="jobTypeItems" [(ngModel)]="jobType" (ngModelChange)="onJobStateOrTypeChanged()"
-      ></my-select-options>
-    </div>
+          <my-select-options
+            class="select-job-type" inputId="jobType" filter="true"
+            [items]="jobTypeItems" [(ngModel)]="jobType" (ngModelChange)="onJobStateOrTypeChanged()"
+          ></my-select-options>
+        </div>
 
-    <div class="select-filter-block">
-      <label for="jobState" i18n>Job state</label>
+        <div class="filter-block select-filter-block">
+          <label for="jobState" i18n>Job state</label>
 
-      <my-select-options
-        class="select-job-state" inputId="jobState"
-        [items]="jobStateItems" [(ngModel)]="jobState" (ngModelChange)="onJobStateOrTypeChanged()"
-      ></my-select-options>
-    </div>
+          <my-select-options
+            class="select-job-state" inputId="jobState"
+            [items]="jobStateItems" [(ngModel)]="jobState" (ngModelChange)="onJobStateOrTypeChanged()"
+          ></my-select-options>
+        </div>
+      </div>
 
-    <div class="align-self-end">
-      <my-button i18n-label label="Refresh" icon="refresh" (click)="table.loadData()"></my-button>
+      <div class="jobs-toolbar-actions">
+        <my-button
+          i18n-label
+          label="Create jobs to move videos to object storage"
+          icon="upload"
+          (click)="createMoveStorageJobs('object-storage')"
+          [disabled]="creatingMoveJobs"
+        ></my-button>
+        <my-button
+          i18n-label
+          label="Create jobs to move videos to file system"
+          icon="download"
+          (click)="createMoveStorageJobs('file-system')"
+          [disabled]="creatingMoveJobs"
+        ></my-button>
+        <my-button
+          i18n-label
+          label="Create retry transcoding jobs"
+          icon="repeat"
+          (click)="createRetryTranscodingJobs()"
+          [disabled]="creatingRetryTranscodingJobs"
+        ></my-button>
+        <my-button i18n-label label="Refresh" icon="refresh" (click)="refreshData()"></my-button>
+      </div>
+
+      <div class="jobs-stats-cards">
+        <div class="jobs-stat-card accent">
+          <span class="stat-label" i18n>Total jobs</span>
+          <span class="stat-value">{{ jobsCount | myNumberFormatter }}</span>
+        </div>
+
+        <div class="jobs-stat-card">
+          <span class="stat-label" i18n>Local storage videos</span>
+          <span class="stat-value">{{ videoMaintenanceCounts.localStorageVideos | myNumberFormatter }}</span>
+        </div>
+
+        <div class="jobs-stat-card">
+          <span class="stat-label" i18n>Object storage videos</span>
+          <span class="stat-value">{{ videoMaintenanceCounts.objectStorageVideos | myNumberFormatter }}</span>
+        </div>
+
+        <div class="jobs-stat-card danger">
+          <span class="stat-label" i18n>Failed transcoding</span>
+          <span class="stat-value">{{ videoMaintenanceCounts.failedTranscodingVideos | myNumberFormatter }}</span>
+        </div>
+
+        <div class="jobs-stat-card warning">
+          <span class="stat-label" i18n>Not yet transcoded</span>
+          <span class="stat-value">{{ videoMaintenanceCounts.notYetTranscodedVideos | myNumberFormatter }}</span>
+        </div>
+      </div>
     </div>
   </ng-template>
 

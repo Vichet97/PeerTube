@@ -120,6 +120,13 @@ export class VideoManageMenuComponent implements OnInit {
           label: $localize`Statistics`,
           icon: 'stats',
           routerLink: 'stats'
+        },
+        {
+          type: 'link',
+          isDisplayed: () => this.canWatch(),
+          label: $localize`Related jobs`,
+          icon: 'overview',
+          routerLink: 'related-jobs'
         }
       ]
     }

@@ -28,6 +28,7 @@ import {
   VideoTranscriptionPayload
 } from '@peertube/peertube-models'
 import { jobStates } from '@server/helpers/custom-validators/jobs.js'
+import { toCompleteUUID } from '@server/helpers/custom-validators/misc.js'
 import { CONFIG, registerConfigChangedHandler } from '@server/initializers/config.js'
 import { processVideoRedundancy } from '@server/lib/job-queue/handlers/video-redundancy.js'
 import {
@@ -44,6 +45,7 @@ import {
 } from 'bullmq'
 import { logger } from '../../helpers/logger.js'
 import { JOB_ATTEMPTS, JOB_CONCURRENCY, JOB_REMOVAL_OPTIONS, JOB_TTL, REPEAT_JOBS, WEBSERVER } from '../../initializers/constants.js'
+import { VideoModel } from '../../models/video/video.js'
 import { Hooks } from '../plugins/hooks.js'
 import { Redis } from '../redis.js'
 import { processActivityPubCleaner } from './handlers/activitypub-cleaner.js'
@@ -75,6 +77,7 @@ import { processVideoStudioEdition } from './handlers/video-studio-edition.js'
 import { processVideoTranscoding } from './handlers/video-transcoding.js'
 import { processVideoTranscription } from './handlers/video-transcription.js'
 import { processVideosViewsStats } from './handlers/video-views-stats.js'
+import { Op } from 'sequelize'
 
 export type CreateJobArgument =
   | { type: 'activitypub-http-broadcast', payload: ActivitypubHttpBroadcastPayload }
@@ -234,7 +237,13 @@ class JobQueue {
       concurrency: this.getJobConcurrency(handlerName),
       prefix: this.jobRedisPrefix,
       connection: Redis.getRedisClientOptions('Worker'),
-      maxStalledCount: 10
+      maxStalledCount: 10,
+
+      // Transcoding/transcription can be CPU-heavy and may briefly block lock renewals.
+      // Use a longer lock duration to avoid false "stalled" loops where jobs bounce back to waiting.
+      lockDuration: (handlerName === 'video-transcoding' || handlerName === 'video-transcription')
+        ? 1000 * 60 * 10
+        : 30000
     }
 
     const handler = function (job: Job) {
@@ -379,6 +388,40 @@ class JobQueue {
     return queue.add('job', options.payload, jobOptions)
   }
 
+  async retryFailedJob (options: {
+    jobType: JobType
+    jobId: string
+    videoUUID?: string
+    videoId?: number
+  }): Promise<
+    | { status: 'retried', newJobId: string | number }
+    | { status: 'not_found' | 'not_failed' | 'not_video_related' }
+    > {
+    const { jobType, jobId, videoUUID, videoId } = options
+
+    const queue = this.queues[jobType]
+    if (!queue) return { status: 'not_found' }
+
+    const job = await queue.getJob(jobId)
+    if (!job) return { status: 'not_found' }
+
+    if (videoUUID || videoId) {
+      const data = job.data as { videoUUID?: string, videoId?: number }
+
+      const matchUUID = typeof videoUUID === 'string' && data?.videoUUID === videoUUID
+      const matchId = typeof videoId === 'number' && data?.videoId === videoId
+
+      if (!matchUUID && !matchId) return { status: 'not_video_related' }
+    }
+
+    const state = await job.getState()
+    if (state !== 'failed') return { status: 'not_failed' }
+
+    const newJob = await queue.add('job', job.data, this.buildJobOptions(jobType, { priority: job.opts.priority }))
+
+    return { status: 'retried', newJobId: newJob.id }
+  }
+
   createSequentialJobFlow (...jobs: ((CreateJobArgument & CreateJobOptions) | undefined)[]) {
     let lastJob: FlowJob
 
@@ -438,17 +481,21 @@ class JobQueue {
     start: number
     count: number
     asc?: boolean
-    jobType: JobType
+    jobType?: JobType
+    search?: string
+    videoUUID?: string
   }): Promise<Job[]> {
-    const { state, start, count, asc, jobType } = options
+    const { state, start, count, asc, jobType, search, videoUUID } = options
 
     const states = this.buildStateFilter(state)
     const filteredJobTypes = this.buildTypeFilter(jobType)
 
     // When filtering failed/cancelled we over-fetch because we filter by failedReason
-    const fetchLimit = (state === 'failed' || state === 'cancelled')
-      ? Math.min(10000, start + count + 2000)
-      : start + count
+    const fetchLimit = search || videoUUID
+      ? 10000
+      : (state === 'failed' || state === 'cancelled')
+          ? Math.min(10000, start + count + 2000)
+          : start + count
 
     let results: Job[] = []
 
@@ -474,6 +521,8 @@ class JobQueue {
       })
     }
 
+    results = await this.filterJobsByVideoOptions(results, { search, videoUUID })
+
     results.sort((j1: any, j2: any) => {
       if (j1.timestamp < j2.timestamp) return -1
       else if (j1.timestamp === j2.timestamp) return 0
@@ -486,10 +535,11 @@ class JobQueue {
     return results.slice(start, start + count)
   }
 
-  async count (state: JobState, jobType?: JobType): Promise<number> {
+  async count (state: JobState, jobType?: JobType, search?: string, videoUUID?: string): Promise<number> {
     const filteredJobTypes = this.buildTypeFilter(jobType)
+    const hasVideoFilter = !!search || !!videoUUID
 
-    if (state === 'failed' || state === 'cancelled') {
+    if (state === 'failed' || state === 'cancelled' || hasVideoFilter) {
       const states = this.buildStateFilter(state)
       let total = 0
       for (const type of filteredJobTypes) {
@@ -501,8 +551,11 @@ class JobQueue {
           const isCancelled = typeof j.failedReason === 'string' &&
             j.failedReason.includes('Video was deleted - transcoding job cancelled')
           return wantCancelled ? isCancelled : !isCancelled
-        }).length
-        total += count
+        })
+
+        const filteredJobs = await this.filterJobsByVideoOptions(count, { search, videoUUID })
+        const countTotal = filteredJobs.length
+        total += countTotal
       }
       return total
     }
@@ -551,6 +604,78 @@ class JobQueue {
     return jobTypes.filter(t => t === jobType)
   }
 
+  private async filterJobsByVideoOptions (jobs: Job[], options: {
+    search?: string
+    videoUUID?: string
+  }) {
+    const { search, videoUUID } = options
+
+    if (!search && !videoUUID) return jobs
+
+    const trimmedSearch = search?.trim()
+    const loweredSearch = trimmedSearch?.toLowerCase() ?? ''
+
+    const filteredVideoUUIDs = new Set<string>()
+    const filteredVideoIds = new Set<number>()
+
+    if (videoUUID) {
+      filteredVideoUUIDs.add(videoUUID)
+    }
+
+    if (trimmedSearch) {
+      const searchResults = await this.resolveVideoSearch(trimmedSearch)
+      for (const uuid of searchResults.videoUUIDs) filteredVideoUUIDs.add(uuid)
+      for (const id of searchResults.videoIds) filteredVideoIds.add(id)
+    }
+
+    const hasVideoMatches = filteredVideoUUIDs.size !== 0 || filteredVideoIds.size !== 0
+    const hasSearch = !!trimmedSearch
+
+    return jobs.filter(job => {
+      if (hasSearch && String(job.id).toLowerCase().includes(loweredSearch)) return true
+
+      if (!hasVideoMatches) return false
+
+      const data = job.data as { videoUUID?: string, videoId?: number }
+
+      if (typeof data?.videoUUID === 'string' && filteredVideoUUIDs.has(data.videoUUID)) return true
+      if (typeof data?.videoId === 'number' && filteredVideoIds.has(data.videoId)) return true
+
+      return false
+    })
+  }
+
+  private async resolveVideoSearch (search: string) {
+    const trimmedSearch = search?.trim()
+    if (!trimmedSearch) return { videoUUIDs: new Set<string>(), videoIds: new Set<number>() }
+
+    const uuidOr: string[] = []
+    try {
+      uuidOr.push(toCompleteUUID(trimmedSearch))
+    } catch {
+      // Ignore invalid UUIDs and keep title search
+    }
+
+    const where = {
+      remote: false,
+      [Op.or]: [
+        { name: { [Op.iLike]: '%' + trimmedSearch + '%' } },
+        ...(uuidOr.length !== 0 ? [ { uuid: { [Op.in]: uuidOr } } ] : [])
+      ]
+    }
+
+    const videos = await VideoModel.findAll({
+      attributes: [ 'id', 'uuid' ],
+      where,
+      limit: 200
+    })
+
+    return {
+      videoUUIDs: new Set(videos.map(v => v.uuid)),
+      videoIds: new Set(videos.map(v => v.id))
+    }
+  }
+
   async getStats () {
     const promises = jobTypes.map(async t => ({ jobType: t, counts: await this.queues[t].getJobCounts() }))
 
@@ -571,6 +696,28 @@ class JobQueue {
 
     if (progresses.length === 0) return 0
     return Math.round(progresses.reduce((a, b) => a + b, 0) / progresses.length)
+  }
+
+  async listVideoUUIDsWithPendingTranscodingJobs (): Promise<Set<string>> {
+    const queueNames: JobType[] = [ 'transcoding-job-builder', 'video-transcoding' ]
+    const states = [ 'waiting', 'delayed', 'prioritized', 'waiting-children', 'active' ] as const
+    const uuids = new Set<string>()
+
+    for (const queueName of queueNames) {
+      const queue = this.queues[queueName]
+      if (!queue) continue
+
+      for (const state of states) {
+        const jobs = await queue.getJobs([ state ], 0, 10000, true)
+
+        for (const job of jobs) {
+          const videoUUID = (job.data as { videoUUID?: string })?.videoUUID
+          if (videoUUID) uuids.add(videoUUID)
+        }
+      }
+    }
+
+    return uuids
   }
 
   /**

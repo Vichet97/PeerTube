@@ -11,7 +11,7 @@ import { TableColumnInfo, TableComponent, TableQueryParams } from '@app/shared/s
 import { VideoPlaylistService } from '@app/shared/shared-video-playlist/video-playlist.service'
 import { NgbTooltipModule } from '@ng-bootstrap/ng-bootstrap'
 import { arrayify, pick } from '@peertube/peertube-core-utils'
-import { VideoChannel, VideoExistInPlaylist, VideoPrivacy, VideoPrivacyType, VideosExistInPlaylists } from '@peertube/peertube-models'
+import { VideoChannel, VideoExistInPlaylist, VideoPrivacy, VideoPrivacyType, VideoState, VideoStateType, VideosExistInPlaylists } from '@peertube/peertube-models'
 import uniqBy from 'lodash-es/uniqBy'
 import { SortMeta } from 'primeng/api'
 import { tap } from 'rxjs/operators'
@@ -33,14 +33,31 @@ import { VideoStateBadgeComponent } from '../../shared/shared-video/video-state-
 import { VideoChangeOwnershipComponent } from './modals/video-change-ownership.component'
 
 type ColumnName = 'duration' | 'name' | 'language' | 'privacy' | 'sensitive' | 'playlists' | 'insights' | 'published' | 'state' | 'comments'
-type CommonFilter = 'live' | 'vod' | 'private' | 'internal' | 'unlisted' | 'password-protected' | 'public'
+type CommonFilter = string
+type StateFilter = string
 
 type VideoType = 'live' | 'vod'
 type QueryParams = TableQueryParams & {
   channelNameOneOf?: string[]
   privacyOneOf?: string[]
+  stateOneOf?: string[]
   videoType?: VideoType
 }
+
+const stateFilters: { key: string, state: VideoStateType, label: string }[] = [
+  { key: 'state-published', state: VideoState.PUBLISHED, label: $localize`Published` },
+  { key: 'state-to-transcode', state: VideoState.TO_TRANSCODE, label: $localize`To transcode` },
+  { key: 'state-to-import', state: VideoState.TO_IMPORT, label: $localize`To import` },
+  { key: 'state-waiting-live', state: VideoState.WAITING_FOR_LIVE, label: $localize`Waiting for live` },
+  { key: 'state-live-ended', state: VideoState.LIVE_ENDED, label: $localize`Live ended` },
+  { key: 'state-to-move-external', state: VideoState.TO_MOVE_TO_EXTERNAL_STORAGE, label: $localize`To move to object storage` },
+  { key: 'state-transcoding-failed', state: VideoState.TRANSCODING_FAILED, label: $localize`Transcoding failed` },
+  { key: 'state-move-external-failed', state: VideoState.TO_MOVE_TO_EXTERNAL_STORAGE_FAILED, label: $localize`Move to object storage failed` },
+  { key: 'state-to-edit', state: VideoState.TO_EDIT, label: $localize`To edit` },
+  { key: 'state-to-move-fs', state: VideoState.TO_MOVE_TO_FILE_SYSTEM, label: $localize`To move to file system` },
+  { key: 'state-move-fs-failed', state: VideoState.TO_MOVE_TO_FILE_SYSTEM_FAILED, label: $localize`Move to file system failed` },
+  { key: 'state-import-failed', state: VideoState.TO_IMPORT_FAILED, label: $localize`Import failed` }
+]
 
 @Component({
   selector: 'my-videos',
@@ -99,6 +116,8 @@ export class MyVideosComponent implements OnInit, OnDestroy {
 
   filterItems: SelectOptionsItem<CommonFilter>[] = []
   selectedFilterItems: CommonFilter[] = []
+  stateFilterItems: SelectOptionsItem<StateFilter>[] = []
+  selectedStateFilterItems: StateFilter[] = []
 
   columns: TableColumnInfo<ColumnName>[] = []
 
@@ -165,6 +184,11 @@ export class MyVideosComponent implements OnInit, OnDestroy {
       }
     ]
 
+    this.stateFilterItems = stateFilters.map(filter => ({
+      id: filter.key,
+      label: filter.label
+    }))
+
     this.buildActions()
   }
 
@@ -202,6 +226,16 @@ export class MyVideosComponent implements OnInit, OnDestroy {
       if (enabledPrivacies.has(VideoPrivacy.UNLISTED)) this.selectedFilterItems.push('unlisted')
       if (enabledPrivacies.has(VideoPrivacy.PASSWORD_PROTECTED)) this.selectedFilterItems.push('password-protected')
       if (enabledPrivacies.has(VideoPrivacy.PRIVATE)) this.selectedFilterItems.push('private')
+
+      this.selectedStateFilterItems = []
+
+      const enabledStates = queryParams.stateOneOf
+        ? new Set(arrayify(queryParams.stateOneOf).map(t => parseInt(t) as VideoStateType))
+        : new Set<VideoStateType>()
+
+      for (const stateFilter of stateFilters) {
+        if (enabledStates.has(stateFilter.state)) this.selectedStateFilterItems.push(stateFilter.key)
+      }
     }
   }
 
@@ -225,7 +259,7 @@ export class MyVideosComponent implements OnInit, OnDestroy {
     const channelNameOneOf = this.channels.filter(c => c.selected).map(c => c.name)
 
     return {
-      ...pick(this.buildCommonVideoFilters(), [ 'privacyOneOf', 'videoType' ]),
+      ...pick(this.buildCommonVideoFilters(), [ 'privacyOneOf', 'stateOneOf', 'videoType' ]),
 
       channelNameOneOf
     }
@@ -255,10 +289,16 @@ export class MyVideosComponent implements OnInit, OnDestroy {
     if (selectedFilterSet.has('password-protected')) privacyOneOf.push(VideoPrivacy.PASSWORD_PROTECTED)
     if (selectedFilterSet.has('private')) privacyOneOf.push(VideoPrivacy.PRIVATE)
 
+    const selectedStateFilterSet = new Set(this.selectedStateFilterItems)
+    const stateOneOf = stateFilters
+      .filter(filter => selectedStateFilterSet.has(filter.key))
+      .map(filter => filter.state)
+
     return {
       isLive,
       videoType,
-      privacyOneOf
+      privacyOneOf,
+      stateOneOf
     }
   }
 
@@ -283,7 +323,7 @@ export class MyVideosComponent implements OnInit, OnDestroy {
         ? channelNameOneOf
         : undefined,
 
-      ...pick(this.buildCommonVideoFilters(), [ 'isLive', 'privacyOneOf' ])
+      ...pick(this.buildCommonVideoFilters(), [ 'isLive', 'privacyOneOf', 'stateOneOf' ])
     }).pipe(tap(({ data }) => this.fetchVideosContainedInPlaylists(data)))
   }
 

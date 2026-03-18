@@ -1,0 +1,102 @@
+<h2 class="form-title">
+  <my-global-icon iconName="overview"></my-global-icon>
+  <ng-container i18n>Related jobs</ng-container>
+</h2>
+
+<my-table
+  #table
+  key="VideoRelatedJobsComponent"
+  dataKey="uniqId"
+  [defaultColumns]="columns"
+  defaultRowsPerPage="20"
+  i18n-paginatorText
+  paginatorText="jobs per page"
+  columnConfig="true"
+  [dataLoader]="dataLoader"
+>
+  <ng-template #captionRight>
+    <my-button
+      i18n-label
+      label="Refresh"
+      icon="refresh"
+      (click)="table.loadData()"
+    ></my-button>
+  </ng-template>
+
+  <ng-template #tableCells let-job>
+    @if (table.isColumnDisplayed('id')) {
+      <td class="job-id" [title]="job.id">{{ job.id }}</td>
+    }
+
+    @if (table.isColumnDisplayed('type')) {
+      <td class="job-type">
+        <span class="pt-badge ellipsis" [ngClass]="getRandomJobTypeBadge(job.type)">{{ job.type }}</span>
+      </td>
+    }
+
+    @if (table.isColumnDisplayed('priority')) {
+      <td class="job-priority">{{ job.priority }}</td>
+    }
+
+    @if (table.isColumnDisplayed('state')) {
+      <td class="job-state">
+        <div class="job-state-actions">
+          <span class="ellipsis" [ngClass]="getJobStateClasses(job.state)">{{ job.state }}</span>
+
+          @if (canRetry(job)) {
+            <my-button
+              theme="tertiary"
+              icon="repeat"
+              [loading]="isRetrying(job)"
+              i18n-title
+              title="Retry this failed job"
+              (click)="onRetryClick($event, job)"
+            ></my-button>
+          }
+        </div>
+      </td>
+    }
+
+    @if (table.isColumnDisplayed('progress')) {
+      <td class="job-progress">
+        @if (hasProgress(job)) {
+          {{ getProgress(job) }}
+        }
+      </td>
+    }
+
+    @if (table.isColumnDisplayed('createdAt')) {
+      <td class="job-date">{{ job.createdAt | date: 'short' }}</td>
+    }
+
+    @if (table.isColumnDisplayed('processed')) {
+      <td class="fs-7">
+        <div>{{ job.processedOn | date: 'short' }}</div>
+        <div>{{ job.finishedOn | date: 'short' }}</div>
+      </td>
+    }
+  </ng-template>
+
+  <ng-template #expandedRow let-job>
+    <div>
+      <pre>{{ [
+        'Job: ' + job.id,
+        'Type: ' + job.type + ' (' + getJobTypeLabel(job.type) + ')',
+        'Processed on ' + formatJobDate(job.processedOn),
+        'Finished on ' + formatJobDate(job.finishedOn)
+      ].join('\n') }}</pre>
+    </div>
+
+    <div>
+      <pre>{{ stringifyValue(job.data) }}</pre>
+    </div>
+
+    <div>
+      <pre>{{ stringifyValue(job.error) }}</pre>
+    </div>
+  </ng-template>
+
+  <ng-template #noResults>
+    <ng-container i18n>No related jobs found for this video.</ng-container>
+  </ng-template>
+</my-table>

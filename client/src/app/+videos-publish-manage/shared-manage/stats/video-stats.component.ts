@@ -103,7 +103,6 @@ export class VideoStatsComponent implements OnInit {
   regions: GeoData = []
 
   chartPlugins = [ zoomPlugin ]
-
   currentDateFilter = 'all'
   dateFilters: SelectOptionsItem[] = [
     {

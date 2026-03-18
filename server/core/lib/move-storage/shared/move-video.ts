@@ -146,23 +146,16 @@ export async function filterVideoResourcesToBeMoved (videoArg: MVideo, targetSto
     hlsReady = true
   }
 
-  // Do not move the video source while transcription is pending.
-  // Transcription may need local access to the original file (e.g. Whisper metadata).
-  const jobInfo = await VideoJobInfoModel.load(video.id)
-  const hasPendingTranscription = jobInfo && jobInfo.pendingTranscription > 0
-
   return {
-    source: source?.keptOriginalFilename && source.storage !== targetStorage && !hasPendingTranscription
+    source: source?.keptOriginalFilename && source.storage !== targetStorage
       ? source
       : undefined,
 
-    hls: moveHLS && hlsReady && !hasPendingTranscription
+    hls: moveHLS && hlsReady
       ? hls
       : undefined,
 
-    webFiles: hasPendingTranscription
-      ? []
-      : video.VideoFiles.filter(f => f.storage !== targetStorage),
+    webFiles: video.VideoFiles.filter(f => f.storage !== targetStorage),
     captions: captions.filter(c => {
       if (c.storage !== targetStorage) return true
 

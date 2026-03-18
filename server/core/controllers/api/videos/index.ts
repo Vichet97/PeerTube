@@ -12,6 +12,7 @@ import { VIDEO_CATEGORIES, VIDEO_LANGUAGES, VIDEO_LICENCES, VIDEO_PRIVACIES } fr
 import { sequelizeTypescript } from '../../../initializers/database.js'
 import { JobQueue } from '../../../lib/job-queue/index.js'
 import { Redis } from '../../../lib/redis.js'
+import { cleanupStagedTranscriptionAudio } from '../../../lib/transcription-audio-staging.js'
 import { VideoJobInfoModel } from '../../../models/video/video-job-info.js'
 import { Hooks } from '../../../lib/plugins/hooks.js'
 import {
@@ -230,6 +231,7 @@ async function removeVideo (req: express.Request, res: express.Response) {
   await VideoJobInfoModel.abortAllTasks(videoInstance.uuid, 'pendingMove')
   await VideoJobInfoModel.abortAllTasks(videoInstance.uuid, 'pendingTranscription')
   await JobQueue.Instance.removeAllVideoJobsForVideo(videoInstance.uuid, videoInstance.id)
+  await cleanupStagedTranscriptionAudio(videoInstance.uuid)
 
   await sequelizeTypescript.transaction(async t => {
     await videoInstance.destroy({ transaction: t })

@@ -4,6 +4,9 @@ import { HttpClient, HttpParams } from '@angular/common/http'
 import { Injectable, inject } from '@angular/core'
 import { RestExtractor } from '@app/core'
 import {
+  Job,
+  JobType,
+  ResultList,
   VideoStatsOverall,
   VideoStatsRetention,
   VideoStatsTimeserie,
@@ -70,5 +73,23 @@ export class VideoStatsService {
 
     return this.authHttp.get<VideoStatsUserAgent>(VideoService.BASE_VIDEO_URL + '/' + videoId + '/stats/user-agent', { params })
       .pipe(catchError(err => this.restExtractor.handleError(err)))
+  }
+
+  getRelatedJobs (videoId: string) {
+    return this.authHttp.get<ResultList<Job>>(VideoService.BASE_VIDEO_URL + '/' + videoId + '/jobs')
+      .pipe(catchError(err => this.restExtractor.handleError(err)))
+  }
+
+  retryRelatedJob (options: {
+    videoId: string
+    jobType: JobType
+    jobId: string
+  }) {
+    const { videoId, jobType, jobId } = options
+
+    return this.authHttp.post<{ jobId: string | number }>(
+      VideoService.BASE_VIDEO_URL + '/' + videoId + '/jobs/' + jobType + '/' + encodeURIComponent(jobId) + '/retry',
+      {}
+    ).pipe(catchError(err => this.restExtractor.handleError(err)))
   }
 }

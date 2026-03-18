@@ -261,10 +261,10 @@ async function processFile (downloader: () => Promise<string>, videoImport: MVid
 
       tmpVideoPath = null // This path is not used anymore
 
-      const thumbnails = await generateThumbnails({ videoImportWithFiles, videoFile, ffprobe })
-
-      // Create torrent
-      await createTorrentAndSetInfoHash(videoImportWithFiles.Video, videoFile)
+      const [ thumbnails ] = await Promise.all([
+        generateThumbnails({ videoImportWithFiles, videoFile, ffprobe }),
+        createTorrentAndSetInfoHash(videoImportWithFiles.Video, videoFile)
+      ])
 
       const { videoImportUpdated, video } = await retryTransactionWrapper(() => {
         return sequelizeTypescript.transaction(async t => {
@@ -361,30 +361,45 @@ async function afterImportSuccess (options: {
     Notifier.Instance.notifyOnNewVideoOrLiveIfNeeded(video)
   }
 
-  // Generate the storyboard in the job queue, and don't forget to federate an update after
-  await addLocalOrRemoteStoryboardJobIfNeeded({ video, federate: true })
+  const postImportTasks: Promise<unknown>[] = []
 
-  if (await VideoCaptionModel.hasVideoCaption(video.id) !== true && generateTranscription === true) {
-    await createTranscriptionTaskIfNeeded(video)
+  if (generateTranscription === true) {
+    postImportTasks.push(
+      VideoCaptionModel.hasVideoCaption(video.id)
+        .then(hasCaption => {
+          if (hasCaption) return
+
+          return createTranscriptionTaskIfNeeded(video)
+        })
+    )
   }
 
   if (video.state === VideoState.TO_MOVE_TO_EXTERNAL_STORAGE) {
-    await JobQueue.Instance.createJob(
-      await buildMoveVideoJob({
+    postImportTasks.push(
+      buildMoveVideoJob({
         type: 'move-to-object-storage',
         video,
         moveVideoState: {
           isNewVideo: true,
           previousVideoState: VideoState.TO_IMPORT
         }
-      })
+      }).then(job => JobQueue.Instance.createJob(job))
     )
+
+    await Promise.all(postImportTasks)
     return
   }
 
   if (video.state === VideoState.TO_TRANSCODE) { // Create transcoding jobs?
-    await createOptimizeOrMergeAudioJobs({ video, videoFile, isNewVideo: true, user })
+    postImportTasks.push(createOptimizeOrMergeAudioJobs({ video, videoFile, isNewVideo: true, user }))
   }
+
+  await Promise.all(postImportTasks)
+
+  // Storyboard generation can be expensive (especially with remote runners).
+  // Do not block transcription/transcoding job scheduling on it.
+  void addLocalOrRemoteStoryboardJobIfNeeded({ video, federate: true })
+    .catch(err => logger.error('Cannot create storyboard job after video import.', { err, videoUUID: video.uuid }))
 }
 
 async function onImportError (err: Error, tempVideoPath: string, videoImport: MVideoImportVideo) {

@@ -1,6 +1,7 @@
 import express from 'express'
 import { param, query } from 'express-validator'
 import { isDateValid } from '@server/helpers/custom-validators/misc.js'
+import { isValidJobType } from '@server/helpers/custom-validators/jobs.js'
 import { isValidStatTimeserieMetric } from '@server/helpers/custom-validators/video-stats.js'
 import { STATS_TIMESERIE } from '@server/initializers/constants.js'
 import { HttpStatusCode, UserRight, VideoStatsTimeserieQuery } from '@peertube/peertube-models'
@@ -38,6 +39,35 @@ export const videoRetentionStatsValidator = [
         message: 'Cannot get retention stats of live video'
       })
     }
+
+    return next()
+  }
+]
+
+export const videoJobsValidator = [
+  isValidVideoIdParam('videoId'),
+
+  async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (areValidationErrors(req, res)) return
+    if (!await commonStatsCheck(req, res)) return
+
+    return next()
+  }
+]
+
+export const videoRetryJobValidator = [
+  isValidVideoIdParam('videoId'),
+
+  param('jobType')
+    .custom(isValidJobType),
+
+  param('jobId')
+    .trim()
+    .isLength({ min: 1, max: 500 }),
+
+  async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (areValidationErrors(req, res)) return
+    if (!await commonStatsCheck(req, res)) return
 
     return next()
   }

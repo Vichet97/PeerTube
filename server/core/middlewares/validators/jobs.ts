@@ -1,5 +1,5 @@
 import express from 'express'
-import { param, query } from 'express-validator'
+import { body, param, query } from 'express-validator'
 import { isValidJobState, isValidJobType } from '../../helpers/custom-validators/jobs.js'
 import { loggerTagsFactory } from '../../helpers/logger.js'
 import { areValidationErrors } from './shared/index.js'
@@ -15,6 +15,31 @@ const listJobsValidator = [
     .optional()
     .custom(isValidJobType),
 
+  query('search')
+    .optional()
+    .trim()
+    .isLength({ min: 1, max: 255 }),
+
+  (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (areValidationErrors(req, res, lTags())) return
+
+    return next()
+  }
+]
+
+const createMoveStorageJobsValidator = [
+  body('storage')
+    .isIn([ 'object-storage', 'file-system' ])
+    .withMessage('Storage must be object-storage or file-system'),
+
+  (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (areValidationErrors(req, res, lTags())) return
+
+    return next()
+  }
+]
+
+const createRetryTranscodingJobsValidator = [
   (req: express.Request, res: express.Response, next: express.NextFunction) => {
     if (areValidationErrors(req, res, lTags())) return
 
@@ -25,5 +50,7 @@ const listJobsValidator = [
 // ---------------------------------------------------------------------------
 
 export {
+  createMoveStorageJobsValidator,
+  createRetryTranscodingJobsValidator,
   listJobsValidator
 }

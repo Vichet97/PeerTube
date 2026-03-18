@@ -15,6 +15,7 @@ import { CONSTRAINTS_FIELDS, MIMETYPES } from '../../../initializers/constants.j
 import { CONFIG } from '../../../initializers/config.js'
 import { sequelizeTypescript } from '../../../initializers/database.js'
 import { federateVideoIfNeeded } from '../../../lib/activitypub/videos/index.js'
+import { cleanupStagedTranscriptionAudio } from '../../../lib/transcription-audio-staging.js'
 import { asyncMiddleware, asyncRetryTransactionMiddleware, authenticate } from '../../../middlewares/index.js'
 import { isCaptionFileValid } from '../../../helpers/custom-validators/video-captions.js'
 import {
@@ -78,6 +79,7 @@ async function createGenerateVideoCaption (req: express.Request, res: express.Re
   const body = req.body as VideoCaptionGenerate
   if (body.forceTranscription === true) {
     await VideoJobInfoModel.abortAllTasks(video.uuid, 'pendingTranscription')
+    await cleanupStagedTranscriptionAudio(video.uuid)
   }
 
   await createTranscriptionTaskIfNeeded(video)

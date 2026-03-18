@@ -46,6 +46,7 @@ import {
   isVideoNameValid,
   isVideoOriginallyPublishedAtValid,
   isVideoPrivacyValid,
+  isVideoStateValid,
   isVideoSourceFilenameValid,
   isVideoSupportValid
 } from '../../../helpers/custom-validators/videos.js'
@@ -517,6 +518,10 @@ export const commonVideosFiltersValidatorFactory = (options: {
       .optional()
       .customSanitizer(arrayify)
       .custom(isNumberArray).withMessage('Should have a valid privacyOneOf array'),
+    query('stateOneOf')
+      .optional()
+      .customSanitizer(arrayify)
+      .custom(v => isNumberArray(v) && v.every(isVideoStateValid)).withMessage('Should have a valid stateOneOf array'),
     query('tagsOneOf')
       .optional()
       .customSanitizer(arrayify)

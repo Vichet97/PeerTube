@@ -6,7 +6,7 @@ import {
   VideosSearchQueryAfterSanitize
 } from '@peertube/peertube-models'
 
-function pickCommonVideoQuery (query: VideosCommonQueryAfterSanitize) {
+function pickCommonVideoQuery (query: VideosCommonQueryAfterSanitize & { stateOneOf?: number[] }) {
   return pick(query, [
     'start',
     'count',
@@ -21,6 +21,7 @@ function pickCommonVideoQuery (query: VideosCommonQueryAfterSanitize) {
     'languageOneOf',
     'host',
     'privacyOneOf',
+    'stateOneOf',
     'tagsOneOf',
     'tagsAllOf',
     'isLocal',

@@ -1,0 +1,27 @@
+@use "_variables" as *;
+
+@media screen and (min-width: $medium-view) {
+  .job-id {
+    max-width: 30vw !important;
+  }
+
+  .job-type,
+  .job-state,
+  .job-priority {
+    width: 150px !important;
+  }
+
+  .job-date {
+    width: 200px !important;
+  }
+}
+
+.job-state-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+pre {
+  font-size: 11px;
+}

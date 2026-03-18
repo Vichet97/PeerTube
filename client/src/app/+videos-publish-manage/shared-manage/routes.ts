@@ -6,6 +6,7 @@ import { VideoLiveSettingsComponent } from './live-settings/video-live-settings.
 import { VideoMainInfoComponent } from './main-info/video-main-info.component'
 import { VideoModerationComponent } from './moderation/video-moderation.component'
 import { VideoReplaceFileComponent } from './replace-file/video-replace-file.component'
+import { VideoRelatedJobsComponent } from './stats/video-related-jobs.component'
 import { VideoStatsComponent } from './stats/video-stats.component'
 import { VideoStudioEditComponent } from './studio/video-studio.component'
 
@@ -45,6 +46,10 @@ export const manageRoutes = [
   {
     path: 'stats',
     component: VideoStatsComponent
+  },
+  {
+    path: 'related-jobs',
+    component: VideoRelatedJobsComponent
   },
   {
     path: 'studio',

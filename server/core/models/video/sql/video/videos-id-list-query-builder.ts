@@ -5,7 +5,8 @@ import {
   VideoIncludeType,
   VideoPrivacy,
   VideoPrivacyType,
-  VideoState
+  VideoState,
+  type VideoStateType
 } from '@peertube/peertube-models'
 import { exists } from '@server/helpers/custom-validators/misc.js'
 import { WEBSERVER } from '@server/initializers/constants.js'
@@ -54,6 +55,7 @@ export type BuildVideosListQueryOptions = {
   tagsAllOf?: string[]
 
   privacyOneOf?: VideoPrivacyType[]
+  stateOneOf?: VideoStateType[]
 
   autoTagOneOf?: string[]
 
@@ -244,6 +246,10 @@ export class VideosIdListQueryBuilder extends AbstractRunQuery {
     } else {
       // Only list videos with the appropriate privacy
       this.wherePrivacyAvailable(options.user)
+    }
+
+    if (options.stateOneOf && options.stateOneOf.length !== 0) {
+      this.whereStateOneOf(options.stateOneOf)
     }
 
     if (options.uuids) {
@@ -617,6 +623,11 @@ export class VideosIdListQueryBuilder extends AbstractRunQuery {
   private wherePrivacyOneOf (privacyOneOf: VideoPrivacyType[]) {
     this.and.push('"video"."privacy" IN (:privacyOneOf)')
     this.replacements.privacyOneOf = privacyOneOf
+  }
+
+  private whereStateOneOf (stateOneOf: VideoStateType[]) {
+    this.and.push('"video"."state" IN (:stateOneOf)')
+    this.replacements.stateOneOf = stateOneOf
   }
 
   private whereUUIDs (uuids: string[]) {

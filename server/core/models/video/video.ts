@@ -1156,6 +1156,7 @@ export class VideoModel extends SequelizeModel<VideoModel> {
     tagsOneOf?: string[]
     tagsAllOf?: string[]
     privacyOneOf?: VideoPrivacyType[]
+    stateOneOf?: VideoStateType[]
 
     host?: string
 
@@ -1205,6 +1206,7 @@ export class VideoModel extends SequelizeModel<VideoModel> {
         'tagsOneOf',
         'tagsAllOf',
         'privacyOneOf',
+        'stateOneOf',
         'isLocal',
         'include',
         'includeScheduledLive',
