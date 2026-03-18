@@ -86,6 +86,20 @@
             [disabled]="!canCancelSelectedJobs()"
           ></my-button>
         }
+        <my-button
+          i18n-label
+          label="Cancel all waiting/delayed"
+          icon="cross"
+          (click)="cancelAllJobs()"
+          [disabled]="!canCancelAllJobs() || cancellingAllJobs"
+        ></my-button>
+        <my-button
+          i18n-label
+          label="Recheck video status"
+          icon="refresh"
+          (click)="recheckVideosStatus()"
+          [disabled]="recheckingVideosStatus"
+        ></my-button>
         <my-button i18n-label label="Refresh" icon="refresh" (click)="refreshData()"></my-button>
       </div>
 

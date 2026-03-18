@@ -8,6 +8,7 @@ import { sequelizeTypescript } from '../../initializers/database.js'
 import { JobQueue } from '../../lib/job-queue/index.js'
 import { hasVideoResourcesToBeMoved } from '../../lib/move-storage/shared/move-video.js'
 import { buildMoveVideoJob, buildLocalStoryboardJobIfNeeded } from '../../lib/video-jobs.js'
+import { moveToNextState } from '../../lib/video-state.js'
 import { VideoCaptionModel } from '../../models/video/video-caption.js'
 import { VideoJobInfoModel } from '../../models/video/video-job-info.js'
 import { StoryboardModel } from '../../models/video/storyboard.js'
@@ -71,6 +72,12 @@ jobsRouter.post('/cancel-jobs',
   authenticate,
   ensureUserHasRight(UserRight.MANAGE_JOBS),
   asyncMiddleware(cancelJobs)
+)
+
+jobsRouter.post('/recheck-videos-status',
+  authenticate,
+  ensureUserHasRight(UserRight.MANAGE_JOBS),
+  asyncMiddleware(recheckVideosStatus)
 )
 
 jobsRouter.post('/retry-job',
@@ -343,7 +350,13 @@ async function cancelJobs (req: express.Request, res: express.Response) {
       // Cancel all waiting/delayed jobs of the specified types
       const states: ('waiting' | 'delayed')[] = [ 'waiting', 'delayed' ]
 
-      for (const jobType of jobTypes) {
+      let jobTypesToCancel: string[] = jobTypes
+      // If 'all' is specified, get all available queue names
+      if (jobTypes.includes('all')) {
+        jobTypesToCancel = Object.keys(queues)
+      }
+
+      for (const jobType of jobTypesToCancel) {
         const queue = queues[jobType as JobType]
         if (!queue) continue
 
@@ -370,6 +383,107 @@ async function cancelJobs (req: express.Request, res: express.Response) {
   }
 
   return res.json({ cancelledCount })
+}
+
+async function recheckVideosStatus (req: express.Request, res: express.Response) {
+  const jobType = req.body.jobType as string | undefined
+
+  const ids = await VideoModel.listLocalIds()
+
+  const videoUUIDsWithPendingJobs = await JobQueue.Instance.listVideoUUIDsWithPendingTranscodingJobs()
+
+  let videosChecked = 0
+  let videosUpdated = 0
+
+  for (const id of ids) {
+    const video = await VideoModel.loadFull(id)
+    if (!video || video.isLive) continue
+
+    // If jobType filter is specified, only process videos with that job type
+    if (jobType && jobType !== 'all') {
+      if (jobType === 'transcoding' && video.state !== VideoState.TO_TRANSCODE && video.state !== VideoState.TRANSCODING_FAILED) {
+        continue
+      }
+      if (jobType === 'move-to-object-storage' && video.state !== VideoState.TO_MOVE_TO_EXTERNAL_STORAGE &&
+          video.state !== VideoState.TO_MOVE_TO_EXTERNAL_STORAGE_FAILED && video.state !== VideoState.TO_MOVE_TO_FILE_SYSTEM &&
+          video.state !== VideoState.TO_MOVE_TO_FILE_SYSTEM_FAILED) {
+        continue
+      }
+    }
+
+    videosChecked++
+
+    const info = await VideoJobInfoModel.load(video.id)
+
+    // === TRANSCODING SYNC ===
+    // If pendingTranscode > 0 but no jobs in queue, decrement counter
+    if (info?.pendingTranscode > 0) {
+      const hasActiveTranscodingJob = videoUUIDsWithPendingJobs.has(video.uuid)
+      if (!hasActiveTranscodingJob) {
+        // No active job, but counter is positive - decrement the counter
+        await VideoJobInfoModel.decrease(video.uuid, 'pendingTranscode')
+        logger.info(`Fixed pendingTranscode counter for video ${video.uuid}, was ${info.pendingTranscode}, now ${info.pendingTranscode - 1}`)
+        videosUpdated++
+      }
+    }
+
+    // If video state is TRANSCODING_FAILED but has no pending jobs, reset to TO_TRANSCODE
+    if (video.state === VideoState.TRANSCODING_FAILED) {
+      const hasActiveTranscodingJob = videoUUIDsWithPendingJobs.has(video.uuid)
+      const infoAfterDecrease = await VideoJobInfoModel.load(video.id)
+      if (!hasActiveTranscodingJob && (!infoAfterDecrease || infoAfterDecrease.pendingTranscode === 0)) {
+        video.state = VideoState.TO_TRANSCODE
+        await video.save()
+        logger.info(`Reset video ${video.uuid} from TRANSCODING_FAILED to TO_TRANSCODE`)
+        videosUpdated++
+      }
+    }
+
+    // === MOVE TO STORAGE SYNC ===
+    // Check if all files are on object storage (load video with files)
+    const videoWithFiles = await VideoModel.loadWithFiles(video.id)
+    const videoFiles = videoWithFiles?.VideoFiles || []
+    const hasLocalFiles = videoFiles.some(f => f.storage === 0) // 0 = local
+    const hasObjectStorageFiles = videoFiles.some(f => f.storage === 1) // 1 = object storage
+
+    if (info?.pendingMove > 0 && !hasLocalFiles) {
+      // All files moved to object storage, but counter still positive - decrement
+      await VideoJobInfoModel.decrease(video.uuid, 'pendingMove')
+      logger.info(`Fixed pendingMove counter for video ${video.uuid}, files now on object storage`)
+      videosUpdated++
+    }
+
+    if (hasObjectStorageFiles && !hasLocalFiles) {
+      // Fully moved to object storage - update state if still in pending state
+      if (video.state === VideoState.TO_MOVE_TO_EXTERNAL_STORAGE) {
+        // Move to next state (should be PUBLISHED)
+        await moveToNextState({ video, previousVideoState: video.state })
+        logger.info(`Video ${video.uuid} moved to next state after all files on object storage`)
+        videosUpdated++
+      }
+    } else if (hasLocalFiles && !hasObjectStorageFiles) {
+      // Fully on local storage - if in failed state, reset
+      if (video.state === VideoState.TO_MOVE_TO_EXTERNAL_STORAGE_FAILED) {
+        video.state = VideoState.TO_MOVE_TO_EXTERNAL_STORAGE
+        await video.save()
+        logger.info(`Reset video ${video.uuid} from TO_MOVE_TO_EXTERNAL_STORAGE_FAILED to TO_MOVE_TO_EXTERNAL_STORAGE`)
+        videosUpdated++
+      }
+    }
+
+    // === STORYBOARD SYNC ===
+    // Note: Storyboard doesn't have a counter in VideoJobInfoModel
+    // Storyboard status is tracked by whether a StoryboardModel record exists
+    // and doesn't block video state - no action needed here
+
+    // === TRANSCRIPTION SYNC ===
+    // Note: Transcription status is tracked via pendingTranscription counter
+    // and VideoCaptionModel - no action needed here since captions don't block video state
+  }
+
+  logger.info(`Recheck videos status completed: checked ${videosChecked}, updated ${videosUpdated}`)
+
+  return res.json({ videosChecked, videosUpdated })
 }
 
 async function retryJob (req: express.Request, res: express.Response) {

@@ -9,6 +9,7 @@ import { VideoPathManager } from '@server/lib/video-path-manager.js'
 import { getImageSizeFromWorker } from '@server/lib/worker/parent-process.js'
 import { storeStoryboard } from '@server/lib/object-storage/index.js'
 import { VideoModel } from '@server/models/video/video.js'
+import { StoryboardModel } from '@server/models/video/storyboard.js'
 import { Job } from 'bullmq'
 import { remove } from 'fs-extra/esm'
 import { join } from 'path'
@@ -21,6 +22,19 @@ export async function processGenerateStoryboard (job: Job): Promise<void> {
   const lTags = lTagsBase(payload.videoUUID)
 
   logger.info(`Processing generate storyboard of ${payload.videoUUID} in job ${job.id}.`, lTags)
+
+  // Early exit check - avoid acquiring file lock if storyboard already exists
+  const videoCheck = await VideoModel.loadFull(payload.videoUUID)
+  if (!videoCheck) {
+    logger.info('Storyboard job %s cancelled: video %s does not exist (video was deleted).', job.id, payload.videoUUID, lTags)
+    throw new Error('Video was deleted - transcoding job cancelled')
+  }
+
+  const existingStoryboards = await StoryboardModel.findAll({ where: { videoId: videoCheck.id }})
+  if (existingStoryboards.length > 0) {
+    logger.info(`Storyboard already exists for video ${payload.videoUUID}, skipping generation`, lTags)
+    return
+  }
 
   if (CONFIG.STORYBOARDS.ENABLED !== true) {
     logger.info(`Storyboard disabled, do not process storyboard of ${payload.videoUUID} in job ${job.id}.`, lTags)

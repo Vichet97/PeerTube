@@ -161,6 +161,17 @@ export async function generateSubtitle (options: {
       return undefined
     }
 
+    // Early exit if captions already exist - avoid expensive Whisper transcription
+    const existingCaptions = await VideoCaptionModel.listVideoCaptions(video.id)
+    if (existingCaptions.length > 0) {
+      logger.info(`Captions already exist for video ${video.uuid}, skipping transcription`, lTags(video.uuid))
+
+      await VideoJobInfoModel.decrease(video.uuid, 'pendingTranscription')
+        .catch(err => logger.error('Cannot decrease pendingTranscription job count', { err, ...lTags(video.uuid) }))
+
+      return
+    }
+
     const stagedAudioPath = await prepareStagedTranscriptionAudio(video)
     if (!stagedAudioPath) {
       logger.info(

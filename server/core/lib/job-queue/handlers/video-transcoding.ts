@@ -90,6 +90,14 @@ export {
 async function handleWebVideoMergeAudioJob (job: Job, payload: MergeAudioTranscodingPayload, video: MVideoFullLight, user: MUserId) {
   logger.info('Handling merge audio transcoding job for %s.', video.uuid, lTags(video.uuid), { payload })
 
+  // Early exit: check if file already exists (audio already merged)
+  const existingFile = video.getMaxQualityAudioAndVideoFiles().videoFile
+  if (existingFile && existingFile.fps === payload.fps && existingFile.resolution === payload.resolution) {
+    logger.info(`Merged audio file already exists for video ${video.uuid} at ${payload.resolution}p, skipping`, lTags(video.uuid))
+    await VideoJobInfoModel.decrease(video.uuid, 'pendingTranscode')
+    return
+  }
+
   await mergeAudioVideofile({ video, resolution: payload.resolution, fps: payload.fps, job })
 
   logger.info('Merge audio transcoding job for %s ended.', video.uuid, lTags(video.uuid), { payload })
@@ -99,6 +107,14 @@ async function handleWebVideoMergeAudioJob (job: Job, payload: MergeAudioTransco
 
 async function handleWebVideoOptimizeJob (job: Job, payload: OptimizeTranscodingPayload, video: MVideoFullLight, user: MUserId) {
   logger.info('Handling optimize transcoding job for %s.', video.uuid, lTags(video.uuid), { payload })
+
+  // Early exit: check if optimized file already exists
+  const optimizedFile = video.getWebVideoFileResolution(VideoResolution.H_NOVIDEO)
+  if (optimizedFile) {
+    logger.info(`Optimized file already exists for video ${video.uuid}, skipping`, lTags(video.uuid))
+    await VideoJobInfoModel.decrease(video.uuid, 'pendingTranscode')
+    return
+  }
 
   await optimizeOriginalVideofile({ video, job })
 
@@ -111,6 +127,14 @@ async function handleWebVideoOptimizeJob (job: Job, payload: OptimizeTranscoding
 
 async function handleNewWebVideoResolutionJob (job: Job, payload: NewWebVideoResolutionTranscodingPayload, video: MVideoFullLight) {
   logger.info('Handling Web Video transcoding job for %s.', video.uuid, lTags(video.uuid), { payload })
+
+  // Early exit: check if resolution already exists
+  const existingFile = video.getWebVideoFileResolution(payload.resolution)
+  if (existingFile) {
+    logger.info(`Resolution ${payload.resolution}p already exists for video ${video.uuid}, skipping`, lTags(video.uuid))
+    await VideoJobInfoModel.decrease(video.uuid, 'pendingTranscode')
+    return
+  }
 
   await transcodeNewWebVideoResolution({ video, resolution: payload.resolution, fps: payload.fps, job })
 

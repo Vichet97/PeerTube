@@ -69,6 +69,15 @@ export class JobService {
     )
   }
 
+  recheckVideosStatus (jobType?: string) {
+    return this.authHttp.post<{ videosChecked: number, videosUpdated: number }>(
+      JobService.BASE_JOB_URL + '/recheck-videos-status',
+      { jobType }
+    ).pipe(
+      catchError(err => this.restExtractor.handleError(err))
+    )
+  }
+
   retryJob (jobType: string, jobId: number) {
     return this.authHttp.post<{ jobId: number }>(
       JobService.BASE_JOB_URL + '/retry-job',

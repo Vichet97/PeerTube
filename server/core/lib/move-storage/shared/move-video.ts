@@ -55,6 +55,18 @@ export async function moveVideoToStorage (options: {
   const lTags = lTagsBase(video.uuid, video.url)
 
   try {
+    // Early exit if nothing to move - avoid expensive operations when files are already on target storage
+    const hasResourcesToMove = await hasVideoResourcesToBeMoved(video, targetStorage)
+    if (!hasResourcesToMove) {
+      logger.info(`Video ${video.uuid} already on target storage, skipping move.`, lTags)
+
+      const pendingMove = await VideoJobInfoModel.decrease(video.uuid, 'pendingMove')
+      logger.info(`Decreased pendingMove counter for ${video.uuid}. Remaining: ${pendingMove}.`, lTags)
+
+      fileMutexReleaser()
+      return undefined
+    }
+
     const { source, captions, hls, webFiles, thumbnails, storyboards } = await filterVideoResourcesToBeMoved(video, targetStorage)
 
     if (captions.length !== 0) {

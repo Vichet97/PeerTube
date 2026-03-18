@@ -50,9 +50,11 @@ export class JobsComponent implements OnInit {
   creatingRetryTranscodingJobs = false
   creatingTranscriptionJobs = false
   creatingStoryboardJobs = false
+  cancellingAllJobs = false
 
   selectedJobIds = new Set<number>()
   retryingJobIds = new Set<number>()
+  recheckingVideosStatus = false
 
   jobsCount = 0
   videoMaintenanceCounts: VideoMaintenanceCounts = {
@@ -350,6 +352,49 @@ export class JobsComponent implements OnInit {
   canCancelSelectedJobs () {
     // Only allow cancellation when viewing waiting or delayed states
     return this.jobState === 'waiting' || this.jobState === 'delayed' || this.jobState === 'all'
+  }
+
+  canCancelAllJobs () {
+    // Only allow cancellation when viewing waiting or delayed states
+    return this.jobState === 'waiting' || this.jobState === 'delayed' || this.jobState === 'all'
+  }
+
+  cancelAllJobs () {
+    if (this.cancellingAllJobs) return
+    if (!this.canCancelAllJobs()) return
+
+    const jobTypes = [ this.jobType === 'all' ? 'all' : this.jobType ]
+
+    this.cancellingAllJobs = true
+    this.jobsService.cancelJobs(jobTypes).subscribe({
+      next: ({ cancelledCount }) => {
+        this.cancellingAllJobs = false
+        this.notifier.success($localize`Cancelled ${cancelledCount} job(s).`)
+        this.table().loadData()
+      },
+      error: () => {
+        this.cancellingAllJobs = false
+        this.notifier.error($localize`Failed to cancel jobs.`)
+      }
+    })
+  }
+
+  recheckVideosStatus () {
+    if (this.recheckingVideosStatus) return
+
+    this.recheckingVideosStatus = true
+    this.jobsService.recheckVideosStatus(this.jobType).subscribe({
+      next: ({ videosChecked, videosUpdated }) => {
+        this.recheckingVideosStatus = false
+        this.notifier.success($localize`Checked ${videosChecked} video(s), updated ${videosUpdated}.`)
+        this.table().loadData()
+        this.loadVideoMaintenanceCounts()
+      },
+      error: () => {
+        this.recheckingVideosStatus = false
+        this.notifier.error($localize`Failed to recheck video status.`)
+      }
+    })
   }
 
   canRetry (job: Job) {
