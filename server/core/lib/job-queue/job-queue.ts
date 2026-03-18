@@ -840,6 +840,10 @@ class JobQueue {
   static get Instance () {
     return this.instance || (this.instance = new this())
   }
+
+  getQueues () {
+    return this.queues
+  }
 }
 
 // ---------------------------------------------------------------------------

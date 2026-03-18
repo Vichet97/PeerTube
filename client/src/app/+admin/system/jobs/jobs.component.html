@@ -63,6 +63,29 @@
           (click)="createRetryTranscodingJobs()"
           [disabled]="creatingRetryTranscodingJobs"
         ></my-button>
+        <my-button
+          i18n-label
+          label="Create transcription jobs"
+          icon="captions"
+          (click)="createTranscriptionJobs()"
+          [disabled]="creatingTranscriptionJobs"
+        ></my-button>
+        <my-button
+          i18n-label
+          label="Create storyboard jobs"
+          icon="film"
+          (click)="createStoryboardJobs()"
+          [disabled]="creatingStoryboardJobs"
+        ></my-button>
+        @if (selectedJobsCount > 0) {
+          <my-button
+            i18n-label
+            [label]="'Cancel ' + selectedJobsCount + ' selected job(s)'"
+            icon="cross"
+            (click)="cancelSelectedJobs()"
+            [disabled]="!canCancelSelectedJobs()"
+          ></my-button>
+        }
         <my-button i18n-label label="Refresh" icon="refresh" (click)="refreshData()"></my-button>
       </div>
 
@@ -96,6 +119,15 @@
   </ng-template>
 
   <ng-template #tableCells let-job>
+    <td class="job-select">
+      <input
+        type="checkbox"
+        [checked]="isJobSelected(job.id)"
+        (change)="toggleJobSelection(job.id)"
+        [disabled]="job.state === 'active' || job.state === 'completed' || job.state === 'failed' || job.state === 'cancelled'"
+      />
+    </td>
+
     @if (table.isColumnDisplayed('id')) {
       <td class="job-id" [title]="job.id">{{ job.id }}</td>
     }
@@ -112,7 +144,20 @@
 
     @if (table.isColumnDisplayed('state') && table.isColumnDisplayed('state')) {
       <td class="job-state" >
-        <span class="ellipsis" [ngClass]="getJobStateClasses(job.state)">{{ job.state }}</span>
+        <div class="job-state-actions">
+          <span class="ellipsis" [ngClass]="getJobStateClasses(job.state)">{{ job.state }}</span>
+
+          @if (canRetry(job)) {
+            <my-button
+              theme="tertiary"
+              icon="repeat"
+              [loading]="isRetrying(+job.id)"
+              i18n-title
+              title="Retry this failed job"
+              (click)="onRetryClick($event, job)"
+            ></my-button>
+          }
+        </div>
       </td>
     }
 

@@ -2,12 +2,15 @@ import { FileStorage, HttpStatusCode, Job, JobState, JobType, ResultList, UserRi
 import { Job as BullJob } from 'bullmq'
 import express from 'express'
 import { isArray } from '../../helpers/custom-validators/misc.js'
+import { logger } from '../../helpers/logger.js'
 import { CONFIG } from '../../initializers/config.js'
 import { sequelizeTypescript } from '../../initializers/database.js'
 import { JobQueue } from '../../lib/job-queue/index.js'
 import { hasVideoResourcesToBeMoved } from '../../lib/move-storage/shared/move-video.js'
-import { buildMoveVideoJob } from '../../lib/video-jobs.js'
+import { buildMoveVideoJob, buildLocalStoryboardJobIfNeeded } from '../../lib/video-jobs.js'
+import { VideoCaptionModel } from '../../models/video/video-caption.js'
 import { VideoJobInfoModel } from '../../models/video/video-job-info.js'
+import { StoryboardModel } from '../../models/video/storyboard.js'
 import { VideoModel } from '../../models/video/video.js'
 import {
   apiRateLimiter,
@@ -50,6 +53,36 @@ jobsRouter.post('/create-retry-transcoding-jobs',
   ensureUserHasRight(UserRight.MANAGE_JOBS),
   createRetryTranscodingJobsValidator,
   asyncMiddleware(createRetryTranscodingJobs)
+)
+
+jobsRouter.post('/create-transcription-jobs',
+  authenticate,
+  ensureUserHasRight(UserRight.MANAGE_JOBS),
+  asyncMiddleware(createTranscriptionJobs)
+)
+
+jobsRouter.post('/create-storyboard-jobs',
+  authenticate,
+  ensureUserHasRight(UserRight.MANAGE_JOBS),
+  asyncMiddleware(createStoryboardJobs)
+)
+
+jobsRouter.post('/cancel-jobs',
+  authenticate,
+  ensureUserHasRight(UserRight.MANAGE_JOBS),
+  asyncMiddleware(cancelJobs)
+)
+
+jobsRouter.post('/retry-job',
+  authenticate,
+  ensureUserHasRight(UserRight.MANAGE_JOBS),
+  asyncMiddleware(retryJob)
+)
+
+jobsRouter.delete('/:jobType/:jobId',
+  authenticate,
+  ensureUserHasRight(UserRight.MANAGE_JOBS),
+  asyncMiddleware(removeJob)
 )
 
 jobsRouter.get('/video-maintenance-counts',
@@ -170,6 +203,254 @@ async function createRetryTranscodingJobs (req: express.Request, res: express.Re
   }
 
   return res.json({ jobsCreated })
+}
+
+async function createTranscriptionJobs (req: express.Request, res: express.Response) {
+  if (CONFIG.VIDEO_TRANSCRIPTION.ENABLED !== true) {
+    return res.fail({
+      status: HttpStatusCode.BAD_REQUEST_400,
+      message: 'Video transcription is not enabled on this instance'
+    })
+  }
+
+  const ids = await VideoModel.listLocalIds()
+  let jobsCreated = 0
+
+  for (const id of ids) {
+    const videoFull = await VideoModel.loadFull(id)
+    if (!videoFull || videoFull.isLive) continue
+
+    // Skip videos that are in states where transcription doesn't make sense
+    if (videoFull.state === VideoState.WAITING_FOR_LIVE || videoFull.state === VideoState.LIVE_ENDED) continue
+
+    // Check if video has audio stream for transcription
+    const hasAudio = await VideoModel.loadHasStream(videoFull.id, VideoFileStream.AUDIO)
+    if (!hasAudio) continue
+
+    // Check if there's already a pending transcription job
+    const info = await VideoJobInfoModel.load(videoFull.id)
+    if (info?.pendingTranscription > 0) continue
+
+    // Check if video already has a successful auto-generated caption
+    const existingCaptions = await VideoCaptionModel.findAll({
+      where: {
+        videoId: videoFull.id,
+        automaticallyGenerated: true
+      }
+    })
+
+    // If there's already a successful transcription, skip
+    if (existingCaptions.length > 0) continue
+
+    try {
+      await JobQueue.Instance.createJob({
+        type: 'video-transcription',
+        payload: { videoUUID: videoFull.uuid }
+      })
+
+      await VideoJobInfoModel.increaseOrCreate(videoFull.uuid, 'pendingTranscription')
+      jobsCreated++
+    } catch {
+      // Continue with other videos if one fails
+    }
+  }
+
+  return res.json({ jobsCreated })
+}
+
+async function createStoryboardJobs (req: express.Request, res: express.Response) {
+  if (CONFIG.STORYBOARDS.ENABLED !== true) {
+    return res.fail({
+      status: HttpStatusCode.BAD_REQUEST_400,
+      message: 'Storyboards are not enabled on this instance'
+    })
+  }
+
+  const ids = await VideoModel.listLocalIds()
+  let jobsCreated = 0
+
+  for (const id of ids) {
+    const videoFull = await VideoModel.loadFull(id)
+    if (!videoFull || videoFull.isLive) continue
+
+    // Skip videos that are in states where storyboard generation doesn't make sense
+    if (videoFull.state === VideoState.WAITING_FOR_LIVE || videoFull.state === VideoState.LIVE_ENDED) continue
+
+    // Check if video has video stream
+    const hasVideo = await VideoModel.loadHasStream(videoFull.id, VideoFileStream.VIDEO)
+    if (!hasVideo) continue
+
+    // Check if storyboard already exists
+    const existingStoryboard = await StoryboardModel.findOne({
+      where: { videoId: videoFull.id }
+    })
+
+    // If storyboard already exists, skip
+    if (existingStoryboard) continue
+
+    try {
+      const job = await buildLocalStoryboardJobIfNeeded({
+        video: videoFull,
+        federate: false
+      })
+
+      if (job) {
+        await JobQueue.Instance.createJob(job)
+        jobsCreated++
+      }
+    } catch {
+      // Continue with other videos if one fails
+    }
+  }
+
+  return res.json({ jobsCreated })
+}
+
+async function cancelJobs (req: express.Request, res: express.Response) {
+  const jobTypes = req.body.jobTypes as string[]
+  const jobIds = req.body.jobIds as number[] | undefined
+
+  if (!jobTypes || !Array.isArray(jobTypes) || jobTypes.length === 0) {
+    return res.fail({
+      status: HttpStatusCode.BAD_REQUEST_400,
+      message: 'jobTypes must be a non-empty array'
+    })
+  }
+
+  let cancelledCount = 0
+
+  try {
+    const queues = JobQueue.Instance.getQueues()
+
+    if (jobIds && jobIds.length > 0) {
+      // Cancel specific jobs by ID
+      for (const jobId of jobIds) {
+        for (const jobType of jobTypes) {
+          const queue = queues[jobType as JobType]
+          if (!queue) continue
+
+          const job = await queue.getJob(String(jobId))
+          if (!job) continue
+
+          const state = await job.getState()
+          if (state === 'waiting' || state === 'delayed') {
+            await job.remove()
+            cancelledCount++
+          }
+        }
+      }
+    } else {
+      // Cancel all waiting/delayed jobs of the specified types
+      const states: ('waiting' | 'delayed')[] = [ 'waiting', 'delayed' ]
+
+      for (const jobType of jobTypes) {
+        const queue = queues[jobType as JobType]
+        if (!queue) continue
+
+        for (const state of states) {
+          const jobs = await queue.getJobs([ state ], 0, 10000, true)
+
+          for (const job of jobs) {
+            try {
+              await job.remove()
+              cancelledCount++
+            } catch {
+              // Job might have been processed already, continue
+            }
+          }
+        }
+      }
+    }
+  } catch (err) {
+    logger.error('Error cancelling jobs', { err })
+    return res.fail({
+      status: HttpStatusCode.INTERNAL_SERVER_ERROR_500,
+      message: 'Error cancelling jobs'
+    })
+  }
+
+  return res.json({ cancelledCount })
+}
+
+async function retryJob (req: express.Request, res: express.Response) {
+  const jobType = req.body.jobType as string
+  const jobId = req.body.jobId as string
+
+  if (!jobType || !jobId) {
+    return res.fail({
+      status: HttpStatusCode.BAD_REQUEST_400,
+      message: 'jobType and jobId are required'
+    })
+  }
+
+  const result = await JobQueue.Instance.retryFailedJob({
+    jobType: jobType as JobType,
+    jobId
+  })
+
+  if (result.status === 'not_found') {
+    return res.fail({
+      status: HttpStatusCode.NOT_FOUND_404,
+      message: 'Job was not found'
+    })
+  }
+
+  if (result.status === 'not_failed') {
+    return res.fail({
+      status: HttpStatusCode.BAD_REQUEST_400,
+      message: 'Only failed jobs can be retried'
+    })
+  }
+
+  if (result.status === 'retried') {
+    return res.json({ jobId: result.newJobId })
+  }
+
+  return res.fail({
+    status: HttpStatusCode.INTERNAL_SERVER_ERROR_500,
+    message: 'Unknown error occurred'
+  })
+}
+
+async function removeJob (req: express.Request, res: express.Response) {
+  const jobType = req.params.jobType as string
+  const jobId = req.params.jobId as string
+
+  if (!jobType || !jobId) {
+    return res.fail({
+      status: HttpStatusCode.BAD_REQUEST_400,
+      message: 'jobType and jobId are required'
+    })
+  }
+
+  const queues = JobQueue.Instance.getQueues()
+  const queue = queues[jobType as JobType]
+
+  if (!queue) {
+    return res.fail({
+      status: HttpStatusCode.NOT_FOUND_404,
+      message: 'Queue not found'
+    })
+  }
+
+  const job = await queue.getJob(jobId)
+  if (!job) {
+    return res.fail({
+      status: HttpStatusCode.NOT_FOUND_404,
+      message: 'Job not found'
+    })
+  }
+
+  try {
+    await job.remove()
+    return res.sendStatus(HttpStatusCode.NO_CONTENT_204)
+  } catch (err) {
+    logger.error('Error removing job', { err, jobType, jobId })
+    return res.fail({
+      status: HttpStatusCode.INTERNAL_SERVER_ERROR_500,
+      message: 'Error removing job'
+    })
+  }
 }
 
 async function getVideoMaintenanceCounts (req: express.Request, res: express.Response) {

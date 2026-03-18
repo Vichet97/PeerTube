@@ -42,6 +42,50 @@ export class JobService {
     )
   }
 
+  createTranscriptionJobs () {
+    return this.authHttp.post<{ jobsCreated: number }>(
+      JobService.BASE_JOB_URL + '/create-transcription-jobs',
+      {}
+    ).pipe(
+      catchError(err => this.restExtractor.handleError(err))
+    )
+  }
+
+  createStoryboardJobs () {
+    return this.authHttp.post<{ jobsCreated: number }>(
+      JobService.BASE_JOB_URL + '/create-storyboard-jobs',
+      {}
+    ).pipe(
+      catchError(err => this.restExtractor.handleError(err))
+    )
+  }
+
+  cancelJobs (jobTypes: string[], jobIds?: number[]) {
+    return this.authHttp.post<{ cancelledCount: number }>(
+      JobService.BASE_JOB_URL + '/cancel-jobs',
+      { jobTypes, jobIds }
+    ).pipe(
+      catchError(err => this.restExtractor.handleError(err))
+    )
+  }
+
+  retryJob (jobType: string, jobId: number) {
+    return this.authHttp.post<{ jobId: number }>(
+      JobService.BASE_JOB_URL + '/retry-job',
+      { jobType, jobId: String(jobId) }
+    ).pipe(
+      catchError(err => this.restExtractor.handleError(err))
+    )
+  }
+
+  removeJob (jobType: string, jobId: number) {
+    return this.authHttp.delete(
+      `${JobService.BASE_JOB_URL}/${jobType}/${jobId}`
+    ).pipe(
+      catchError(err => this.restExtractor.handleError(err))
+    )
+  }
+
   getVideoMaintenanceCounts () {
     return this.authHttp.get<VideoMaintenanceCounts>(JobService.BASE_JOB_URL + '/video-maintenance-counts')
       .pipe(

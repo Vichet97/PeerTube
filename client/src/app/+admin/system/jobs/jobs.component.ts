@@ -17,7 +17,7 @@ import { TableColumnInfo, TableComponent, TableQueryParams } from '../../../shar
 import { AdvancedInputFilterComponent } from '../../../shared/shared-forms/advanced-input-filter.component'
 import { JobService, VideoMaintenanceCounts } from './job.service'
 
-type ColumnName = 'id' | 'type' | 'priority' | 'state' | 'progress' | 'createdAt' | 'processed'
+type ColumnName = 'select' | 'id' | 'type' | 'priority' | 'state' | 'progress' | 'createdAt' | 'processed'
 
 type QueryParams = TableQueryParams & {
   jobType: string
@@ -48,6 +48,12 @@ export class JobsComponent implements OnInit {
 
   creatingMoveJobs = false
   creatingRetryTranscodingJobs = false
+  creatingTranscriptionJobs = false
+  creatingStoryboardJobs = false
+
+  selectedJobIds = new Set<number>()
+  retryingJobIds = new Set<number>()
+
   jobsCount = 0
   videoMaintenanceCounts: VideoMaintenanceCounts = {
     localStorageVideos: 0,
@@ -101,6 +107,7 @@ export class JobsComponent implements OnInit {
   jobTypeItems: SelectOptionsItem[] = this.jobTypes.map(i => ({ id: i, label: i }))
 
   columns: TableColumnInfo<ColumnName>[] = [
+    { id: 'select', class: 'job-select', label: '', sortable: false },
     { id: 'id', class: 'job-id', label: $localize`ID`, sortable: false },
     { id: 'type', class: 'job-type', label: $localize`Type`, sortable: false },
     { id: 'priority', class: 'job-priority', label: $localize`Priority`, labelSmall: $localize`(1 = highest priority)`, sortable: false },
@@ -269,6 +276,128 @@ export class JobsComponent implements OnInit {
         this.creatingRetryTranscodingJobs = false
       }
     })
+  }
+
+  createTranscriptionJobs () {
+    if (this.creatingTranscriptionJobs) return
+
+    this.creatingTranscriptionJobs = true
+    this.jobsService.createTranscriptionJobs().subscribe({
+      next: ({ jobsCreated }) => {
+        this.creatingTranscriptionJobs = false
+        this.notifier.success($localize`Created ${jobsCreated} transcription job(s).`)
+        this.table().loadData()
+      },
+
+      error: () => {
+        this.creatingTranscriptionJobs = false
+      }
+    })
+  }
+
+  createStoryboardJobs () {
+    if (this.creatingStoryboardJobs) return
+
+    this.creatingStoryboardJobs = true
+    this.jobsService.createStoryboardJobs().subscribe({
+      next: ({ jobsCreated }) => {
+        this.creatingStoryboardJobs = false
+        this.notifier.success($localize`Created ${jobsCreated} storyboard job(s).`)
+        this.table().loadData()
+      },
+
+      error: () => {
+        this.creatingStoryboardJobs = false
+      }
+    })
+  }
+
+  cancelSelectedJobs () {
+    if (this.selectedJobIds.size === 0) return
+
+    const jobTypes = [ this.jobType === 'all' ? 'all' : this.jobType ]
+    const jobIds = Array.from(this.selectedJobIds)
+
+    this.jobsService.cancelJobs(jobTypes, jobIds).subscribe({
+      next: ({ cancelledCount }) => {
+        this.notifier.success($localize`Cancelled ${cancelledCount} job(s).`)
+        this.selectedJobIds.clear()
+        this.table().loadData()
+      },
+
+      error: () => {
+        // Handle error
+      }
+    })
+  }
+
+  toggleJobSelection (jobId: number) {
+    if (this.selectedJobIds.has(jobId)) {
+      this.selectedJobIds.delete(jobId)
+    } else {
+      this.selectedJobIds.add(jobId)
+    }
+  }
+
+  isJobSelected (jobId: number) {
+    return this.selectedJobIds.has(jobId)
+  }
+
+  get selectedJobsCount () {
+    return this.selectedJobIds.size
+  }
+
+  canCancelSelectedJobs () {
+    // Only allow cancellation when viewing waiting or delayed states
+    return this.jobState === 'waiting' || this.jobState === 'delayed' || this.jobState === 'all'
+  }
+
+  canRetry (job: Job) {
+    return (job.state || '').toLowerCase() === 'failed'
+  }
+
+  isRetrying (jobId: number) {
+    return this.retryingJobIds.has(jobId)
+  }
+
+  onRetryClick (event: MouseEvent, job: Job) {
+    event.preventDefault()
+    event.stopPropagation()
+
+    this.retryJob(job)
+  }
+
+  retryJob (job: Job) {
+    const jobId = Number(job.id)
+    if (!this.canRetry(job))
+      return
+    if (this.retryingJobIds.has(jobId))
+      return
+
+    this.retryingJobIds.add(jobId)
+
+    this.jobsService.retryJob(job.type, jobId)
+      .subscribe({
+        next: () => {
+          // Remove the failed job after successful retry
+          this.jobsService.removeJob(job.type, jobId).subscribe({
+            next: () => {
+              this.notifier.success($localize`Retry job created and failed job removed.`)
+              this.table().loadData()
+            },
+            error: () => {
+              // Even if remove fails, just reload data
+              this.notifier.success($localize`Retry job created.`)
+              this.table().loadData()
+            }
+          })
+          this.retryingJobIds.delete(jobId)
+        },
+        error: err => {
+          this.retryingJobIds.delete(jobId)
+          this.notifier.error($localize`Failed to create retry job.`)
+        }
+      })
   }
 
   refreshData () {

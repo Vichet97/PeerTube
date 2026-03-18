@@ -117,6 +117,12 @@ pre {
   color: pvar(--red);
 }
 
+.job-state-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
 @media screen and (max-width: $medium-view) {
   .jobs-toolbar {
     padding: 0.65rem;
