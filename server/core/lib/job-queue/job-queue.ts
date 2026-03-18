@@ -808,6 +808,14 @@ class JobQueue {
   private getJobConcurrency (jobType: JobType) {
     if (jobType === 'video-transcoding') return CONFIG.TRANSCODING.CONCURRENCY
     if (jobType === 'video-import') return CONFIG.IMPORT.VIDEOS.CONCURRENCY
+    if (jobType === 'move-to-object-storage') return CONFIG.OBJECT_STORAGE.CONCURRENCY
+    if (jobType === 'move-to-file-system') return CONFIG.OBJECT_STORAGE.MOVE_TO_FILE_SYSTEM_CONCURRENCY
+    if (jobType === 'federate-video') return CONFIG.FEDERATION.CONCURRENCY
+    if (jobType === 'generate-video-storyboard') return CONFIG.STORYBOARDS.CONCURRENCY
+    if (jobType === 'video-studio-edition') return CONFIG.VIDEO_STUDIO.CONCURRENCY
+    if (jobType === 'video-transcription') return CONFIG.VIDEO_TRANSCRIPTION.CONCURRENCY
+    if (jobType === 'video-file-import') return CONFIG.VIDEO_FILE.IMPORT.CONCURRENCY
+    if (jobType === 'transcoding-job-builder') return CONFIG.TRANSCODING.CONCURRENCY
 
     return JOB_CONCURRENCY[jobType]
   }

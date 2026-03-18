@@ -265,6 +265,9 @@ const CONFIG = {
   },
   OBJECT_STORAGE: {
     ENABLED: config.get<boolean>('object_storage.enabled'),
+    CONCURRENCY: config.has('object_storage.concurrency') ? config.get<number>('object_storage.concurrency') : 5,
+    UPLOAD_CONCURRENCY: config.has('object_storage.upload_concurrency') ? config.get<number>('object_storage.upload_concurrency') : 10,
+    MOVE_TO_FILE_SYSTEM_CONCURRENCY: config.has('object_storage.move_to_file_system_concurrency') ? config.get<number>('object_storage.move_to_file_system_concurrency') : 5,
     KEEP_LOCAL_FILE_AFTER_MOVE: config.get<number>('object_storage.keep_local_file_after_move') * 60 * 1000,
     MAX_UPLOAD_PART: bytes.parse(config.get<string>('object_storage.max_upload_part')),
     MAX_REQUEST_ATTEMPTS: config.get<number>('object_storage.max_request_attempts'),
@@ -510,6 +513,7 @@ const CONFIG = {
   },
   FEDERATION: {
     ENABLED: config.get<boolean>('federation.enabled'),
+    CONCURRENCY: config.has('federation.concurrency') ? config.get<number>('federation.concurrency') : 5,
     PREVENT_SSRF: config.get<boolean>('federation.prevent_ssrf'),
     VIDEOS: {
       FEDERATE_UNLISTED: config.get<boolean>('federation.videos.federate_unlisted'),
@@ -849,6 +853,9 @@ const CONFIG = {
     get ENABLED () {
       return config.get<boolean>('video_studio.enabled')
     },
+    get CONCURRENCY () {
+      return config.has('video_studio.concurrency') ? config.get<number>('video_studio.concurrency') : 1
+    },
     REMOTE_RUNNERS: {
       get ENABLED () {
         return config.get<boolean>('video_studio.remote_runners.enabled')
@@ -860,11 +867,19 @@ const CONFIG = {
       get ENABLED () {
         return config.get<boolean>('video_file.update.enabled')
       }
+    },
+    IMPORT: {
+      get CONCURRENCY () {
+        return config.has('video_file.import.concurrency') ? config.get<number>('video_file.import.concurrency') : 1
+      }
     }
   },
   VIDEO_TRANSCRIPTION: {
     get ENABLED () {
       return config.get<boolean>('video_transcription.enabled')
+    },
+    get CONCURRENCY () {
+      return config.has('video_transcription.concurrency') ? config.get<number>('video_transcription.concurrency') : 5
     },
     get ENGINE () {
       return config.get<TranscriptionEngineName>('video_transcription.engine')
@@ -1304,6 +1319,9 @@ const CONFIG = {
   STORYBOARDS: {
     get ENABLED () {
       return config.get<boolean>('storyboards.enabled')
+    },
+    get CONCURRENCY () {
+      return config.has('storyboards.concurrency') ? config.get<number>('storyboards.concurrency') : 5
     },
     REMOTE_RUNNERS: {
       get ENABLED () {

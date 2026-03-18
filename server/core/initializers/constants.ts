@@ -245,7 +245,7 @@ export const JOB_CONCURRENCY: { [id in Exclude<JobType, 'video-transcoding' | 'v
   'activitypub-http-fetcher': 3,
   'activitypub-cleaner': 1,
   'activitypub-follow': 1,
-  'video-file-import': 1,
+  'video-file-import': 5,
   'email': 5,
   'actor-keys': 1,
   'videos-views-stats': 1,
@@ -254,17 +254,17 @@ export const JOB_CONCURRENCY: { [id in Exclude<JobType, 'video-transcoding' | 'v
   'video-live-ending': 10,
   'video-studio-edition': 1,
   'manage-video-torrent': 1, // Keep it to 1 to prevent concurrency issues
-  'move-to-object-storage': 1,
-  'move-to-file-system': 1,
-  'video-channel-import': 1,
-  'after-video-channel-import': 1,
-  'transcoding-job-builder': 1,
-  'generate-video-storyboard': 1,
+  'move-to-object-storage': 10,
+  'move-to-file-system': 10,
+  'video-channel-import': 10,
+  'after-video-channel-import': 10,
+  'transcoding-job-builder': 10,
+  'generate-video-storyboard': 10,
   'notify': 5,
-  'federate-video': 3,
+  'federate-video': 5,
   'create-user-export': 1,
   'import-user-archive': 1,
-  'video-transcription': 1
+  'video-transcription': 5
 }
 export const JOB_TTL: { [id in JobType]: number } = {
   'activitypub-http-broadcast': 60000 * 10, // 10 minutes
@@ -285,8 +285,8 @@ export const JOB_TTL: { [id in JobType]: number } = {
   'video-live-ending': 1000 * 60 * 10, // 10 minutes
   'generate-video-storyboard': 1000 * 3600 * 6, // 6 hours
   'manage-video-torrent': 1000 * 3600 * 3, // 3 hours
-  'move-to-object-storage': 1000 * 60 * 60 * 3, // 3 hours
-  'move-to-file-system': 1000 * 60 * 60 * 3, // 3 hours
+  'move-to-object-storage': 1000 * 60 * 60 * 48, // 3 hours
+  'move-to-file-system': 1000 * 60 * 60 * 48, // 3 hours
   'video-channel-import': 1000 * 60 * 60 * 4, // 4 hours
   'after-video-channel-import': 60000 * 5, // 5 minutes
   'transcoding-job-builder': 60000, // 1 minute

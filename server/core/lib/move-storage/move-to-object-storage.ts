@@ -25,6 +25,7 @@ import { MVideoSource } from '@server/types/models/video/video-source.js'
 import { pathExists, remove } from 'fs-extra/esm'
 import { rmdir } from 'fs/promises'
 import { dirname, join, resolve } from 'path'
+import PQueue from 'p-queue'
 import { federateVideoIfNeeded } from '../activitypub/videos/federate.js'
 import { moveCaptionToStorage } from './shared/move-caption.js'
 import { moveVideoToStorage, onMoveVideoToStorageFailure } from './shared/move-video.js'
@@ -113,9 +114,11 @@ async function moveVideoSourceFile (source: MVideoSource) {
 // ---------------------------------------------------------------------------
 
 async function moveCaptionFiles (captions: MVideoCaption[], hls: MStreamingPlaylistVideo) {
-  let hlsUpdated = false
+  const queue = new PQueue({ concurrency: CONFIG.OBJECT_STORAGE.UPLOAD_CONCURRENCY })
 
-  for (const caption of captions) {
+  const results = await queue.addAll(captions.map(caption => async () => {
+    let captionUpdated = false
+
     if (caption.storage === FileStorage.FILE_SYSTEM) {
       const captionPath = caption.getFSFilePath()
 
@@ -130,7 +133,7 @@ async function moveCaptionFiles (captions: MVideoCaption[], hls: MStreamingPlayl
     }
 
     if (hls) {
-      hlsUpdated = true
+      captionUpdated = true
 
       const m3u8PathToRemove = caption.getFSM3U8Path(hls.Video)
 
@@ -152,7 +155,11 @@ async function moveCaptionFiles (captions: MVideoCaption[], hls: MStreamingPlayl
         await removeLocalFileAfterMove(m3u8PathToRemove)
       }
     }
-  }
+
+    return captionUpdated
+  }))
+
+  const hlsUpdated = results.some(r => r === true)
 
   if (hlsUpdated) {
     await updateHLSMasterOnCaptionChange(hls.Video, hls)
@@ -162,24 +169,25 @@ async function moveCaptionFiles (captions: MVideoCaption[], hls: MStreamingPlayl
 // ---------------------------------------------------------------------------
 
 async function moveWebVideoFiles (video: MVideoWithAllFiles) {
-  for (const file of video.VideoFiles) {
-    if (file.storage !== FileStorage.FILE_SYSTEM) continue
+  const queue = new PQueue({ concurrency: CONFIG.OBJECT_STORAGE.UPLOAD_CONCURRENCY })
+
+  await queue.addAll(video.VideoFiles.map(file => async () => {
+    if (file.storage !== FileStorage.FILE_SYSTEM) return
 
     await storeWebVideoFile(video, file)
 
     const oldPath = VideoPathManager.Instance.getFSVideoFileOutputPath(video, file)
     await onVideoFileMoved({ videoOrPlaylist: video, file, oldPath })
-  }
+  }))
 }
 
 async function moveHLSFiles (video: MVideoWithAllFiles) {
+  const queue = new PQueue({ concurrency: CONFIG.OBJECT_STORAGE.UPLOAD_CONCURRENCY })
+
   for (const playlist of video.VideoStreamingPlaylists) {
-    let updatedFile = false
 
-    for (const file of playlist.VideoFiles) {
-      if (file.storage !== FileStorage.FILE_SYSTEM) continue
-
-      updatedFile = true
+    const results = await queue.addAll(playlist.VideoFiles.map(file => async () => {
+      if (file.storage !== FileStorage.FILE_SYSTEM) return false
 
       // Resolution playlist
       const playlistFilename = getHLSResolutionPlaylistFilename(file.filename)
@@ -193,7 +201,11 @@ async function moveHLSFiles (video: MVideoWithAllFiles) {
       await onVideoFileMoved({ videoOrPlaylist: Object.assign(playlist, { Video: video }), file, oldPath })
 
       await removeLocalFileAfterMove(join(getHLSDirectory(video), playlistFilename))
-    }
+
+      return true
+    }))
+
+    const updatedFile = results.some(r => r === true)
 
     if (playlist.storage === FileStorage.FILE_SYSTEM) {
       await storeHLSFileFromFilename(video, playlist.playlistFilename)
@@ -240,8 +252,10 @@ async function onVideoFileMoved (options: {
 // ---------------------------------------------------------------------------
 
 async function moveThumbnailFiles (thumbnails: MThumbnail[]) {
-  for (const thumbnail of thumbnails) {
-    if (thumbnail.storage !== FileStorage.FILE_SYSTEM) continue
+  const queue = new PQueue({ concurrency: CONFIG.OBJECT_STORAGE.UPLOAD_CONCURRENCY })
+
+  await queue.addAll(thumbnails.map(thumbnail => async () => {
+    if (thumbnail.storage !== FileStorage.FILE_SYSTEM) return
 
     const thumbnailPath = thumbnail.getFSPath()
     await storeThumbnail(thumbnailPath, thumbnail.filename)
@@ -251,14 +265,16 @@ async function moveThumbnailFiles (thumbnails: MThumbnail[]) {
 
     logger.debug(`Removing thumbnail file ${thumbnailPath} because it's now on object storage`, lTagsBase())
     await removeLocalFileAfterMove(thumbnailPath)
-  }
+  }))
 }
 
 // ---------------------------------------------------------------------------
 
 async function moveStoryboardFiles (storyboards: MStoryboard[]) {
-  for (const storyboard of storyboards) {
-    if (storyboard.storage !== FileStorage.FILE_SYSTEM) continue
+  const queue = new PQueue({ concurrency: CONFIG.OBJECT_STORAGE.UPLOAD_CONCURRENCY })
+
+  await queue.addAll(storyboards.map(storyboard => async () => {
+    if (storyboard.storage !== FileStorage.FILE_SYSTEM) return
 
     const storyboardPath = storyboard.getFSPath()
     await storeStoryboard(storyboardPath, storyboard.filename)
@@ -268,7 +284,7 @@ async function moveStoryboardFiles (storyboards: MStoryboard[]) {
 
     logger.debug(`Removing storyboard file ${storyboardPath} because it's now on object storage`, lTagsBase())
     await removeLocalFileAfterMove(storyboardPath)
-  }
+  }))
 }
 
 // ---------------------------------------------------------------------------
@@ -279,15 +295,17 @@ async function moveTorrentFiles (video: MVideoWithAllFiles) {
     ...(video.VideoStreamingPlaylists || []).flatMap(p => p.VideoFiles)
   ]
 
-  for (const file of allFiles) {
-    if (!file.torrentFilename) continue
+  const queue = new PQueue({ concurrency: CONFIG.OBJECT_STORAGE.UPLOAD_CONCURRENCY })
+
+  await queue.addAll(allFiles.map(file => async () => {
+    if (!file.torrentFilename) return
 
     const torrentPath = join(CONFIG.STORAGE.TORRENTS_DIR, file.torrentFilename)
 
     // Skip if local torrent was already moved to object storage by updateTorrentMetadata in onVideoFileMoved
     if (!await pathExists(torrentPath)) {
       logger.debug(`Torrent file ${torrentPath} not found locally, already on object storage`, lTagsBase())
-      continue
+      return
     }
 
     try {
@@ -298,7 +316,7 @@ async function moveTorrentFiles (video: MVideoWithAllFiles) {
     } catch (err) {
       logger.warn(`Cannot move torrent file ${torrentPath} to object storage`, { err, ...lTagsBase() })
     }
-  }
+  }))
 }
 
 async function removeLocalFileAfterMove (path: string) {
