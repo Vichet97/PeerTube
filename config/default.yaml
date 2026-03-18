@@ -854,9 +854,6 @@ video_transcription:
   remote_runners:
       enabled: false
 
-  # Concurrency for video studio jobs
-  concurrency: 1
-
 video_file:
   update:
     # Add ability for users to replace the video file of an existing video
