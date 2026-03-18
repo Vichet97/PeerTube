@@ -51,7 +51,7 @@ try {
 
 // Initialize database and models
 import { initDatabaseModels, checkDatabaseConnectionOrDie, sequelizeTypescript } from './core/initializers/database.js'
-checkDatabaseConnectionOrDie()
+await checkDatabaseConnectionOrDie()
 
 import { migrate } from './core/initializers/migrator.js'
 migrate()

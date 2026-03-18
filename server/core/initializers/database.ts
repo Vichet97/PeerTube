@@ -134,13 +134,26 @@ export const sequelizeTypescript = new SequelizeTypescript({
   }
 })
 
-export function checkDatabaseConnectionOrDie () {
-  sequelizeTypescript.authenticate()
-    .then(() => logger.debug('Connection to PostgreSQL has been established successfully.'))
-    .catch(err => {
-      logger.error('Unable to connect to PostgreSQL database.', { err })
-      process.exit(-1)
-    })
+export async function checkDatabaseConnectionOrDie () {
+  const MAX_RETRIES = 5
+  const RETRY_DELAY = 5000 // 5 seconds
+
+  for (let i = 0; i < MAX_RETRIES; i++) {
+    try {
+      await sequelizeTypescript.authenticate()
+      logger.debug('Connection to PostgreSQL has been established successfully.')
+      return
+    } catch (err) {
+      // If we've reached the last retry, fail
+      if (i === MAX_RETRIES - 1) {
+        logger.error('Unable to connect to PostgreSQL database.', { err })
+        process.exit(-1)
+      }
+
+      logger.warn(`Unable to connect to PostgreSQL database (attempt ${i + 1}/${MAX_RETRIES}). Retrying in ${RETRY_DELAY / 1000}s...`, { err })
+      await new Promise(resolve => setTimeout(resolve, RETRY_DELAY))
+    }
+  }
 }
 
 export async function initDatabaseModels (silent: boolean) {
