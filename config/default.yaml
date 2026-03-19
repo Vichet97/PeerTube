@@ -825,7 +825,7 @@ video_transcription:
   enabled: true
 
   # Concurrency for video transcription jobs
-  concurrency: 2
+  concurrency: 1
 
   # Choose engine for local transcription
   # Supported: 'openai-whisper' or 'whisper-ctranslate2'
@@ -846,7 +846,7 @@ video_transcription:
   model_path: null
 
   # Increase this value if you plan to transcribe long videos and if your video doesn't have a GPU
-  timeout: '10 hours'
+  timeout: '6 hours'
 
   # Enable remote runners to transcribe videos
   # If enabled, your instance won't transcribe the videos itself
@@ -1294,7 +1294,7 @@ storyboards:
     enabled: false
 
   # Concurrency for storyboard generation jobs
-  concurrency: 10
+  concurrency: 1
 
 # Update default PeerTube values
 # Set by API when the field is not provided and put as default value in client
