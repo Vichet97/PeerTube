@@ -246,18 +246,20 @@ export class JobsComponent implements OnInit {
     if (this.creatingMoveJobs) return
 
     this.creatingMoveJobs = true
+    const target = storage === 'object-storage' ? $localize`object storage` : $localize`file system`
+    this.notifier.info($localize`Creating jobs to move videos to ${target}...`)
+
+    // Fire and forget - don't wait for the API response
     this.jobsService.createMoveStorageJobs(storage).subscribe({
       next: ({ jobsCreated }) => {
         this.creatingMoveJobs = false
-        const target = storage === 'object-storage' ? $localize`object storage` : $localize`file system`
-        this.notifier.success(
-          $localize`Created ${jobsCreated} job(s) to move videos to ${target}.`
-        )
+        this.notifier.success($localize`Created ${jobsCreated} job(s) to move videos to ${target}.`)
         this.table().loadData()
         this.loadVideoMaintenanceCounts()
       },
       error: () => {
         this.creatingMoveJobs = false
+        this.notifier.error($localize`Failed to create move storage jobs.`)
       }
     })
   }
@@ -266,6 +268,9 @@ export class JobsComponent implements OnInit {
     if (this.creatingRetryTranscodingJobs) return
 
     this.creatingRetryTranscodingJobs = true
+    this.notifier.info($localize`Creating retry transcoding jobs...`)
+
+    // Fire and forget - don't wait for the API response
     this.jobsService.createRetryTranscodingJobs().subscribe({
       next: ({ jobsCreated }) => {
         this.creatingRetryTranscodingJobs = false
@@ -276,6 +281,7 @@ export class JobsComponent implements OnInit {
 
       error: () => {
         this.creatingRetryTranscodingJobs = false
+        this.notifier.error($localize`Failed to create retry transcoding jobs.`)
       }
     })
   }
@@ -284,6 +290,9 @@ export class JobsComponent implements OnInit {
     if (this.creatingTranscriptionJobs) return
 
     this.creatingTranscriptionJobs = true
+    this.notifier.info($localize`Creating transcription jobs...`)
+
+    // Fire and forget - don't wait for the API response
     this.jobsService.createTranscriptionJobs().subscribe({
       next: ({ jobsCreated }) => {
         this.creatingTranscriptionJobs = false
@@ -293,6 +302,7 @@ export class JobsComponent implements OnInit {
 
       error: () => {
         this.creatingTranscriptionJobs = false
+        this.notifier.error($localize`Failed to create transcription jobs.`)
       }
     })
   }
@@ -301,6 +311,9 @@ export class JobsComponent implements OnInit {
     if (this.creatingStoryboardJobs) return
 
     this.creatingStoryboardJobs = true
+    this.notifier.info($localize`Creating storyboard jobs...`)
+
+    // Fire and forget - don't wait for the API response
     this.jobsService.createStoryboardJobs().subscribe({
       next: ({ jobsCreated }) => {
         this.creatingStoryboardJobs = false
@@ -310,6 +323,7 @@ export class JobsComponent implements OnInit {
 
       error: () => {
         this.creatingStoryboardJobs = false
+        this.notifier.error($localize`Failed to create storyboard jobs.`)
       }
     })
   }
@@ -366,6 +380,8 @@ export class JobsComponent implements OnInit {
     const jobTypes = [ this.jobType === 'all' ? 'all' : this.jobType ]
 
     this.cancellingAllJobs = true
+    this.notifier.info($localize`Cancelling jobs...`)
+
     this.jobsService.cancelJobs(jobTypes).subscribe({
       next: ({ cancelledCount }) => {
         this.cancellingAllJobs = false
@@ -383,6 +399,8 @@ export class JobsComponent implements OnInit {
     if (this.recheckingVideosStatus) return
 
     this.recheckingVideosStatus = true
+    this.notifier.info($localize`Rechecking video status...`)
+
     this.jobsService.recheckVideosStatus(this.jobType).subscribe({
       next: ({ videosChecked, videosUpdated }) => {
         this.recheckingVideosStatus = false
