@@ -52,10 +52,20 @@ export abstract class AbstractTranscriber {
   }
 
   startRun () {
+    if (!this.run) {
+      this.logger.warn('Cannot start transcription run: run object is undefined')
+      return
+    }
+
     this.run.start()
   }
 
   stopRun () {
+    if (!this.run) {
+      this.logger.warn('Cannot stop transcription run: run object is undefined')
+      return
+    }
+
     this.run.stop()
     delete this.run
   }
