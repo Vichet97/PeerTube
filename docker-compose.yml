@@ -68,6 +68,10 @@ services:
       - "no-new-privileges:true"
     image: rustfs/rustfs:latest
     container_name: rustfs-server
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
     ports:
       - "9002:9000" # S3 API port
       - "9001:9001" # Console port
@@ -99,9 +103,9 @@ services:
           "sh", "-c",
           "curl -f http://127.0.0.1:9000/health && curl -f http://127.0.0.1:9001/rustfs/console/health"
         ]
-      interval: 30s
+      interval: 60s
       timeout: 10s
-      retries: 3
+      retries: 5
       start_period: 40s
 
   rustfs-init:
