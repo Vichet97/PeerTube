@@ -314,6 +314,7 @@ async function checkObjectStorageReadiness (options: {
   retryIntervalMs?: number
 }): Promise<boolean> {
   const { key, bucketInfo, maxRetries = 30, retryIntervalMs = 10000 } = options
+  const requestTimeoutMs = 10000
 
   const { GetObjectCommand } = await import('@aws-sdk/client-s3')
 
@@ -324,25 +325,35 @@ async function checkObjectStorageReadiness (options: {
       const command = new GetObjectCommand({
         Bucket: bucketInfo.BUCKET_NAME,
         Key: buildKey(key, bucketInfo),
-        Range: 'bytes=0-0'
+        Range: 'bytes=0-10'
       })
 
       const client = await getClient()
-      const response = await client.send(command)
 
-      if (response.$metadata.httpStatusCode === 200 || response.$metadata.httpStatusCode === 206) {
-        logger.debug('Object storage file %s is ready (attempt %d)', key, attempt, lTags())
-        return true
+      const timeoutController = new AbortController()
+      const timeoutId = setTimeout(() => timeoutController.abort(), requestTimeoutMs)
+
+      try {
+        const response = await client.send(command, { abortSignal: timeoutController.signal })
+        clearTimeout(timeoutId)
+
+        if (response.$metadata.httpStatusCode === 200 || response.$metadata.httpStatusCode === 206) {
+          logger.debug('Object storage file %s is ready (attempt %d)', key, attempt, lTags())
+          return true
+        }
+
+        logger.debug(
+          'Object storage file %s returned unexpected status %d (attempt %d/%d)',
+          key,
+          response.$metadata.httpStatusCode,
+          attempt,
+          maxRetries,
+          lTags()
+        )
+      } catch (innerErr) {
+        clearTimeout(timeoutId)
+        throw innerErr
       }
-
-      logger.debug(
-        'Object storage file %s returned unexpected status %d (attempt %d/%d)',
-        key,
-        response.$metadata.httpStatusCode,
-        attempt,
-        maxRetries,
-        lTags()
-      )
     } catch (err) {
       if (attempt < maxRetries) {
         logger.debug(
