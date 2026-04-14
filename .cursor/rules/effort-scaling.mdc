@@ -1,0 +1,71 @@
+# Effort Scaling Framework
+# Applies: ALL projects (user-level)
+# Purpose: Calibrate response depth based on task complexity
+
+## Decision Tree
+
+```
+Is it a typo or single-line fix?
+  YES → INSTANT — just do it
+  NO  → Continue
+
+Does it touch ONE file, ONE concern?
+  YES → LIGHT — read → fix → verify (lint/type)
+  NO  → Continue
+
+Does it touch MULTIPLE files in the SAME layer/module?
+  YES → DEEP — TodoWrite → implement → self-review → verify
+  NO  → Continue
+
+Does it touch MULTIPLE layers or require cross-module coordination?
+  YES → EXHAUSTIVE — full investigation → parallel agents → comprehensive verify
+```
+
+## Effort: INSTANT
+**When**: typo, single-line, obvious fix, formatting, comment removal
+**Behavior**:
+- No TodoWrite
+- No planning
+- Just read → fix → done
+- Still run linter if available
+
+## Effort: LIGHT
+**When**: single-file feature, small refactor, targeted addition
+**Behavior**:
+- Read the file(s)
+- Implement the change
+- Self-review (does it look right?)
+- Verify with type check / lint
+- Done
+
+## Effort: DEEP
+**When**: multi-file feature, cross-module change, meaningful refactor
+**Behavior**:
+- Read all relevant files first
+- Create TodoWrite plan with specific tasks
+- Mark independent tasks as `in_progress` (parallel)
+- Implement all tasks
+- Self-review each change
+- Run type check + tests
+- Synthesize findings
+
+## Effort: EXHAUSTIVE
+**When**: entire module rewrite, multi-layer (DB + API + client), architecture decisions, complex migration
+**Behavior**:
+- Deep investigation phase (read extensively)
+- Create comprehensive plan with TodoWrite
+- Launch parallel Task agents for independent work streams
+- Collect and synthesize results
+- Adversarial self-review (find your own bugs)
+- Full verification: type check + lint + tests + security scan
+- Document decisions and trade-offs
+
+## Scaling Signal Words
+
+| Word(s) | Suggests |
+|---|---|
+| just, only, simply, quick | INSTANT |
+| single file, small, minor | LIGHT |
+| multiple, several, different modules | DEEP |
+| entire, whole, comprehensive, full refactor | EXHAUSTIVE |
+| architecture, design, system | EXHAUSTIVE |

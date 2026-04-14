@@ -1,0 +1,93 @@
+# Orchestration Intent Rules
+# Applies: ALL projects (user-level)
+# Purpose: Auto-detect intent from user prompts and guide orchestration behavior
+
+## Effort Scaling Framework
+
+Assess complexity immediately on every prompt. Match behavior to effort:
+
+| Complexity | Signals | Behavior |
+|---|---|---|
+| **INSTANT** | typo, single line, quick fix | Just read → fix → done. No planning. |
+| **LIGHT** | single file, simple feature | Read → implement → verify (lint/type). No TodoWrite needed. |
+| **DEEP** | multi-file, cross-module | TodoWrite → parallel agents → verify → self-review. |
+| **EXHAUSTIVE** | multi-layer, entire module | Full investigation → architecture plan → parallel agents → adversarial review → comprehensive verify. |
+
+## Intent → Action Mapping
+
+### Orchestration / Multi-Agent
+**Triggers**: orchestrate, coordinate, delegate, parallel, multi-step, multi-module, cross-layer, spawn agents
+**Action**: Use TodoWrite to plan → launch parallel Task agents → collect → synthesize → verify
+
+### Build / Implement
+**Triggers**: implement, create, add, build, write code, new feature
+**Action**: Read relevant files → TodoWrite plan → implement → self-review → verify
+
+### Refactor / Clean
+**Triggers**: refactor, restructure, clean up, extract, technical debt
+**Action**: Read files → identify refactoring scope → TodoWrite plan → execute → verify (no behavior change)
+
+### Review / Audit
+**Triggers**: review, audit, check, examine, critique, find issues
+**Action**: Read files → parallel review dimensions → collect findings → synthesize → present
+
+### Debug / Fix
+**Triggers**: fix, bug, error, crash, fail, not working, trace
+**Action**: Gather evidence (error logs, reproduce) → identify root cause → fix → verify
+
+### Security
+**Triggers**: security, vulnerability, auth, oauth, jwt, secret, injection, xss, csrf
+**Action**: Never proceed without full context → read relevant files → identify attack surface → fix → verify
+
+### Test / Coverage
+**Triggers**: test, coverage, unit, integration, e2e, write tests
+**Action**: Read source → identify testable surfaces → TodoWrite → parallel write → run → verify
+
+### Performance
+**Triggers**: performance, slow, bottleneck, optimize, cache, memory leak, profile
+**Action**: Profile first (if applicable) → read relevant files → identify hotspot → optimize → measure
+
+### Database
+**Triggers**: migrate, schema, index, query, sql, database
+**Action**: Read schema → plan migration → implement → verify (backward compat)
+
+### Architecture
+**Triggers**: architecture, design pattern, clean arch, system design, modular
+**Action**: Analyze existing code → design options → discuss tradeoffs → select → plan → implement
+
+## Parallel Execution Protocol (CRITICAL)
+
+When multiple independent tasks are identified, you MUST launch them in a single message:
+
+```
+Launch all Task agents with run_in_background: true in ONE message.
+Then use TaskOutput to collect results.
+Do NOT launch them one by one across multiple messages — that is Nx slower.
+```
+
+**Parallel patterns**:
+- Cross-layer tasks (server + client): two agents, one message
+- Multiple files in same layer: batch per layer, parallel layers
+- Multiple review dimensions: one agent per dimension, parallel
+- Verification pipeline (type + lint + test): parallel agents
+
+## Self-Correction Loop
+
+After every significant change:
+1. Does it still compile / type-check?
+2. Does it break existing tests?
+3. Did I introduce security issues?
+4. Is the behavior correct?
+
+If any check fails → fix immediately before continuing.
+
+## Completion
+
+After every task: output `[ORCHESTRATION_COMPLETE]` to signal to the hook system that orchestration is done.
+
+## Conflict Resolution
+
+If project-level rules conflict with user-level rules:
+- Project rules ALWAYS win for project-specific guidance
+- User-level rules provide default behavior when no project rule applies
+- This file (orchestration.mdc) is the fallback for all projects

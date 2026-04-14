@@ -2,7 +2,7 @@ import { sortBy } from '@peertube/peertube-core-utils'
 import { FileStorage, ThumbnailAspectRatio, VideoFileStream } from '@peertube/peertube-models'
 import { generateThumbnailFromVideo } from '@server/helpers/ffmpeg/ffmpeg-image.js'
 import { logger, loggerTagsFactory } from '@server/helpers/logger.js'
-import { storeThumbnail } from '@server/lib/object-storage/index.js'
+import { checkObjectStorageReadiness, storeThumbnail } from '@server/lib/object-storage/index.js'
 import Bluebird from 'bluebird'
 import { FfprobeData } from 'fluent-ffmpeg'
 import { remove } from 'fs-extra/esm'
@@ -425,6 +425,20 @@ async function createThumbnailFromFunction (parameters: {
     const thumbnailPath = join(CONFIG.STORAGE.THUMBNAILS_DIR, filename)
 
     await storeThumbnail(thumbnailPath, filename)
+
+    const isReady = await checkObjectStorageReadiness({
+      key: filename,
+      bucketInfo: CONFIG.OBJECT_STORAGE.THUMBNAILS,
+      maxRetries: 30,
+      retryIntervalMs: 10000
+    })
+
+    if (!isReady) {
+      logger.warn(`Thumbnail ${filename} not ready in object storage, keeping local file`, lTags)
+      thumbnail.storage = FileStorage.FILE_SYSTEM
+      return thumbnail
+    }
+
     if (deleteAfterObjectStorageUpload) {
       await remove(thumbnailPath)
     }

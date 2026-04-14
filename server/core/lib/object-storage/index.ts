@@ -1,4 +1,5 @@
 export * from './keys.js'
+export * from './object-storage-helpers.js'
 export * from './proxy.js'
 export * from './pre-signed-urls.js'
 export * from './urls.js'

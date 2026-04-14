@@ -9,6 +9,7 @@ import {
 import { FileStorage, VideoFileFormatFlag, VideoFileMetadata, VideoFileStream, VideoResolution } from '@peertube/peertube-models'
 import { getFileSize, getLowercaseExtension } from '@peertube/peertube-node-utils'
 import { logger, loggerTagsFactory } from '@server/helpers/logger.js'
+import { checkObjectStorageReadiness } from '@server/lib/object-storage/index.js'
 import { CONFIG } from '@server/initializers/config.js'
 import { MIMETYPES } from '@server/initializers/constants.js'
 import { VideoFileModel } from '@server/models/video/video-file.js'
@@ -229,8 +230,22 @@ export async function saveNewOriginalFileIfNeeded (video: MVideo, videoFile: MVi
 
   if (CONFIG.OBJECT_STORAGE.ENABLED) {
     await storeOriginalVideoFile(sourcePath, videoSource.keptOriginalFilename)
-    await remove(sourcePath)
 
+    const isReady = await checkObjectStorageReadiness({
+      key: videoSource.keptOriginalFilename,
+      bucketInfo: CONFIG.OBJECT_STORAGE.ORIGINAL_VIDEO_FILES,
+      maxRetries: 30,
+      retryIntervalMs: 10000
+    })
+
+    if (!isReady) {
+      logger.warn(`Original video file ${videoSource.keptOriginalFilename} not ready in object storage, keeping local file`, lTags())
+      videoSource.storage = FileStorage.FILE_SYSTEM
+      await videoSource.save()
+      return
+    }
+
+    await remove(sourcePath)
     videoSource.storage = FileStorage.OBJECT_STORAGE
   } else {
     const destinationPath = VideoPathManager.Instance.getFSOriginalVideoFilePath(videoSource.keptOriginalFilename)

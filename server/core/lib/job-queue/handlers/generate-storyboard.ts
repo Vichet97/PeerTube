@@ -6,8 +6,8 @@ import { logger, loggerTagsFactory } from '@server/helpers/logger.js'
 import { CONFIG } from '@server/initializers/config.js'
 import { STORYBOARD } from '@server/initializers/constants.js'
 import { VideoPathManager } from '@server/lib/video-path-manager.js'
+import { checkObjectStorageReadiness, storeStoryboard } from '@server/lib/object-storage/index.js'
 import { getImageSizeFromWorker } from '@server/lib/worker/parent-process.js'
-import { storeStoryboard } from '@server/lib/object-storage/index.js'
 import { VideoModel } from '@server/models/video/video.js'
 import { StoryboardModel } from '@server/models/video/storyboard.js'
 import { Job } from 'bullmq'
@@ -107,8 +107,20 @@ export async function processGenerateStoryboard (job: Job): Promise<void> {
 
       if (CONFIG.OBJECT_STORAGE.ENABLED) {
         await storeStoryboard(destination, filename)
-        await remove(destination)
-        storage = FileStorage.OBJECT_STORAGE
+
+        const isReady = await checkObjectStorageReadiness({
+          key: filename,
+          bucketInfo: CONFIG.OBJECT_STORAGE.STORYBOARDS,
+          maxRetries: 30,
+          retryIntervalMs: 10000
+        })
+
+        if (!isReady) {
+          logger.warn(`Storyboard ${filename} not ready in object storage, keeping local file`, lTags)
+        } else {
+          await remove(destination)
+          storage = FileStorage.OBJECT_STORAGE
+        }
       }
 
       await insertStoryboardInDatabase({

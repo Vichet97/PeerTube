@@ -226,6 +226,7 @@ export const JOB_ATTEMPTS: { [id in JobType]: number } = {
   'video-studio-edition': 1,
   'manage-video-torrent': 1,
   'video-channel-import': 1,
+  'video-channel-reset': 1,
   'after-video-channel-import': 1,
   'move-to-object-storage': 3,
   'move-to-file-system': 3,
@@ -257,6 +258,7 @@ export const JOB_CONCURRENCY: { [id in Exclude<JobType, 'video-transcoding' | 'v
   'move-to-object-storage': 10,
   'move-to-file-system': 10,
   'video-channel-import': 10,
+  'video-channel-reset': 10,
   'after-video-channel-import': 10,
   'transcoding-job-builder': 10,
   'generate-video-storyboard': 10,
@@ -288,6 +290,7 @@ export const JOB_TTL: { [id in JobType]: number } = {
   'move-to-object-storage': 1000 * 60 * 60 * 48, // 3 hours
   'move-to-file-system': 1000 * 60 * 60 * 48, // 3 hours
   'video-channel-import': 1000 * 60 * 60 * 4, // 4 hours
+  'video-channel-reset': 1000 * 60 * 60 * 4, // 4 hours
   'after-video-channel-import': 60000 * 5, // 5 minutes
   'transcoding-job-builder': 60000, // 1 minute
   'notify': 60000 * 5, // 5 minutes

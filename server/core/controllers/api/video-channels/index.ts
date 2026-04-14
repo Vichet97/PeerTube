@@ -174,6 +174,13 @@ videoChannelRouter.post(
   asyncMiddleware(importVideosInChannel)
 )
 
+videoChannelRouter.post(
+  '/:handle/reset',
+  authenticate,
+  asyncMiddleware(videoChannelsHandleValidatorFactory({ checkIsLocal: true, checkCanManage: true, checkIsOwner: true })),
+  asyncMiddleware(resetVideoChannel)
+)
+
 // ---------------------------------------------------------------------------
 
 export {
@@ -463,4 +470,19 @@ async function importVideosInChannel (req: express.Request, res: express.Respons
   logger.info('Video import job for channel "%s" with url "%s" created.', res.locals.videoChannel.name, externalChannelUrl)
 
   return res.type('json').status(HttpStatusCode.NO_CONTENT_204).end()
+}
+
+async function resetVideoChannel (req: express.Request, res: express.Response) {
+  const videoChannel = res.locals.videoChannel
+
+  await JobQueue.Instance.createJobAsync({
+    type: 'video-channel-reset',
+    payload: {
+      videoChannelId: videoChannel.id
+    }
+  })
+
+  logger.info('Video channel reset job for channel "%s" created.', videoChannel.name)
+
+  return res.json({ jobCreated: true })
 }

@@ -22,9 +22,24 @@ export async function processMoveToObjectStorage (job: Job) {
 
     logger.info(`Moving video ${payload.videoUUID} to object storage in job ${job.id}`, lTagsBase(payload.videoUUID))
 
-    const moveVideoState = payload.isNewVideo !== undefined
-      ? { isNewVideo: payload.isNewVideo, previousVideoState: payload.previousVideoState }
-      : payload.moveVideoState
+    // Determine moveVideoState
+    // When retrying a failed job, use the video's CURRENT state as previousVideoState
+    // so that buildNextVideoState can correctly transition to PUBLISHED
+    let moveVideoState = payload.moveVideoState
+
+    if (moveVideoState && payload.isNewVideo === undefined) {
+      // This is a retry of a failed job (not a new job creation)
+      // Use the current video state as previousVideoState to ensure proper state transition
+      moveVideoState = {
+        ...moveVideoState,
+        previousVideoState: video.state
+      }
+    } else if (payload.isNewVideo !== undefined) {
+      moveVideoState = {
+        isNewVideo: payload.isNewVideo,
+        previousVideoState: payload.previousVideoState
+      }
+    }
 
     await moveVideoToObjectStorage({
       videoUUID: payload.videoUUID,

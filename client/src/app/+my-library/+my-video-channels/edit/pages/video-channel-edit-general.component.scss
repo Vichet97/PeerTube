@@ -23,3 +23,9 @@ my-select-player-theme {
 
   @include responsive-width(340px);
 }
+
+.danger-zone {
+  border-top: 1px var(--input-border-color) solid;
+  margin-top: 30px;
+  padding-top: 30px;
+}

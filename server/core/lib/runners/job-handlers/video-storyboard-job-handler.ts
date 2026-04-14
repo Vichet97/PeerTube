@@ -13,7 +13,7 @@ import { logger, loggerTagsFactory } from '@server/helpers/logger.js'
 import { CONFIG } from '@server/initializers/config.js'
 import { JOB_PRIORITY, STORYBOARD } from '@server/initializers/constants.js'
 import { VideoPathManager } from '@server/lib/video-path-manager.js'
-import { storeStoryboard } from '@server/lib/object-storage/index.js'
+import { checkObjectStorageReadiness, storeStoryboard } from '@server/lib/object-storage/index.js'
 import { getImageSizeFromWorker } from '@server/lib/worker/parent-process.js'
 import { VideoModel } from '@server/models/video/video.js'
 import { MRunnerJob } from '@server/types/models/runners/index.js'
@@ -101,8 +101,20 @@ export class VideoStoryboardJobHandler extends AbstractJobHandler<CreateOptions,
 
     if (CONFIG.OBJECT_STORAGE.ENABLED) {
       await storeStoryboard(destinationPath, destinationFilename)
-      await remove(destinationPath)
-      storage = FileStorage.OBJECT_STORAGE
+
+      const isReady = await checkObjectStorageReadiness({
+        key: destinationFilename,
+        bucketInfo: CONFIG.OBJECT_STORAGE.STORYBOARDS,
+        maxRetries: 30,
+        retryIntervalMs: 10000
+      })
+
+      if (!isReady) {
+        logger.warn(`Storyboard ${destinationFilename} not ready in object storage, keeping local file`, this.lTags(video.uuid, runnerJob.uuid))
+      } else {
+        await remove(destinationPath)
+        storage = FileStorage.OBJECT_STORAGE
+      }
     }
 
     await insertStoryboardInDatabase({

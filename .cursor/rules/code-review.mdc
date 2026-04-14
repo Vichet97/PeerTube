@@ -1,0 +1,60 @@
+# Code Review Checklist
+# Applies: ALL projects (user-level)
+# Purpose: Default code review checklist when user asks for review/audit
+
+## Review Dimensions
+
+### 1. Correctness
+- [ ] Does the code do what it claims?
+- [ ] Are edge cases handled?
+- [ ] Are error paths tested?
+- [ ] Is there correct input validation?
+
+### 2. Security
+- [ ] User input sanitized/validated?
+- [ ] No SQL injection, XSS, CSRF vulnerabilities?
+- [ ] Secrets not hardcoded?
+- [ ] Proper authorization checks?
+- [ ] Rate limiting where needed?
+
+### 3. Performance
+- [ ] N+1 query issues?
+- [ ] Unnecessary memory allocations?
+- [ ] Synchronous blocking in async code?
+- [ ] Proper indexing on database queries?
+
+### 4. Maintainability
+- [ ] Clear, descriptive naming?
+- [ ] Functions do one thing?
+- [ ] No deeply nested logic?
+- [ ] Constants extracted?
+- [ ] Magic numbers avoided?
+
+### 5. Testing
+- [ ] Unit test coverage for new logic?
+- [ ] Edge cases tested?
+- [ ] Mocks/stubs used correctly?
+- [ ] Tests are deterministic?
+
+### 6. Type Safety
+- [ ] No `any` types without justification?
+- [ ] Proper type annotations?
+- [ ] Generic types used correctly?
+
+### 7. Error Handling
+- [ ] Errors caught and handled?
+- [ ] Meaningful error messages?
+- [ ] Errors propagated correctly?
+- [ ] No silent failures?
+
+### 8. Federated Systems (if applicable)
+- [ ] ActivityPub compatibility?
+- [ ] AP actor/object format correct?
+- [ ] Rate limiting on federation?
+- [ ] Inbox delivery handling?
+
+### 9. Job Queue / Async (if applicable)
+- [ ] Job failures handled with retry?
+- [ ] Dead letter queue configured?
+- [ ] Job deduplication?
+- [ ] Idempotent job handlers?

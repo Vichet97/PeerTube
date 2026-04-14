@@ -97,6 +97,7 @@ export class JobsComponent implements OnInit {
     'notify',
     'transcoding-job-builder',
     'video-channel-import',
+    'video-channel-reset',
     'video-file-import',
     'video-import',
     'video-live-ending',

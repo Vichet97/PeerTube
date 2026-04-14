@@ -166,6 +166,14 @@ export class VideoChannelService {
 
   // ---------------------------------------------------------------------------
 
+  resetChannel (name: string) {
+    const url = VideoChannelService.BASE_VIDEO_CHANNEL_URL + name + '/reset'
+    return this.authHttp.post(url, {})
+      .pipe(catchError(err => this.restExtractor.handleError(err)))
+  }
+
+  // ---------------------------------------------------------------------------
+
   listActivities (options: {
     channelName: string
     componentPagination: ComponentPaginationLight

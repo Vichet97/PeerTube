@@ -130,4 +130,25 @@
       </div>
     </div>
   </div>
+
+  <div class="pt-two-cols danger-zone">
+    <div class="title-col">
+      <h3 i18n>DANGER ZONE</h3>
+    </div>
+
+    <div class="content-col">
+      <div class="form-group">
+        <span i18n class="form-group-description">Reset your channel by removing videos and comments while keeping your account and settings.</span>
+
+        <button
+          type="button"
+          class="btn btn-danger"
+          (click)="onResetChannel()"
+          [disabled]="resettingChannel"
+        >
+          <ng-container i18n>Reset Channel</ng-container>
+        </button>
+      </div>
+    </div>
+  </div>
 </form>

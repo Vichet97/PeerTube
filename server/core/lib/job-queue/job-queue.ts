@@ -19,6 +19,7 @@ import {
   RefreshPayload,
   TranscodingJobBuilderPayload,
   VideoChannelImportPayload,
+  VideoChannelResetPayload,
   VideoFileImportPayload,
   VideoImportPayload,
   VideoLiveEndingPayload,
@@ -70,6 +71,7 @@ import { onMoveToObjectStorageFailure, processMoveToObjectStorage } from './hand
 import { processNotify } from './handlers/notify.js'
 import { processTranscodingJobBuilder } from './handlers/transcoding-job-builder.js'
 import { processVideoChannelImport } from './handlers/video-channel-import.js'
+import { processVideoChannelReset } from './handlers/video-channel-reset.js'
 import { processVideoFileImport } from './handlers/video-file-import.js'
 import { processVideoImport } from './handlers/video-import.js'
 import { processVideoLiveEnding } from './handlers/video-live-ending.js'
@@ -101,6 +103,7 @@ export type CreateJobArgument =
   | { type: 'move-to-object-storage', payload: MoveStoragePayload }
   | { type: 'move-to-file-system', payload: MoveStoragePayload }
   | { type: 'video-channel-import', payload: VideoChannelImportPayload }
+  | { type: 'video-channel-reset', payload: VideoChannelResetPayload }
   | { type: 'after-video-channel-import', payload: AfterVideoChannelImportPayload }
   | { type: 'notify', payload: NotifyPayload }
   | { type: 'federate-video', payload: FederateVideoPayload }
@@ -133,6 +136,7 @@ const handlers: { [id in JobType]: (job: Job) => Promise<any> } = {
   'move-to-file-system': processMoveToFileSystem,
   'notify': processNotify,
   'video-channel-import': processVideoChannelImport,
+  'video-channel-reset': processVideoChannelReset,
   'video-file-import': processVideoFileImport,
   'video-import': processVideoImport,
   'video-live-ending': processVideoLiveEnding,
@@ -170,6 +174,7 @@ const jobTypes: JobType[] = [
   'notify',
   'transcoding-job-builder',
   'video-channel-import',
+  'video-channel-reset',
   'video-file-import',
   'video-import',
   'video-live-ending',

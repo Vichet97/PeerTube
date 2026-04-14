@@ -307,10 +307,73 @@ async function getObjectStorageFileSize (options: {
   return response.ContentLength
 }
 
+async function checkObjectStorageReadiness (options: {
+  key: string
+  bucketInfo: BucketInfo
+  maxRetries?: number
+  retryIntervalMs?: number
+}): Promise<boolean> {
+  const { key, bucketInfo, maxRetries = 30, retryIntervalMs = 10000 } = options
+
+  const { GetObjectCommand } = await import('@aws-sdk/client-s3')
+
+  logger.debug('Checking object storage readiness for %s%s in bucket %s', bucketInfo.PREFIX, key, bucketInfo.BUCKET_NAME, lTags())
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const command = new GetObjectCommand({
+        Bucket: bucketInfo.BUCKET_NAME,
+        Key: buildKey(key, bucketInfo),
+        Range: 'bytes=0-0'
+      })
+
+      const client = await getClient()
+      const response = await client.send(command)
+
+      if (response.$metadata.httpStatusCode === 200 || response.$metadata.httpStatusCode === 206) {
+        logger.debug('Object storage file %s is ready (attempt %d)', key, attempt, lTags())
+        return true
+      }
+
+      logger.debug(
+        'Object storage file %s returned unexpected status %d (attempt %d/%d)',
+        key,
+        response.$metadata.httpStatusCode,
+        attempt,
+        maxRetries,
+        lTags()
+      )
+    } catch (err) {
+      if (attempt < maxRetries) {
+        logger.debug(
+          'Object storage file %s not ready yet (attempt %d/%d), retrying in %dms',
+          key,
+          attempt,
+          maxRetries,
+          retryIntervalMs,
+          { err: err?.message, ...lTags() }
+        )
+        await new Promise(resolve => setTimeout(resolve, retryIntervalMs))
+      } else {
+        logger.warn(
+          'Object storage file %s did not become ready after %d attempts',
+          key,
+          maxRetries,
+          { err: err?.message, ...lTags() }
+        )
+        return false
+      }
+    }
+  }
+
+  return false
+}
+
 // ---------------------------------------------------------------------------
 
 export {
   buildKey,
+  checkObjectStorageReadiness,
   createObjectReadStream,
   getObjectStorageFileSize,
   listKeysOfPrefix,

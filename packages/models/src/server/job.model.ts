@@ -23,6 +23,7 @@ export type JobType =
   | 'move-to-file-system'
   | 'notify'
   | 'video-channel-import'
+  | 'video-channel-reset'
   | 'video-file-import'
   | 'video-import'
   | 'video-live-ending'
@@ -287,6 +288,12 @@ export interface VideoChannelImportPayload {
 export interface AfterVideoChannelImportPayload {
   channelSyncId: number
   buildJobErrors: number
+}
+
+// ---------------------------------------------------------------------------
+
+export interface VideoChannelResetPayload {
+  videoChannelId: number
 }
 
 // ---------------------------------------------------------------------------

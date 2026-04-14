@@ -1,5 +1,6 @@
 import { CommonModule } from '@angular/common'
 import { Component, inject, OnDestroy, OnInit } from '@angular/core'
+import { ConfirmService, Notifier } from '@app/core'
 import { FormControl, FormGroup, FormsModule, ReactiveFormsModule } from '@angular/forms'
 import {
   BuildFormArgumentTyped,
@@ -21,6 +22,7 @@ import { SelectPlayerThemeComponent } from '@app/shared/shared-forms/select/sele
 import { GlobalIconComponent } from '@app/shared/shared-icons/global-icon.component'
 import { HelpComponent } from '@app/shared/shared-main/buttons/help.component'
 import { MarkdownHintComponent } from '@app/shared/shared-main/text/markdown-hint.component'
+import { VideoChannelService } from '@app/shared/shared-main/channel/video-channel.service'
 import { PlayerChannelSettings } from '@peertube/peertube-models'
 import { Subscription } from 'rxjs'
 import { EditMode, VideoChannelEditControllerService } from '../video-channel-edit-controller.service'
@@ -56,6 +58,11 @@ type Form = {
 export class VideoChannelEditGeneralComponent implements OnInit, OnDestroy {
   private formReactiveService = inject(FormReactiveService)
   private editController = inject(VideoChannelEditControllerService)
+  private videoChannelService = inject(VideoChannelService)
+  private notifier = inject(Notifier)
+  private confirmService = inject(ConfirmService)
+
+  resettingChannel = false
 
   form: FormGroup<Form>
   formErrors: FormReactiveErrorsTyped<Form> = {}
@@ -188,6 +195,27 @@ export class VideoChannelEditGeneralComponent implements OnInit, OnDestroy {
             : undefined
         }
       })
+    })
+  }
+
+  async onResetChannel () {
+    const message = $localize`Are you sure you want to reset the channel "${this.videoChannelEdit.channel.displayName}"? This will remove all videos and comments from your channel.`
+    const title = $localize`Reset Channel`
+
+    const res = await this.confirmService.confirm(message, title)
+    if (!res) return
+
+    this.resettingChannel = true
+
+    this.videoChannelService.resetChannel(this.videoChannelEdit.channel.name).subscribe({
+      next: () => {
+        this.resettingChannel = false
+        this.notifier.success($localize`Channel reset job has been created. Check the Jobs page for status.`)
+      },
+      error: () => {
+        this.resettingChannel = false
+        this.notifier.error($localize`Failed to create channel reset job.`)
+      }
     })
   }
 }
