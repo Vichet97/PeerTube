@@ -15,6 +15,10 @@ import {
   JobType,
   ManageVideoTorrentPayload,
   MoveStoragePayload,
+  MoveVideoFilePayload,
+  MoveHLSPlaylistPayload,
+  MoveThumbnailPayload,
+  MoveCaptionPayload,
   NotifyPayload,
   RefreshPayload,
   TranscodingJobBuilderPayload,
@@ -68,6 +72,7 @@ import { processImportUserArchive } from './handlers/import-user-archive.js'
 import { processManageVideoTorrent } from './handlers/manage-video-torrent.js'
 import { onMoveToFileSystemFailure, processMoveToFileSystem } from './handlers/move-to-file-system.js'
 import { onMoveToObjectStorageFailure, processMoveToObjectStorage } from './handlers/move-to-object-storage.js'
+import { onGranularMoveToObjectStorageFailure, processGranularMoveToObjectStorage } from './handlers/granular-move-to-object-storage.js'
 import { processNotify } from './handlers/notify.js'
 import { processTranscodingJobBuilder } from './handlers/transcoding-job-builder.js'
 import { processVideoChannelImport } from './handlers/video-channel-import.js'
@@ -102,6 +107,10 @@ export type CreateJobArgument =
   | { type: 'manage-video-torrent', payload: ManageVideoTorrentPayload }
   | { type: 'move-to-object-storage', payload: MoveStoragePayload }
   | { type: 'move-to-file-system', payload: MoveStoragePayload }
+  | { type: 'move-video-file-to-object-storage', payload: MoveVideoFilePayload }
+  | { type: 'move-hls-playlist-to-object-storage', payload: MoveHLSPlaylistPayload }
+  | { type: 'move-thumbnail-to-object-storage', payload: MoveThumbnailPayload }
+  | { type: 'move-caption-to-object-storage', payload: MoveCaptionPayload }
   | { type: 'video-channel-import', payload: VideoChannelImportPayload }
   | { type: 'video-channel-reset', payload: VideoChannelResetPayload }
   | { type: 'after-video-channel-import', payload: AfterVideoChannelImportPayload }
@@ -134,6 +143,10 @@ const handlers: { [id in JobType]: (job: Job) => Promise<any> } = {
   'manage-video-torrent': processManageVideoTorrent,
   'move-to-object-storage': processMoveToObjectStorage,
   'move-to-file-system': processMoveToFileSystem,
+  'move-video-file-to-object-storage': processGranularMoveToObjectStorage,
+  'move-hls-playlist-to-object-storage': processGranularMoveToObjectStorage,
+  'move-thumbnail-to-object-storage': processGranularMoveToObjectStorage,
+  'move-caption-to-object-storage': processGranularMoveToObjectStorage,
   'notify': processNotify,
   'video-channel-import': processVideoChannelImport,
   'video-channel-reset': processVideoChannelReset,
@@ -152,7 +165,11 @@ const handlers: { [id in JobType]: (job: Job) => Promise<any> } = {
 
 const errorHandlers: { [id in JobType]?: (job: Job, err: any) => Promise<any> } = {
   'move-to-object-storage': onMoveToObjectStorageFailure,
-  'move-to-file-system': onMoveToFileSystemFailure
+  'move-to-file-system': onMoveToFileSystemFailure,
+  'move-video-file-to-object-storage': onGranularMoveToObjectStorageFailure,
+  'move-hls-playlist-to-object-storage': onGranularMoveToObjectStorageFailure,
+  'move-thumbnail-to-object-storage': onGranularMoveToObjectStorageFailure,
+  'move-caption-to-object-storage': onGranularMoveToObjectStorageFailure
 }
 
 const jobTypes: JobType[] = [
@@ -171,6 +188,10 @@ const jobTypes: JobType[] = [
   'manage-video-torrent',
   'move-to-object-storage',
   'move-to-file-system',
+  'move-video-file-to-object-storage',
+  'move-hls-playlist-to-object-storage',
+  'move-thumbnail-to-object-storage',
+  'move-caption-to-object-storage',
   'notify',
   'transcoding-job-builder',
   'video-channel-import',
@@ -237,18 +258,25 @@ class JobQueue {
   }
 
   private buildWorker (handlerName: JobType) {
+    // Transcoding/transcription/move operations can be I/O-heavy and may briefly block lock renewals.
+    // Use a longer lock duration to avoid false "stalled" loops where jobs bounce back to waiting.
+    const longRunningHandlers = [
+      'video-transcoding',
+      'video-transcription',
+      'move-to-object-storage',
+      'move-to-file-system'
+    ]
+    const lockDuration = longRunningHandlers.includes(handlerName)
+      ? 1000 * 60 * 10 // 10 minutes for long-running operations
+      : 30000 // 30 seconds for quick operations
+
     const workerOptions: WorkerOptions = {
       autorun: false,
       concurrency: this.getJobConcurrency(handlerName),
       prefix: this.jobRedisPrefix,
       connection: Redis.getRedisClientOptions('Worker'),
       maxStalledCount: 10,
-
-      // Transcoding/transcription can be CPU-heavy and may briefly block lock renewals.
-      // Use a longer lock duration to avoid false "stalled" loops where jobs bounce back to waiting.
-      lockDuration: (handlerName === 'video-transcoding' || handlerName === 'video-transcription')
-        ? 1000 * 60 * 10
-        : 30000
+      lockDuration
     }
 
     const handler = function (job: Job) {
@@ -267,6 +295,12 @@ class JobQueue {
     }
 
     const worker = new Worker(handlerName, processor, workerOptions)
+
+    // Handle stalled jobs: when lockDuration expires and the job hasn't been processed,
+    // BullMQ marks it as stalled so it can be retried by another worker
+    worker.on('stalled', (jobId) => {
+      logger.warn('Job %s in queue %s has stalled (lock expired). It will be retried.', jobId, handlerName)
+    })
 
     worker.on('failed', (job, err) => {
       let logLevel: 'debug' | 'info' | 'error' = silentFailure.has(handlerName)
@@ -425,6 +459,67 @@ class JobQueue {
     const newJob = await queue.add('job', job.data, this.buildJobOptions(jobType, { priority: job.opts.priority }))
 
     return { status: 'retried', newJobId: newJob.id }
+  }
+
+  async hasPendingOrActiveJob (jobType: JobType, videoUUID: string, captionId?: number): Promise<boolean> {
+    const queue = this.queues[jobType]
+    if (!queue) return false
+
+    // Check waiting, delayed, and active jobs
+    const states: ('waiting' | 'delayed' | 'active')[] = [ 'waiting', 'delayed', 'active' ]
+    const jobs = await queue.getJobs(states, 0, 1000, true)
+
+    if (captionId !== undefined) {
+      // Check for caption-specific job
+      return jobs.some((job: Job) => {
+        const data = job.data as { captionId?: number; videoUUID?: string }
+        return data?.captionId === captionId
+      })
+    }
+
+    return jobs.some((job: Job) => {
+      const data = job.data as { videoUUID?: string }
+      return data?.videoUUID === videoUUID
+    })
+  }
+
+  async getExistingMoveJob (jobType: JobType, videoUUID: string) {
+    const queue = this.queues[jobType]
+    if (!queue) return null
+
+    // Check all states: waiting, delayed, active, failed
+    const states: ('waiting' | 'delayed' | 'active' | 'failed')[] = ['waiting', 'delayed', 'active', 'failed']
+    const jobs = await queue.getJobs(states, 0, 100, true)
+
+    return jobs.find((job: Job) => job.data?.videoUUID === videoUUID) || null
+  }
+
+  async getExistingCaptionMoveJob (captionId: number) {
+    const queue = this.queues['move-to-object-storage']
+    if (!queue) return null
+
+    const states: ('waiting' | 'delayed' | 'active' | 'failed')[] = ['waiting', 'delayed', 'active', 'failed']
+    const jobs = await queue.getJobs(states, 0, 100, true)
+
+    return jobs.find((job: Job) => job.data?.captionId === captionId) || null
+  }
+
+  async getExistingHLSPlaylistMoveJobs (videoUUID: string, playlistId: number, fileIds: number[]) {
+    const queue = this.queues['move-hls-playlist-to-object-storage']
+    if (!queue) return []
+
+    const states: ('waiting' | 'delayed' | 'active' | 'failed')[] = ['waiting', 'delayed', 'active', 'failed']
+    const jobs = await queue.getJobs(states, 0, 100, true)
+
+    // Match jobs for the same video+playlist with the SAME fileIds
+    return jobs.filter((job: Job) => {
+      const data = job.data as { videoUUID?: string; playlistId?: number; fileIds?: number[] }
+      return data?.videoUUID === videoUUID &&
+             data?.playlistId === playlistId &&
+             data?.fileIds !== undefined &&
+             fileIds.length === data.fileIds.length &&
+             fileIds.every(id => data.fileIds.includes(id))
+    })
   }
 
   createSequentialJobFlow (...jobs: ((CreateJobArgument & CreateJobOptions) | undefined)[]) {
@@ -637,6 +732,8 @@ class JobQueue {
     const hasSearch = !!trimmedSearch
 
     return jobs.filter(job => {
+      if (!job || !job.data) return false
+
       if (hasSearch && String(job.id).toLowerCase().includes(loweredSearch)) return true
 
       if (!hasVideoMatches) return false

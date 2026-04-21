@@ -31,6 +31,8 @@ export class VideoPlaylistsExporter extends AbstractUserExporter<VideoPlaylistsE
         archiveFiles.thumbnail = join(this.relativeStaticDirPath, this.getArchiveThumbnailPath(playlist, thumbnail))
       }
 
+      const thumbnailUrl = playlist.Thumbnail ? await playlist.Thumbnail.getLocalFileUrl() : null
+
       playlistsJSON.push({
         displayName: playlist.name,
         description: playlist.description,
@@ -47,7 +49,7 @@ export class VideoPlaylistsExporter extends AbstractUserExporter<VideoPlaylistsE
         createdAt: playlist.createdAt.toISOString(),
         updatedAt: playlist.updatedAt.toISOString(),
 
-        thumbnailUrl: playlist.Thumbnail?.getLocalFileUrl(),
+        thumbnailUrl,
 
         elements: elements.map(e => ({
           videoUrl: e.Video.url,

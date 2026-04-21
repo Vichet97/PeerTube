@@ -161,8 +161,9 @@ async function listVideoThreads (req: express.Request, res: express.Response) {
     }
   }
 
+  const formatted = await getFormattedObjects(resultList.data, resultList.total)
   return res.json({
-    ...getFormattedObjects(resultList.data, resultList.total),
+    ...formatted,
     totalNotDeletedComments: resultList.totalNotDeletedComments
   } as VideoCommentThreads)
 }

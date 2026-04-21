@@ -133,7 +133,7 @@ async function listPlugins (req: express.Request, res: express.Response) {
     sort: req.query.sort
   })
 
-  return res.json(getFormattedObjects(resultList.data, resultList.total))
+  return res.json(await getFormattedObjects(resultList.data, resultList.total))
 }
 
 function getPlugin (req: express.Request, res: express.Response) {

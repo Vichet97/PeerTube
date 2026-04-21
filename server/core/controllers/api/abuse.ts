@@ -227,7 +227,7 @@ async function listAbuseMessages (req: express.Request, res: express.Response) {
 
   const resultList = await AbuseMessageModel.listForApi(abuse.id)
 
-  return res.json(getFormattedObjects(resultList.data, resultList.total))
+  return res.json(await getFormattedObjects(resultList.data, resultList.total))
 }
 
 async function addAbuseMessage (req: express.Request, res: express.Response) {

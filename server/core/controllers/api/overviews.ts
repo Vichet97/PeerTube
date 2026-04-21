@@ -132,5 +132,5 @@ async function getVideos (
     'filter:api.overviews.videos.list.result'
   )
 
-  return data.map(d => d.toFormattedJSON())
+  return Promise.all(data.map(d => d.toFormattedJSON()))
 }

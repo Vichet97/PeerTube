@@ -99,7 +99,7 @@ async function listUserNotifications (req: express.Request, res: express.Respons
     typeOneOf: query.typeOneOf
   })
 
-  return res.json(getFormattedObjects(resultList.data, resultList.total))
+  return res.json(await getFormattedObjects(resultList.data, resultList.total))
 }
 
 async function markAsReadUserNotifications (req: express.Request, res: express.Response) {

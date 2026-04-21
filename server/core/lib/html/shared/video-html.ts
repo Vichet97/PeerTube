@@ -89,7 +89,7 @@ export class VideoHtml {
   // Private
   // ---------------------------------------------------------------------------
 
-  private static buildVideoHTML (options: {
+  private static async buildVideoHTML (options: {
     req: express.Request
 
     html: string
@@ -149,12 +149,12 @@ export class VideoHtml {
         likes: video.likes,
         nsfw: video.nsfw,
         tags: video.Tags.map(t => t.name),
-        captions: video.VideoCaptions.map(c => ({
+        captions: await Promise.all(video.VideoCaptions.map(async c => ({
           label: VideoCaptionModel.getLanguageLabel(c.language),
           mediaType: 'text/vtt',
           language: c.language,
-          url: c.getLocalFileUrl()
-        }))
+          url: await c.getLocalFileUrl()
+        })))
       },
 
       ogType: addOG

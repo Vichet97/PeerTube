@@ -1,4 +1,4 @@
-import { FileStorage, VideoStateType } from '@peertube/peertube-models'
+import { FileStorage, VideoState, VideoStateType } from '@peertube/peertube-models'
 import { logger, LoggerTags, loggerTagsFactory } from '@server/helpers/logger.js'
 import { CONFIG } from '@server/initializers/config.js'
 import { P2P_MEDIA_LOADER_PEER_VERSION } from '@server/initializers/constants.js'
@@ -56,9 +56,14 @@ export async function moveVideoToFS (options: {
   })
 
   if (options.moveVideoState) {
-    const video = await VideoModel.load(videoUUID)
+    const video = await VideoModel.loadFull(videoUUID)
+    const isAlreadyPublished = video?.state === VideoState.PUBLISHED
 
-    await moveToNextState({ video, ...moveVideoState })
+    if (isAlreadyPublished) {
+      logger.info('[MOVE_STORAGE] Video %s is already published, skipping state transition after file system move', videoUUID)
+    } else {
+      await moveToNextState({ video, ...moveVideoState })
+    }
   }
 }
 
@@ -128,7 +133,10 @@ async function moveWebVideoFiles (video: MVideoWithAllFiles) {
   }
 }
 
-async function moveHLSFiles (video: MVideoWithAllFiles) {
+async function moveHLSFiles (video: MVideoWithAllFiles, options?: {
+  onInitialCutoverReady?: (options: { playlistId: number, fileIds: number[] }) => Promise<void>
+}): Promise<boolean> {
+  // move-to-file-system doesn't need delayed cutover, so always return false
   for (const playlist of video.VideoStreamingPlaylists) {
     let updatedFile = false
 
@@ -176,6 +184,9 @@ async function moveHLSFiles (video: MVideoWithAllFiles) {
       await playlist.save()
     }
   }
+
+  // move-to-file-system doesn't use delayed cutover
+  return false
 }
 
 async function onVideoFileMoved (options: {

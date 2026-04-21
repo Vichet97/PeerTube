@@ -64,7 +64,10 @@ export function guessAdditionalAttributesFromQuery (
 
 // ---------------------------------------------------------------------------
 
-export function videoModelToFormattedJSON (video: MVideoFormattable, options: VideoFormattingJSONOptions = {}): Video {
+export async function videoModelToFormattedJSON (
+  video: MVideoFormattable,
+  options: VideoFormattingJSONOptions = {}
+): Promise<Video> {
   const span = tracer.startSpan('peertube.VideoModel.toFormattedJSON')
 
   const userHistory = isArray(video.UserVideoHistories)
@@ -73,6 +76,8 @@ export function videoModelToFormattedJSON (video: MVideoFormattable, options: Vi
 
   const thumbnails = (video.Thumbnails || [])
     .map(t => Object.assign(t, { Video: video }))
+
+  const thumbnailResults = await Promise.all(thumbnails.map(t => t.toFormattedJSON()))
 
   const videoObject: Video = {
     id: video.id,
@@ -122,7 +127,7 @@ export function videoModelToFormattedJSON (video: MVideoFormattable, options: Vi
     thumbnailPath: video.getSmallestThumbnailStaticPath('16:9'),
     previewPath: video.getBestThumbnailStaticPath('16:9'),
 
-    thumbnails: thumbnails.map(t => t.toFormattedJSON()),
+    thumbnails: thumbnailResults,
 
     embedPath: video.getEmbedStaticPath(),
     createdAt: video.createdAt,
@@ -144,7 +149,7 @@ export function videoModelToFormattedJSON (video: MVideoFormattable, options: Vi
     // Can be added by external plugins
     pluginData: (video as any).pluginData,
 
-    ...buildAdditionalAttributes(video, options)
+    ...await buildAdditionalAttributes(video, options)
   }
 
   span.end()
@@ -152,10 +157,10 @@ export function videoModelToFormattedJSON (video: MVideoFormattable, options: Vi
   return videoObject
 }
 
-export function videoModelToFormattedDetailsJSON (video: MVideoFormattableDetails): VideoDetails {
+export async function videoModelToFormattedDetailsJSON (video: MVideoFormattableDetails): Promise<VideoDetails> {
   const span = tracer.startSpan('peertube.VideoModel.toFormattedDetailsJSON')
 
-  const videoJSON = video.toFormattedJSON({
+  const videoJSON = await video.toFormattedJSON({
     completeDescription: true,
     additionalAttributes: {
       liveSchedules: true,
@@ -205,47 +210,48 @@ export function videoModelToFormattedDetailsJSON (video: MVideoFormattableDetail
   return detailsJSON
 }
 
-export function streamingPlaylistsModelToFormattedJSON (
+export async function streamingPlaylistsModelToFormattedJSON (
   video: MVideoFormattable,
   playlists: MStreamingPlaylistRedundanciesOpt[]
-): VideoStreamingPlaylist[] {
+): Promise<VideoStreamingPlaylist[]> {
   if (isArray(playlists) === false) return []
 
-  return playlists
-    .map(playlist => ({
-      id: playlist.id,
-      type: playlist.type,
+  const results = await Promise.all(playlists.map(async playlist => ({
+    id: playlist.id,
+    type: playlist.type,
 
-      playlistUrl: playlist.getMasterPlaylistUrl(video),
-      segmentsSha256Url: playlist.getSha256SegmentsUrl(video),
+    playlistUrl: await playlist.getMasterPlaylistUrl(video),
+    segmentsSha256Url: await playlist.getSha256SegmentsUrl(video),
 
-      redundancies: isArray(playlist.RedundancyVideos)
-        ? playlist.RedundancyVideos.map(r => ({ baseUrl: r.fileUrl }))
-        : [],
+    redundancies: isArray(playlist.RedundancyVideos)
+      ? playlist.RedundancyVideos.map(r => ({ baseUrl: r.fileUrl }))
+      : [],
 
-      files: videoFilesModelToFormattedJSON(video, playlist.VideoFiles, { includePlaylistUrl: true })
-    }))
+    files: await videoFilesModelToFormattedJSON(video, playlist.VideoFiles, { includePlaylistUrl: true })
+  })))
+
+  return results
 }
 
 // ---------------------------------------------------------------------------
 
-export function videoFilesModelToFormattedJSON (
+export async function videoFilesModelToFormattedJSON (
   video: MVideoFormattable,
   videoFiles: MVideoFile[],
   options?: {
     includePlaylistUrl?: true
     includeMagnet?: boolean
   }
-): (VideoFile & { playlistUrl: string })[]
+): Promise<(VideoFile & { playlistUrl: string })[]>
 
-export function videoFilesModelToFormattedJSON (
+export async function videoFilesModelToFormattedJSON (
   video: MVideoFormattable,
   videoFiles: MVideoFile[],
   options: {
     includePlaylistUrl?: boolean // default false
     includeMagnet?: boolean // default true
   } = {}
-): VideoFile[] {
+): Promise<VideoFile[]> {
   const { includePlaylistUrl = false, includeMagnet = true } = options
 
   if (isArray(videoFiles) === false) return []
@@ -254,55 +260,59 @@ export function videoFilesModelToFormattedJSON (
     ? video.getTrackerUrls()
     : []
 
-  return videoFiles
-    .filter(f => !f.isLive())
-    .sort(sortByResolutionDesc)
-    .map(videoFile => {
-      const fileUrl = videoFile.getFileUrl(video)
+  const results = await Promise.all(
+    videoFiles
+      .filter(f => !f.isLive())
+      .sort(sortByResolutionDesc)
+      .map(async videoFile => {
+        const fileUrl = await videoFile.getFileUrl(video)
 
-      return {
-        id: videoFile.id,
+        return {
+          id: videoFile.id,
 
-        resolution: {
-          id: videoFile.resolution,
+          resolution: {
+            id: videoFile.resolution,
 
-          label: getResolutionLabel({
-            resolution: videoFile.resolution,
-            height: videoFile.height,
-            width: videoFile.width
-          })
-        },
+            label: getResolutionLabel({
+              resolution: videoFile.resolution,
+              height: videoFile.height,
+              width: videoFile.width
+            })
+          },
 
-        width: videoFile.width,
-        height: videoFile.height,
+          width: videoFile.width,
+          height: videoFile.height,
 
-        magnetUri: includeMagnet && videoFile.hasTorrent()
-          ? generateMagnetUri(video, videoFile, trackerUrls)
-          : undefined,
+          magnetUri: includeMagnet && videoFile.hasTorrent()
+            ? await generateMagnetUri(video, videoFile, trackerUrls)
+            : undefined,
 
-        size: videoFile.size,
-        fps: videoFile.fps,
+          size: videoFile.size,
+          fps: videoFile.fps,
 
-        torrentUrl: videoFile.getTorrentUrl(),
-        torrentDownloadUrl: videoFile.getTorrentDownloadUrl(),
+          torrentUrl: videoFile.getTorrentUrl(),
+          torrentDownloadUrl: videoFile.getTorrentDownloadUrl(),
 
-        fileUrl,
-        fileDownloadUrl: videoFile.getFileDownloadUrl(video),
+          fileUrl,
+          fileDownloadUrl: await videoFile.getFileDownloadUrl(video),
 
-        metadataUrl: videoFile.metadataUrl ?? getLocalVideoFileMetadataUrl(video, videoFile),
+          metadataUrl: videoFile.metadataUrl ?? getLocalVideoFileMetadataUrl(video, videoFile),
 
-        hasAudio: videoFile.hasAudio(),
-        hasVideo: videoFile.hasVideo(),
+          hasAudio: videoFile.hasAudio(),
+          hasVideo: videoFile.hasVideo(),
 
-        playlistUrl: includePlaylistUrl === true
-          ? getHLSResolutionPlaylistFilename(fileUrl)
-          : undefined,
+          playlistUrl: includePlaylistUrl === true
+            ? getHLSResolutionPlaylistFilename(fileUrl)
+            : undefined,
 
-        storage: video.remote
-          ? null
-          : videoFile.storage
-      }
-    })
+          storage: video.remote
+            ? null
+            : videoFile.storage
+        }
+      })
+  )
+
+  return results
 }
 
 // ---------------------------------------------------------------------------
@@ -331,7 +341,7 @@ export function getStateLabel (id: number) {
 // Private
 // ---------------------------------------------------------------------------
 
-function buildAdditionalAttributes (video: MVideoFormattable, options: VideoFormattingJSONOptions) {
+async function buildAdditionalAttributes (video: MVideoFormattable, options: VideoFormattingJSONOptions) {
   const add = options.additionalAttributes
 
   const result: Partial<VideoAdditionalAttributes> = {}
@@ -369,8 +379,8 @@ function buildAdditionalAttributes (video: MVideoFormattable, options: VideoForm
   }
 
   if (add?.files === true) {
-    result.streamingPlaylists = streamingPlaylistsModelToFormattedJSON(video, video.VideoStreamingPlaylists)
-    result.files = videoFilesModelToFormattedJSON(video, video.VideoFiles)
+    result.streamingPlaylists = await streamingPlaylistsModelToFormattedJSON(video, video.VideoStreamingPlaylists)
+    result.files = await videoFilesModelToFormattedJSON(video, video.VideoFiles)
   }
 
   if (add?.source === true) {

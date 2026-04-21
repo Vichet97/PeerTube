@@ -122,7 +122,7 @@ export async function createTorrentAndSetInfoHashFromPath (
     name: buildInfoName(video, videoFile),
     createdBy: 'PeerTube',
     announceList: buildAnnounceList(),
-    urlList: buildUrlList(video, videoFile)
+    urlList: await buildUrlList(video, videoFile)
   })
 
   const torrentFilename = generateTorrentFileName(videoOrPlaylist, videoFile.resolution)
@@ -154,6 +154,15 @@ export async function createTorrentAndSetInfoHashFromPath (
 export async function updateTorrentMetadata (videoOrPlaylist: MVideo | MStreamingPlaylistVideo, videoFile: MVideoFile) {
   const video = extractVideo(videoOrPlaylist)
 
+  // DEBUG: Log updateTorrentMetadata start
+  logger.debug(`[DEBUG] updateTorrentMetadata START for video ${video.uuid}`, {
+    fileId: videoFile.id,
+    filename: videoFile.filename,
+    currentTorrentFilename: videoFile.torrentFilename,
+    fileStorage: videoFile.storage,
+    objectStorageEnabled: CONFIG.OBJECT_STORAGE.ENABLED
+  })
+
   if (!videoFile.torrentFilename) {
     logger.error(`Video file ${videoFile.filename} of video ${video.uuid} doesn't have a torrent file, skipping torrent metadata update`)
     return
@@ -163,6 +172,14 @@ export async function updateTorrentMetadata (videoOrPlaylist: MVideo | MStreamin
   const oldTorrentPath = join(CONFIG.STORAGE.TORRENTS_DIR, oldTorrentFilename)
   const useObjectStorage = shouldUseObjectStorageForTorrent(videoFile)
   const hasLocalTorrent = await pathExists(oldTorrentPath)
+
+  // DEBUG: Log torrent metadata decision
+  logger.debug(`[DEBUG] updateTorrentMetadata decision`, {
+    oldTorrentFilename,
+    oldTorrentPath,
+    useObjectStorage,
+    hasLocalTorrent
+  })
 
   if (useObjectStorage) {
     if (!hasLocalTorrent) {
@@ -181,7 +198,7 @@ export async function updateTorrentMetadata (videoOrPlaylist: MVideo | MStreamin
   decoded['announce-list'] = buildAnnounceList()
   decoded.announce = decoded['announce-list'][0][0]
 
-  decoded['url-list'] = buildUrlList(video, videoFile)
+  decoded['url-list'] = await buildUrlList(video, videoFile)
 
   decoded.info.name = buildInfoName(video, videoFile)
   decoded['creation date'] = Math.ceil(Date.now() / 1000)
@@ -195,6 +212,12 @@ export async function updateTorrentMetadata (videoOrPlaylist: MVideo | MStreamin
 
   if (useObjectStorage) {
     await storeTorrentFile(newTorrentPath, newTorrentFilename)
+
+    // DEBUG: Log torrent stored to object storage
+    logger.debug(`[DEBUG] updateTorrentMetadata: stored torrent to object storage`, {
+      newTorrentFilename,
+      newTorrentPath
+    })
 
     if (oldTorrentFilename !== newTorrentFilename) {
       await removeTorrentObjectStorage(oldTorrentFilename)
@@ -210,7 +233,7 @@ export async function updateTorrentMetadata (videoOrPlaylist: MVideo | MStreamin
   videoFile.infoHash = sha1(bencode.encode(decoded.info))
 }
 
-export function generateMagnetUri (
+export async function generateMagnetUri (
   video: MVideo,
   videoFile: MVideoFile,
   trackerUrls: string[]
@@ -220,7 +243,7 @@ export function generateMagnetUri (
 
   const urlList = video.hasPrivateStaticPath()
     ? []
-    : [ videoFile.getFileUrl(video) ]
+    : [ await videoFile.getFileUrl(video) ]
 
   const magnetHash = {
     xs,
@@ -281,10 +304,10 @@ function buildAnnounceList () {
   ]
 }
 
-function buildUrlList (video: MVideo, videoFile: MVideoFile) {
+async function buildUrlList (video: MVideo, videoFile: MVideoFile) {
   if (video.hasPrivateStaticPath()) return []
 
-  return [ videoFile.getFileUrl(video) ]
+  return [ await videoFile.getFileUrl(video) ]
 }
 
 function buildInfoName (video: MVideo, videoFile: MVideoFile) {

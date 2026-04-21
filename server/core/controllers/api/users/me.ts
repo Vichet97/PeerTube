@@ -182,7 +182,7 @@ async function listMyVideos (req: express.Request, res: express.Response) {
     'filter:api.user.me.videos.list.result'
   )
 
-  return res.json(getFormattedObjects(resultList.data, resultList.total, guessAdditionalAttributesFromQuery({ include })))
+  return res.json(await getFormattedObjects(resultList.data, resultList.total, guessAdditionalAttributesFromQuery({ include })))
 }
 
 async function listCommentsOnUserVideos (req: express.Request, res: express.Response) {
@@ -228,7 +228,7 @@ async function listMyVideoImports (req: express.Request, res: express.Response) 
     ...pick(req.query, [ 'id', 'videoId', 'targetUrl', 'start', 'count', 'sort', 'search', 'videoChannelSyncId', 'includeCollaborations' ])
   })
 
-  return res.json(getFormattedObjects(resultList.data, resultList.total))
+  return res.json(await getFormattedObjects(resultList.data, resultList.total))
 }
 
 async function getMyInformation (req: express.Request, res: express.Response) {

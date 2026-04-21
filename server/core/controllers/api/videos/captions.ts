@@ -90,7 +90,7 @@ async function createGenerateVideoCaption (req: express.Request, res: express.Re
 async function listVideoCaptions (req: express.Request, res: express.Response) {
   const data = await VideoCaptionModel.listVideoCaptions(res.locals.onlyVideo.id)
 
-  return res.json(getFormattedObjects(data, data.length))
+  return res.json(await getFormattedObjects(data, data.length))
 }
 
 async function createVideoCaptionFromImport (req: express.Request, res: express.Response) {

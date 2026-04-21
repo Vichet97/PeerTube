@@ -205,7 +205,7 @@ async function listVideoChannels (req: express.Request, res: express.Response) {
     'filter:api.video-channels.list.result'
   )
 
-  return res.json(getFormattedObjects(resultList.data, resultList.total))
+  return res.json(await getFormattedObjects(resultList.data, resultList.total))
 }
 
 async function createVideoChannel (req: express.Request, res: express.Response) {
@@ -348,7 +348,7 @@ async function listVideoChannelPlaylists (req: express.Request, res: express.Res
     type: playlistType
   })
 
-  return res.json(getFormattedObjects(resultList.data, resultList.total))
+  return res.json(await getFormattedObjects(resultList.data, resultList.total))
 }
 
 async function reorderPlaylistsInChannel (req: express.Request, res: express.Response) {
@@ -422,7 +422,7 @@ async function listVideoChannelVideos (req: express.Request, res: express.Respon
     'filter:api.video-channels.videos.list.result'
   )
 
-  return res.json(getFormattedObjects(resultList.data, resultList.total, guessAdditionalAttributesFromQuery(query)))
+  return res.json(await getFormattedObjects(resultList.data, resultList.total, guessAdditionalAttributesFromQuery(query)))
 }
 
 async function listVideoChannelFollowers (req: express.Request, res: express.Response) {
@@ -437,7 +437,7 @@ async function listVideoChannelFollowers (req: express.Request, res: express.Res
     state: 'accepted'
   })
 
-  return res.json(getFormattedObjects(resultList.data, resultList.total))
+  return res.json(await getFormattedObjects(resultList.data, resultList.total))
 }
 
 async function listVideoChannelActivities (req: express.Request, res: express.Response) {
@@ -450,7 +450,7 @@ async function listVideoChannelActivities (req: express.Request, res: express.Re
     sort: req.query.sort
   })
 
-  return res.json(getFormattedObjects(resultList.data, resultList.total))
+  return res.json(await getFormattedObjects(resultList.data, resultList.total))
 }
 
 async function importVideosInChannel (req: express.Request, res: express.Response) {

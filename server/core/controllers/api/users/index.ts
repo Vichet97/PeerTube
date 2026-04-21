@@ -233,7 +233,7 @@ async function listUsers (req: express.Request, res: express.Response) {
     blocked: req.query.blocked
   })
 
-  return res.json(getFormattedObjects(resultList.data, resultList.total, { withAdminFlags: true }))
+  return res.json(await getFormattedObjects(resultList.data, resultList.total, { withAdminFlags: true }))
 }
 
 async function removeUser (req: express.Request, res: express.Response) {

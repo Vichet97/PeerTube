@@ -230,6 +230,10 @@ export const JOB_ATTEMPTS: { [id in JobType]: number } = {
   'after-video-channel-import': 1,
   'move-to-object-storage': 3,
   'move-to-file-system': 3,
+  'move-video-file-to-object-storage': 3,
+  'move-hls-playlist-to-object-storage': 3,
+  'move-thumbnail-to-object-storage': 3,
+  'move-caption-to-object-storage': 3,
   'transcoding-job-builder': 1,
   'generate-video-storyboard': 1,
   'notify': 1,
@@ -257,6 +261,10 @@ export const JOB_CONCURRENCY: { [id in Exclude<JobType, 'video-transcoding' | 'v
   'manage-video-torrent': 1, // Keep it to 1 to prevent concurrency issues
   'move-to-object-storage': 10,
   'move-to-file-system': 10,
+  'move-video-file-to-object-storage': 5,
+  'move-hls-playlist-to-object-storage': 5,
+  'move-thumbnail-to-object-storage': 10,
+  'move-caption-to-object-storage': 10,
   'video-channel-import': 10,
   'video-channel-reset': 10,
   'after-video-channel-import': 10,
@@ -287,8 +295,12 @@ export const JOB_TTL: { [id in JobType]: number } = {
   'video-live-ending': 1000 * 60 * 10, // 10 minutes
   'generate-video-storyboard': 1000 * 3600 * 6, // 6 hours
   'manage-video-torrent': 1000 * 3600 * 3, // 3 hours
-  'move-to-object-storage': 1000 * 60 * 60 * 48, // 3 hours
-  'move-to-file-system': 1000 * 60 * 60 * 48, // 3 hours
+  'move-to-object-storage': 1000 * 60 * 60 * 48, // 48 hours
+  'move-to-file-system': 1000 * 60 * 60 * 48, // 48 hours
+  'move-video-file-to-object-storage': 1000 * 60 * 60 * 24, // 24 hours per file
+  'move-hls-playlist-to-object-storage': 1000 * 60 * 60 * 24, // 24 hours per playlist
+  'move-thumbnail-to-object-storage': 1000 * 60 * 60 * 2, // 2 hours for thumbnails
+  'move-caption-to-object-storage': 1000 * 60 * 60 * 2, // 2 hours for captions
   'video-channel-import': 1000 * 60 * 60 * 4, // 4 hours
   'video-channel-reset': 1000 * 60 * 60 * 4, // 4 hours
   'after-video-channel-import': 60000 * 5, // 5 minutes
@@ -975,6 +987,17 @@ export const OBJECT_STORAGE_PROXY_PATHS = {
   LEGACY_PRIVATE_WEB_VIDEOS: '/object-storage-proxy/webseed/private/',
   PRIVATE_WEB_VIDEOS: '/object-storage-proxy/web-videos/private/',
 
+  // Public file types (used for presigned URL redirects)
+  // The base path is configurable via CONFIG.OBJECT_STORAGE.PRESIGNED_PROXY_BASE_PATH
+  PUBLIC: {
+    THUMBNAILS: buildPublicProxyPath('thumbnails'),
+    STORYBOARDS: buildPublicProxyPath('storyboards'),
+    WEB_VIDEOS: buildPublicProxyPath('web-videos'),
+    STREAMING_PLAYLISTS: buildPublicProxyPath('streaming-playlists'),
+    TORRENTS: buildPublicProxyPath('torrents'),
+    CAPTIONS: buildPublicProxyPath('captions')
+  },
+
   THUMBNAILS: {
     PRIVATE: '/object-storage-proxy/thumbnails/private/'
   },
@@ -1352,10 +1375,12 @@ if (process.env.PRODUCTION_CONSTANTS !== 'true') {
 
 updateWebserverUrls()
 updateWebserverConfig()
+updateObjectStorageProxyPaths()
 
 registerConfigChangedHandler(() => {
   updateWebserverUrls()
   updateWebserverConfig()
+  updateObjectStorageProxyPaths()
 })
 
 export async function loadLanguages () {
@@ -1582,6 +1607,20 @@ function buildMimetypesRegex (obj: { [id: string]: string | string[] }) {
 
 function generateContentHash () {
   return randomBytes(20).toString('hex')
+}
+
+function updateObjectStorageProxyPaths () {
+  OBJECT_STORAGE_PROXY_PATHS.PUBLIC.THUMBNAILS = buildPublicProxyPath('thumbnails')
+  OBJECT_STORAGE_PROXY_PATHS.PUBLIC.STORYBOARDS = buildPublicProxyPath('storyboards')
+  OBJECT_STORAGE_PROXY_PATHS.PUBLIC.WEB_VIDEOS = buildPublicProxyPath('web-videos')
+  OBJECT_STORAGE_PROXY_PATHS.PUBLIC.STREAMING_PLAYLISTS = buildPublicProxyPath('streaming-playlists')
+  OBJECT_STORAGE_PROXY_PATHS.PUBLIC.TORRENTS = buildPublicProxyPath('torrents')
+  OBJECT_STORAGE_PROXY_PATHS.PUBLIC.CAPTIONS = buildPublicProxyPath('captions')
+}
+
+function buildPublicProxyPath (type: string) {
+  const base = CONFIG.OBJECT_STORAGE.PRESIGNED_PROXY_BASE_PATH || 'object-storage-proxy'
+  return `/${base}/public/${type}/`
 }
 
 function getIntEnv (path: string) {

@@ -27,16 +27,19 @@ async function processVideoFileImport (job: Job) {
   await updateVideoFile(video, payload.filePath)
 
   if (CONFIG.OBJECT_STORAGE.ENABLED) {
-    await JobQueue.Instance.createJob(
-      await buildMoveVideoJob({
-        type: 'move-to-object-storage',
-        video,
-        moveVideoState: {
-          isNewVideo: false,
-          previousVideoState: video.state
-        }
-      })
-    )
+    const job = await buildMoveVideoJob({
+      type: 'move-to-object-storage',
+      video,
+      moveVideoState: {
+        isNewVideo: false,
+        previousVideoState: video.state
+      }
+    })
+    if (job) {
+      await JobQueue.Instance.createJob(job)
+    } else {
+      logger.info(`[VIDEO_IMPORT] Move job skipped (already pending/active) for video ${video.uuid}`)
+    }
   } else {
     await federateVideoIfNeeded(video, false)
   }

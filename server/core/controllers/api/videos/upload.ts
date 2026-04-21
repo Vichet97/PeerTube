@@ -162,7 +162,7 @@ async function addVideo (options: {
   try {
     const { video } = await localVideoCreator.create()
 
-    auditLogger.create(getAuditIdFromRes(res), new VideoAuditView(video.toFormattedDetailsJSON()))
+    auditLogger.create(getAuditIdFromRes(res), new VideoAuditView(await video.toFormattedDetailsJSON()))
     logger.info('Video with name %s and uuid %s created.', videoInfo.name, video.uuid, lTags(video.uuid))
 
     Hooks.runAction('action:api.video.uploaded', { video, req, res })

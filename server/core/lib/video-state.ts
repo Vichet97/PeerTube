@@ -3,13 +3,14 @@ import { retryTransactionWrapper } from '@server/helpers/database-utils.js'
 import { logger, loggerTagsFactory } from '@server/helpers/logger.js'
 import { CONFIG } from '@server/initializers/config.js'
 import { sequelizeTypescript } from '@server/initializers/database.js'
+import { VideoJobInfoModel } from '@server/models/video/video-job-info.js'
 import { VideoModel } from '@server/models/video/video.js'
 import { MVideo, MVideoFullLight, MVideoUUID } from '@server/types/models/index.js'
 import { Transaction } from 'sequelize'
 import { federateVideoIfNeeded } from './activitypub/videos/index.js'
 import { JobQueue } from './job-queue/index.js'
 import { Notifier } from './notifier/index.js'
-import { buildMoveVideoJob } from './video-jobs.js'
+import { buildGranularMoveJobs, buildMoveVideoJob } from './video-jobs.js'
 
 const lTags = loggerTagsFactory('video-state')
 
@@ -102,20 +103,44 @@ export async function moveToExternalStorageState (options: {
     await video.setNewState(VideoState.TO_MOVE_TO_EXTERNAL_STORAGE, isNewVideo, transaction)
   }
 
-  logger.info('Creating external storage move job for video %s.', video.uuid, lTags(video.uuid))
+  // DEBUG: Log state transition and job creation
+  logger.debug(`[DEBUG] moveToExternalStorageState for ${video.uuid}`, {
+    previousVideoState,
+    newVideoState: VideoState.TO_MOVE_TO_EXTERNAL_STORAGE,
+    isNewVideo,
+    objectStorageEnabled: CONFIG.OBJECT_STORAGE.ENABLED
+  })
+
+  logger.info('Creating granular external storage move jobs for video %s.', video.uuid, lTags(video.uuid))
 
   try {
-    await JobQueue.Instance.createJob(
-      await buildMoveVideoJob({
-        type: 'move-to-object-storage',
-        video,
-        moveVideoState: { isNewVideo, previousVideoState }
-      })
-    )
+    // Create granular move jobs (per file/playlist) instead of one monolithic job
+    const jobs = await buildGranularMoveJobs({
+      videoUUID: video.uuid,
+      isNewVideo,
+      previousVideoState
+    })
+
+    if (jobs.length > 0) {
+      // Increment pendingMove once per job that was actually created
+      // (duplicate jobs were already filtered out by the builders)
+      for (const _ of jobs) {
+        await VideoJobInfoModel.increaseOrCreate(video.uuid, 'pendingMove')
+      }
+
+      logger.info('[MOVE_JOB] Created %d granular move jobs for %s (pendingMove now reflects job count)', jobs.length, video.uuid)
+      for (const job of jobs) {
+        await JobQueue.Instance.createJob(job)
+      }
+    } else {
+      // No files to move - decrement pendingMove and publish
+      logger.info('[MOVE_JOB] No files to move for %s, transitioning to published', video.uuid)
+      await moveToNextState({ video: { uuid: video.uuid }, isNewVideo, previousVideoState })
+    }
 
     return true
   } catch (err) {
-    logger.error('Cannot add move to object storage job', { err, ...lTags(video.uuid) })
+    logger.error('Cannot add move to object storage jobs', { err, ...lTags(video.uuid) })
 
     return false
   }
@@ -137,16 +162,21 @@ export async function moveToFileSystemState (options: {
   logger.info('Creating move to file system job for video %s.', video.uuid, { tags: [ video.uuid ] })
 
   try {
-    await JobQueue.Instance.createJob(
-      await buildMoveVideoJob({
-        type: 'move-to-file-system',
-        video,
-        moveVideoState: {
-          previousVideoState,
-          isNewVideo
-        }
-      })
-    )
+    const job = await buildMoveVideoJob({
+      type: 'move-to-file-system',
+      video,
+      moveVideoState: {
+        previousVideoState,
+        isNewVideo
+      }
+    })
+
+    if (!job) {
+      // Job was skipped due to existing pending/active job
+      return true
+    }
+
+    await JobQueue.Instance.createJob(job)
 
     return true
   } catch (err) {

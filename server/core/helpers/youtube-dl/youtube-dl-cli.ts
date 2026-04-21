@@ -73,9 +73,16 @@ function getAria2cAssetNeedles () {
   if (platform === 'windows') return [ 'win-64bit' ]
   if (platform === 'linux-amd64') return [ 'linux-gnu-64bit', 'linux-musl-64bit' ]
   if (platform === 'linux-arm64') return [ 'linux-aarch64', 'linux-arm64' ]
-  if (platform === 'macos') return [ 'osx-darwin', 'darwin' ]
+
+  // macOS: aria2 official releases don't include macOS builds
+  // Fall back to linux-amd64 (may work via Rosetta 2) or skip aria2
+  if (platform === 'macos') return [ 'linux-amd64' ]
 
   return [ 'linux-gnu-64bit' ]
+}
+
+function isMacOSWithNoOfficialAria2Build () {
+  return getBinPlatformFolder() === 'macos'
 }
 
 function getAria2cArchiveSuffixes () {
@@ -563,6 +570,13 @@ export class YoutubeDLCLI {
 
   private async safeGetAria2cBinaryPath (preferredBinaryPath: string): Promise<string | null> {
     if (preferredBinaryPath && preferredBinaryPath !== 'aria2c') return preferredBinaryPath
+
+    // Skip aria2 on macOS since there are no official macOS builds
+    // Fall back to yt-dlp default downloader
+    if (isMacOSWithNoOfficialAria2Build()) {
+      logger.info('[ARIA2] Skipping aria2 on macOS (no official build available), using yt-dlp default downloader.', lTags())
+      return null
+    }
 
     try {
       await execa(preferredBinaryPath, [ '--version' ], { timeout: 3000 })

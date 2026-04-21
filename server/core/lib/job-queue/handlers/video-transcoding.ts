@@ -38,7 +38,12 @@ async function processVideoTranscoding (job: Job) {
 
   const video = await VideoModel.loadFull(payload.videoUUID)
   if (!video) {
-    logger.info('Transcoding job %s cancelled: video %s does not exist (video was deleted).', job.id, payload.videoUUID, lTags(payload.videoUUID))
+    logger.info(
+      'Transcoding job %s cancelled: video %s does not exist (video was deleted).',
+      job.id,
+      payload.videoUUID,
+      lTags(payload.videoUUID)
+    )
     throw new Error('Video was deleted - transcoding job cancelled')
   }
 
@@ -65,7 +70,7 @@ async function processVideoTranscoding (job: Job) {
         payload.videoUUID,
         lTags(payload.videoUUID)
       )
-      throw new Error('Video was deleted - transcoding job cancelled')
+      throw new Error('Video was deleted - transcoding job cancelled', { cause: error })
     }
 
     await moveToFailedTranscodingState(videoStillExists)
@@ -147,7 +152,8 @@ async function handleNewWebVideoResolutionJob (job: Job, payload: NewWebVideoRes
 // ---------------------------------------------------------------------------
 
 async function handleHLSJob (job: Job, payload: HLSTranscodingPayload, videoArg: MVideoFullLight) {
-  logger.info('Handling HLS transcoding job for %s.', videoArg.uuid, lTags(videoArg.uuid), { payload })
+  // [LOGGER] HLS job started
+  logger.info('[TRANSCODE_HANDLER] HLS transcoding job started for %s', videoArg.uuid, { payload })
 
   const inputFileMutexReleaser = await VideoPathManager.Instance.lockFiles(videoArg.uuid)
   let video: MVideoFullLight
@@ -158,25 +164,36 @@ async function handleHLSJob (job: Job, payload: HLSTranscodingPayload, videoArg:
     const { videoFile, separatedAudioFile } = video.getMaxQualityAudioAndVideoFiles()
     const webVideoFile = video.getWebVideoFileResolution(payload.resolution)
 
-    const videoFileInputs = webVideoFile
-      ? [ webVideoFile ]
-      : [ videoFile, separatedAudioFile ].filter(v => !!v)
+    // [LOGGER] Input files selected
+    logger.info('[TRANSCODE_HANDLER] Input files for %s', video.uuid, {
+      hasVideoFile: !!videoFile,
+      hasSeparatedAudio: !!separatedAudioFile,
+      hasWebVideoFile: !!webVideoFile
+    })
 
-    await VideoPathManager.Instance.makeAvailableVideoFiles(videoFileInputs, ([ videoPath, separatedAudioPath ]) => {
-      return generateHlsPlaylistResolution({
+    // [LOGGER] Starting FFmpeg transcoding
+    logger.info('[TRANSCODE_HANDLER] Starting FFmpeg HLS transcoding for %s', video.uuid)
+
+    await VideoPathManager.Instance.makeAvailableMaxQualityFiles(video, async ({ videoPath, separatedAudioPath }) => {
+      await generateHlsPlaylistResolution({
         video,
 
         videoInputPath: videoPath,
         separatedAudioInputPath: separatedAudioPath,
 
-        inputFileMutexReleaser,
+        filesLockedInParent: true,
         resolution: payload.resolution,
         fps: payload.fps,
         separatedAudio: payload.separatedAudio,
         job
       })
     })
+
+    // [LOGGER] FFmpeg transcoding completed
+    logger.info('[TRANSCODE_HANDLER] FFmpeg HLS transcoding completed for %s', video.uuid)
   } finally {
+    // [LOGGER] Releasing lock
+    logger.info('[TRANSCODE_HANDLER] Releasing file lock for %s', videoArg.uuid)
     inputFileMutexReleaser()
   }
 
@@ -187,7 +204,8 @@ async function handleHLSJob (job: Job, payload: HLSTranscodingPayload, videoArg:
     throw new Error('Video was deleted - transcoding job cancelled')
   }
 
-  logger.info('HLS transcoding job for %s ended.', videoStillExists.uuid, lTags(videoStillExists.uuid), { payload })
+  // [LOGGER] HLS transcoding job ended
+  logger.info('[TRANSCODE_HANDLER] HLS transcoding job ended for %s', videoStillExists.uuid, { payload })
 
   const missingStream = await hasMissingHLSStreams({
     inputStreams: payload.inputStreams,
@@ -195,15 +213,16 @@ async function handleHLSJob (job: Job, payload: HLSTranscodingPayload, videoArg:
     videoId: videoArg.uuid
   })
 
+  // [LOGGER] Missing stream check
+  logger.info('[TRANSCODE_HANDLER] Missing stream check for %s: %s', videoStillExists.uuid, !!missingStream)
+
   if (!missingStream && payload.deleteWebVideoFiles === true) {
     const resolutionExceptions = CONFIG.TRANSCODING.ALWAYS_TRANSCODE_PODCAST_OPTIMIZED_AUDIO
       ? [ VideoResolution.H_NOVIDEO ]
       : []
 
-    logger.info('Removing Web Video files of %s now we have a HLS version of it.', videoStillExists.uuid, {
-      resolutionExceptions,
-      ...lTags(videoStillExists.uuid)
-    })
+    // [LOGGER] Removing web video files
+    logger.info('[TRANSCODE_HANDLER] Removing Web Video files for %s', videoStillExists.uuid, { resolutionExceptions })
 
     await removeAllWebVideoFiles(videoStillExists, { resolutionExceptions })
   }
@@ -211,5 +230,11 @@ async function handleHLSJob (job: Job, payload: HLSTranscodingPayload, videoArg:
   // Splitted audio, wait audio & video generation before moving the video in its next state
   const moveVideoToNextState = payload.canMoveVideoState && !missingStream
 
+  // [LOGGER] Calling onTranscodingEnded
+  logger.info('[TRANSCODE_HANDLER] Calling onTranscodingEnded for %s, moveVideoToNextState=%s', videoStillExists.uuid, moveVideoToNextState)
+
   await onTranscodingEnded({ isNewVideo: payload.isNewVideo, moveVideoToNextState, video: videoStillExists })
+
+  // [LOGGER] HLS job handler complete
+  logger.info('[TRANSCODE_HANDLER] HLS job handler complete for %s', videoStillExists.uuid)
 }

@@ -77,7 +77,7 @@ async function listUserExports (req: express.Request, res: express.Response) {
     user: res.locals.user
   })
 
-  return res.json(getFormattedObjects(resultList.data, resultList.total))
+  return res.json(await getFormattedObjects(resultList.data, resultList.total))
 }
 
 async function deleteUserExport (req: express.Request, res: express.Response) {

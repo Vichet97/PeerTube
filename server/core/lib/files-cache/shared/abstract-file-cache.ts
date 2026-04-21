@@ -14,7 +14,7 @@ export type FileModel = {
   storage?: FileStorageType
 
   isLocal(): boolean
-  getLocalFileUrl?(): string
+  getLocalFileUrl?(): string | Promise<string>
 
   save(): Promise<Model>
 }

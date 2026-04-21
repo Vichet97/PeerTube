@@ -108,45 +108,45 @@ function buildVideosHelpers () {
       const video = await VideoModel.loadFull(id)
       if (!video) return undefined
 
-      const webVideoFiles = (video.VideoFiles || []).map(f => ({
+      const webVideoFiles = await Promise.all((video.VideoFiles || []).map(async f => ({
         path: f.storage === FileStorage.FILE_SYSTEM
           ? VideoPathManager.Instance.getFSVideoFileOutputPath(video, f)
           : null,
-        url: f.getFileUrl(video),
+        url: await f.getFileUrl(video),
 
         resolution: f.resolution,
         size: f.size,
         fps: f.fps
-      }))
+      })))
 
       const hls = video.getHLSPlaylist()
 
       const hlsVideoFiles = hls
-        ? (video.getHLSPlaylist().VideoFiles || []).map(f => {
+        ? await Promise.all((video.getHLSPlaylist().VideoFiles || []).map(async f => {
           return {
             path: f.storage === FileStorage.FILE_SYSTEM
               ? VideoPathManager.Instance.getFSVideoFileOutputPath(hls, f)
               : null,
-            url: f.getFileUrl(video),
+            url: await f.getFileUrl(video),
             resolution: f.resolution,
             size: f.size,
             fps: f.fps
           }
-        })
+        }))
         : []
 
-      const thumbnails = video.Thumbnails.map(t => ({
+      const thumbnails = await Promise.all(video.Thumbnails.map(async t => ({
         type: t.width > 300
           ? 2 as const // Preview
           : 1 as const, // Thumbnail
 
         width: t.width,
         height: t.height,
-        url: t.getLocalFileUrl(),
+        url: await t.getLocalFileUrl(),
         path: t.isLocal()
           ? t.getFSPath()
           : null
-      }))
+      })))
 
       return {
         webVideo: {

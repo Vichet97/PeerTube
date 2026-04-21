@@ -21,6 +21,10 @@ export type JobType =
   | 'manage-video-torrent'
   | 'move-to-object-storage'
   | 'move-to-file-system'
+  | 'move-video-file-to-object-storage'
+  | 'move-hls-playlist-to-object-storage'
+  | 'move-thumbnail-to-object-storage'
+  | 'move-caption-to-object-storage'
   | 'notify'
   | 'video-channel-import'
   | 'video-channel-reset'
@@ -206,7 +210,7 @@ export interface ActorKeysPayload {
 
 // ---------------------------------------------------------------------------
 
-export type MoveStoragePayload = MoveVideoStoragePayload | MoveCaptionPayload
+export type MoveStoragePayload = MoveVideoStoragePayload | MoveCaptionPayload | MoveVideoFilePayload | MoveHLSPlaylistPayload | MoveThumbnailPayload
 
 export interface MoveVideoStoragePayload {
   videoUUID: string
@@ -219,18 +223,71 @@ export interface MoveVideoStoragePayload {
     isNewVideo: boolean
     previousVideoState: VideoStateType
   }
+
+  hlsCutover?: {
+    playlistId: number
+    fileIds: number[]
+  }
+
+  // Set to true for follow-up jobs (like HLS cutover finalization)
+  // so they don't increment pendingMove counter
+  isFollowUp?: boolean
 }
 
 export interface MoveCaptionPayload {
   captionId: number
 }
 
+export interface MoveVideoFilePayload {
+  videoUUID: string
+  fileId: number
+  isNewVideo: boolean
+  previousVideoState?: VideoStateType
+}
+
+export interface MoveHLSPlaylistPayload {
+  videoUUID: string
+  playlistId: number
+  fileIds: number[]
+  isNewVideo: boolean
+  previousVideoState?: VideoStateType
+}
+
+export interface MoveThumbnailPayload {
+  videoUUID: string
+  thumbnailId: number
+  isNewVideo: boolean
+  previousVideoState?: VideoStateType
+}
+
 export function isMoveVideoStoragePayload (payload: any): payload is MoveVideoStoragePayload {
-  return 'videoUUID' in payload
+  // Valid if it has videoUUID and either:
+  // - hlsCutover (modern format)
+  // - moveVideoState (legacy format)
+  // - isNewVideo (modern without cutover)
+  return 'videoUUID' in payload && (
+    'hlsCutover' in payload ||
+    'moveVideoState' in payload ||
+    'isNewVideo' in payload
+  )
 }
 
 export function isMoveCaptionPayload (payload: any): payload is MoveCaptionPayload {
   return 'captionId' in payload
+}
+
+export function isMoveVideoFilePayload (payload: any): payload is MoveVideoFilePayload {
+  // Has videoUUID and fileId, but NOT moveVideoState (that's a MoveVideoStoragePayload)
+  // Also not hlsCutover (that's also MoveVideoStoragePayload)
+  return 'videoUUID' in payload && 'fileId' in payload && !('moveVideoState' in payload) && !('hlsCutover' in payload)
+}
+
+export function isMoveHLSPlaylistPayload (payload: any): payload is MoveHLSPlaylistPayload {
+  return 'videoUUID' in payload && 'playlistId' in payload && 'fileIds' in payload
+}
+
+export function isMoveThumbnailPayload (payload: any): payload is MoveThumbnailPayload {
+  return 'videoUUID' in payload && 'thumbnailId' in payload
 }
 
 // ---------------------------------------------------------------------------

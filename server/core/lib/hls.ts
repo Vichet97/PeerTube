@@ -1,10 +1,11 @@
 import { sortBy, uniqify, uuidRegex } from '@peertube/peertube-core-utils'
 import { ffprobePromise, getVideoStreamDimensionsInfo } from '@peertube/peertube-ffmpeg'
-import { FileStorage, VideoResolution } from '@peertube/peertube-models'
+import { FileStorage, type FileStorageType, VideoResolution } from '@peertube/peertube-models'
 import { sha256 } from '@peertube/peertube-node-utils'
 import { ApplicationModel } from '@server/models/application/application.js'
 import { VideoCaptionModel } from '@server/models/video/video-caption.js'
 import { MStreamingPlaylist, MStreamingPlaylistFilesVideo, MVideo, MVideoCaption } from '@server/types/models/index.js'
+import { MVideoFileStreamingPlaylist } from '@server/types/models/video/video-file.js'
 import { ensureDir, move, outputJSON, remove } from 'fs-extra/esm'
 import { open, readFile, stat, writeFile } from 'fs/promises'
 import flatten from 'lodash-es/flatten.js'
@@ -20,10 +21,22 @@ import { sequelizeTypescript } from '../initializers/database.js'
 import { VideoFileModel } from '../models/video/video-file.js'
 import { VideoStreamingPlaylistModel } from '../models/video/video-streaming-playlist.js'
 import { storeHLSFileFromContent } from './object-storage/index.js'
-import { generateHLSMasterPlaylistFilename, generateHlsSha256SegmentsFilename, getHLSResolutionPlaylistFilename } from './paths.js'
+import { getHLSFileReadStream } from './object-storage/videos.js'
+import {
+  generateHLSMasterPlaylistFilename,
+  generateHlsSha256SegmentsFilename,
+  getHLSResolutionPlaylistFilename,
+  getHLSDirectory
+} from './paths.js'
 import { VideoPathManager } from './video-path-manager.js'
 
 const lTags = loggerTagsFactory('hls')
+
+function getPublishedVideoFiles<T extends { storage: FileStorageType }> (playlistStorage: FileStorageType, videoFiles: T[]) {
+  if (playlistStorage !== FileStorage.OBJECT_STORAGE) return videoFiles
+
+  return videoFiles.filter(file => file.storage === FileStorage.OBJECT_STORAGE)
+}
 
 export async function updateStreamingPlaylistsInfohashesIfNeeded () {
   let playlistsToUpdateIds = new Set(await VideoStreamingPlaylistModel.listIdsByIncorrectPeerVersion())
@@ -48,8 +61,9 @@ export async function updateStreamingPlaylistsInfohashesIfNeeded () {
       await sequelizeTypescript.transaction(async t => {
         const playlist = await VideoStreamingPlaylistModel.loadWithVideo(playlistId, t)
         const videoFiles = await VideoFileModel.listByStreamingPlaylist(playlistId, t)
+        const publishedVideoFiles = getPublishedVideoFiles(playlist.storage, videoFiles)
 
-        playlist.assignP2PMediaLoaderInfoHashes(playlist.Video, videoFiles)
+        await playlist.assignP2PMediaLoaderInfoHashes(playlist.Video, publishedVideoFiles)
         playlist.p2pMediaLoaderPeerVersion = P2P_MEDIA_LOADER_PEER_VERSION
 
         await playlist.save({ transaction: t })
@@ -72,7 +86,9 @@ export async function updateM3U8AndShaPlaylist (video: MVideo, playlist: MStream
     playlistWithFiles = await VideoStreamingPlaylistModel.loadWithVideoAndFiles(playlist.id)
     if (!playlistWithFiles) return
 
-    playlistWithFiles.assignP2PMediaLoaderInfoHashes(video, playlistWithFiles.VideoFiles)
+    const videoFiles = await VideoFileModel.listByStreamingPlaylist(playlist.id)
+    const publishedVideoFiles = getPublishedVideoFiles(playlistWithFiles.storage, videoFiles)
+    await playlistWithFiles.assignP2PMediaLoaderInfoHashes(video, publishedVideoFiles)
     await playlistWithFiles.save()
 
     video.setHLSPlaylist(playlistWithFiles)
@@ -92,6 +108,7 @@ function updateMasterHLSPlaylist (video: MVideo, playlistArg: MStreamingPlaylist
     if (!playlist) return null
 
     const captions = await VideoCaptionModel.listVideoCaptions(video.id)
+    const videoFiles = await VideoFileModel.listByStreamingPlaylist(playlist.id)
 
     const extMediaAudio: string[] = []
     const extMediaSubtitle: string[] = []
@@ -99,6 +116,8 @@ function updateMasterHLSPlaylist (video: MVideo, playlistArg: MStreamingPlaylist
     let separatedAudioCodec: string
 
     const splitAudioAndVideo = playlist.hasAudioAndVideoSplitted()
+    const publishedVideoFiles = getPublishedVideoFiles(playlist.storage, videoFiles)
+    const hasPublishedVideoFiles = publishedVideoFiles.some(file => file.resolution !== VideoResolution.H_NOVIDEO)
 
     for (const caption of captions) {
       if (!caption.m3u8Filename) continue
@@ -111,7 +130,7 @@ function updateMasterHLSPlaylist (video: MVideo, playlistArg: MStreamingPlaylist
     }
 
     // Sort to have the audio resolution first (if it exists)
-    for (const file of sortBy(playlist.VideoFiles, 'resolution')) {
+    for (const file of sortBy(publishedVideoFiles, 'resolution')) {
       const playlistFilename = getHLSResolutionPlaylistFilename(file.filename)
 
       await VideoPathManager.Instance.makeAvailableVideoFile(file.withVideoOrPlaylist(playlist), async videoFilePath => {
@@ -144,10 +163,10 @@ function updateMasterHLSPlaylist (video: MVideo, playlistArg: MStreamingPlaylist
         // Don't include audio only resolution as a regular "video" resolution
         // Some player may use it automatically and so the user would not have a video stream
         // But if it's the only resolution we can treat it as a regular stream
-        if (resolution || playlist.VideoFiles.length === 1) {
+        if (resolution || (!splitAudioAndVideo && publishedVideoFiles.length === 1)) {
           extStreamInfo.push(line)
           extStreamInfo.push(playlistFilename)
-        } else if (splitAudioAndVideo) {
+        } else if (splitAudioAndVideo && hasPublishedVideoFiles) {
           extMediaAudio.push(`#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Audio",AUTOSELECT=YES,DEFAULT=YES,URI="${playlistFilename}"`)
         }
       })
@@ -185,6 +204,66 @@ function updateMasterHLSPlaylist (video: MVideo, playlistArg: MStreamingPlaylist
 
 // ---------------------------------------------------------------------------
 
+async function streamToBuffer (stream: NodeJS.ReadableStream): Promise<Buffer> {
+  const chunks: Buffer[] = []
+  for await (const chunk of stream as AsyncIterable<Buffer>) {
+    chunks.push(chunk)
+  }
+  return Buffer.concat(chunks)
+}
+
+async function hashVideoRangesFromObjectStorage (
+  video: MVideo,
+  file: MVideoFileStreamingPlaylist
+): Promise<{ [rangeKey: string]: string }> {
+  const resolutionPlaylistFilename = getHLSResolutionPlaylistFilename(file.filename)
+  const result: { [rangeKey: string]: string } = {}
+
+  // Read resolution playlist from S3
+  const { stream: playlistStream } = await getHLSFileReadStream({ video, filename: resolutionPlaylistFilename })
+  const playlistBuffer = await streamToBuffer(playlistStream)
+  const ranges = getRangesFromPlaylist(playlistBuffer.toString('utf8'))
+
+  // Read each byte range from S3 and hash
+  for (const range of ranges) {
+    const { stream: rangeStream } = await getHLSFileReadStream({
+      video,
+      filename: file.filename,
+      rangeHeader: `bytes=${range.offset}-${range.offset + range.length - 1}`
+    })
+
+    const rangeBuffer = await streamToBuffer(rangeStream)
+    result[`${range.offset}-${range.offset + range.length - 1}`] = sha256(rangeBuffer)
+  }
+
+  return result
+}
+
+async function hashVideoRangesFromFileSystem (
+  video: MVideo,
+  file: MVideoFileStreamingPlaylist
+): Promise<{ [rangeKey: string]: string }> {
+  const result: { [rangeKey: string]: string } = {}
+  const resolutionPlaylistPath = join(getHLSDirectory(video), getHLSResolutionPlaylistFilename(file.filename))
+
+  const playlistContent = await readFile(resolutionPlaylistPath)
+  const ranges = getRangesFromPlaylist(playlistContent.toString())
+
+  const videoPath = join(getHLSDirectory(video), file.filename)
+  const fd = await open(videoPath, 'r')
+  try {
+    for (const range of ranges) {
+      const buf = Buffer.alloc(range.length)
+      await fd.read(buf, 0, range.length, range.offset)
+      result[`${range.offset}-${range.offset + range.length - 1}`] = sha256(buf)
+    }
+  } finally {
+    await fd.close()
+  }
+
+  return result
+}
+
 function updateSha256VODSegments (video: MVideo, playlistArg: MStreamingPlaylist): Promise<MStreamingPlaylistFilesVideo | null> {
   return playlistFilesQueue.add(async () => {
     const json: { [filename: string]: { [range: string]: string } } = {}
@@ -192,29 +271,17 @@ function updateSha256VODSegments (video: MVideo, playlistArg: MStreamingPlaylist
     const playlist = await VideoStreamingPlaylistModel.loadWithVideoAndFiles(playlistArg.id)
     if (!playlist) return null
 
-    // For all the resolutions available for this video
-    for (const file of playlist.VideoFiles) {
-      const rangeHashes: { [range: string]: string } = {}
+    const videoFiles = await VideoFileModel.listByStreamingPlaylist(playlist.id)
+    const publishedVideoFiles = getPublishedVideoFiles(playlist.storage, videoFiles)
+    const isObjectStorage = playlist.storage === FileStorage.OBJECT_STORAGE
+
+    for (const file of publishedVideoFiles) {
       const fileWithPlaylist = file.withVideoOrPlaylist(playlist)
+      const rangeHashes = isObjectStorage
+        ? await hashVideoRangesFromObjectStorage(video, fileWithPlaylist)
+        : await hashVideoRangesFromFileSystem(video, fileWithPlaylist)
 
-      await VideoPathManager.Instance.makeAvailableVideoFile(fileWithPlaylist, videoPath => {
-        return VideoPathManager.Instance.makeAvailableResolutionPlaylistFile(fileWithPlaylist, async resolutionPlaylistPath => {
-          const playlistContent = await readFile(resolutionPlaylistPath)
-          const ranges = getRangesFromPlaylist(playlistContent.toString())
-
-          const fd = await open(videoPath, 'r')
-          for (const range of ranges) {
-            const buf = Buffer.alloc(range.length)
-            await fd.read(buf, 0, range.length, range.offset)
-
-            rangeHashes[`${range.offset}-${range.offset + range.length - 1}`] = sha256(buf)
-          }
-          await fd.close()
-
-          const videoFilename = file.filename
-          json[videoFilename] = rangeHashes
-        })
-      })
+      json[file.filename] = rangeHashes
     }
 
     if (playlist.segmentsSha256Filename) {
@@ -333,14 +400,16 @@ export function injectQueryToPlaylistUrls (content: string, queryString: string)
 
 // ---------------------------------------------------------------------------
 
-export function buildCaptionM3U8Content (options: {
+export async function buildCaptionM3U8Content (options: {
   video: MVideo
   caption: MVideoCaption
 }) {
   const { video, caption } = options
 
+  const captionUrl = await caption.getLocalFileUrl()
+
   return `#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:${video.duration}\n#EXT-X-MEDIA-SEQUENCE:0\n` +
-    `#EXTINF:${video.duration},\n${caption.getLocalFileUrl()}\n#EXT-X-ENDLIST\n`
+    `#EXTINF:${video.duration},\n${captionUrl}\n#EXT-X-ENDLIST\n`
 }
 
 // ---------------------------------------------------------------------------

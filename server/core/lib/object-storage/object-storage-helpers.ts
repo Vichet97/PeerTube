@@ -23,7 +23,7 @@ async function listKeysOfPrefix (prefix: string, bucketInfo: BucketInfo, continu
 
   const { ListObjectsV2Command } = await import('@aws-sdk/client-s3')
 
-  const commandPrefix = bucketInfo.PREFIX + prefix
+  const commandPrefix = prefix.includes(bucketInfo.PREFIX) ? prefix : bucketInfo.PREFIX +  prefix
   const listCommand = new ListObjectsV2Command({
     Bucket: bucketInfo.BUCKET_NAME,
     Prefix: commandPrefix,
@@ -228,7 +228,7 @@ async function makeAvailable (options: {
 }
 
 function buildKey (key: string, bucketInfo: BucketInfo) {
-  return bucketInfo.PREFIX + key
+  return key.includes(bucketInfo.PREFIX) ? key : bucketInfo.PREFIX + key
 }
 
 // ---------------------------------------------------------------------------

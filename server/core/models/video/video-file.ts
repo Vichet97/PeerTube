@@ -345,7 +345,7 @@ export class VideoFileModel extends SequelizeModel<VideoFileModel> {
       })
   }
 
-  static listByStreamingPlaylist (streamingPlaylistId: number, transaction: Transaction) {
+  static listByStreamingPlaylist (streamingPlaylistId: number, transaction?: Transaction) {
     const query = {
       include: [
         {
@@ -505,7 +505,7 @@ export class VideoFileModel extends SequelizeModel<VideoFileModel> {
 
   // ---------------------------------------------------------------------------
 
-  getObjectStorageUrl (video: MVideo) {
+  async getObjectStorageUrl (video: MVideo) {
     if (video.hasPrivateStaticPath() && CONFIG.OBJECT_STORAGE.PROXY.PROXIFY_PRIVATE_FILES === true) {
       return this.buildPrivateObjectStorageUrl(video)
     }
@@ -521,23 +521,25 @@ export class VideoFileModel extends SequelizeModel<VideoFileModel> {
     return buildObjectStorageWebVideoPrivateFileUrl(this.filename)
   }
 
-  private buildPublicObjectStorageUrl (video: MVideo) {
+  private async buildPublicObjectStorageUrl (video: MVideo) {
     if (this.isHLS()) {
       return buildObjectStoragePublicFileUrl({
         bucket: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS,
-        key: generateHLSObjectStorageKey(video, this.filename)
+        key: generateHLSObjectStorageKey(video, this.filename),
+        fileType: 'streaming-playlists'
       })
     }
 
     return buildObjectStoragePublicFileUrl({
       bucket: CONFIG.OBJECT_STORAGE.WEB_VIDEOS,
-      key: generateWebVideoObjectStorageKey(this.filename)
+      key: generateWebVideoObjectStorageKey(this.filename),
+      fileType: 'web-videos'
     })
   }
 
   // ---------------------------------------------------------------------------
 
-  getFileUrl (video: MVideo) {
+  async getFileUrl (video: MVideo) {
     if (video.isLocal()) {
       if (this.storage === FileStorage.OBJECT_STORAGE) {
         return this.getObjectStorageUrl(video)
@@ -649,7 +651,7 @@ export class VideoFileModel extends SequelizeModel<VideoFileModel> {
 
   // ---------------------------------------------------------------------------
 
-  toActivityPubObject (this: MVideoFile, video: MVideo): ActivityVideoUrlObject {
+  async toActivityPubObject (this: MVideoFile, video: MVideo): Promise<ActivityVideoUrlObject> {
     const mimeType = getVideoFileMimeType(this.extname, false)
 
     const attachment: ActivityVideoUrlObject['attachment'] = []
@@ -689,7 +691,7 @@ export class VideoFileModel extends SequelizeModel<VideoFileModel> {
     return {
       type: 'Link',
       mediaType: mimeType as ActivityVideoUrlObject['mediaType'],
-      href: this.getFileUrl(video),
+      href: await this.getFileUrl(video),
       height: this.height || this.resolution,
       width: this.width,
       size: this.size,

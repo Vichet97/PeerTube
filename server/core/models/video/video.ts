@@ -961,7 +961,7 @@ export class VideoModel extends SequelizeModel<VideoModel> {
     logger.info('Saving video abuses details of video %s.', instance.url)
 
     if (!instance.Trackers) instance.Trackers = await instance.$get('Trackers', { transaction: options.transaction })
-    const details = instance.toFormattedDetailsJSON()
+    const details = await instance.toFormattedDetailsJSON()
 
     for (const abuse of instance.VideoAbuses) {
       abuse.deletedVideo = details
@@ -2040,43 +2040,44 @@ export class VideoModel extends SequelizeModel<VideoModel> {
     return WEBSERVER.URL + buildVideoEmbedPath({ shortUUID: uuidToShort(this.uuid) })
   }
 
-  toFormattedJSON (this: MVideoFormattable, options?: VideoFormattingJSONOptions): Video {
+  async toFormattedJSON (this: MVideoFormattable, options?: VideoFormattingJSONOptions): Promise<Video> {
     return videoModelToFormattedJSON(this, options)
   }
 
-  toFormattedDetailsJSON (this: MVideoFormattableDetails): VideoDetails {
+  async toFormattedDetailsJSON (this: MVideoFormattableDetails): Promise<VideoDetails> {
     return videoModelToFormattedDetailsJSON(this)
   }
 
-  getFormattedWebVideoFilesJSON (includeMagnet = true): VideoFile[] {
+  async getFormattedWebVideoFilesJSON (includeMagnet = true): Promise<VideoFile[]> {
     return videoFilesModelToFormattedJSON(this, this.VideoFiles, { includeMagnet })
   }
 
-  getFormattedHLSVideoFilesJSON (includeMagnet = true): VideoFile[] {
+  async getFormattedHLSVideoFilesJSON (includeMagnet = true): Promise<VideoFile[]> {
     let acc: VideoFile[] = []
 
     for (const p of this.VideoStreamingPlaylists) {
-      acc = acc.concat(videoFilesModelToFormattedJSON(this, p.VideoFiles, { includeMagnet }))
+      const files = await videoFilesModelToFormattedJSON(this, p.VideoFiles, { includeMagnet })
+      acc = acc.concat(files)
     }
 
     return acc
   }
 
-  getFormattedAllVideoFilesJSON (includeMagnet = true): VideoFile[] {
+  async getFormattedAllVideoFilesJSON (includeMagnet = true): Promise<VideoFile[]> {
     let files: VideoFile[] = []
 
     if (Array.isArray(this.VideoFiles)) {
-      files = files.concat(this.getFormattedWebVideoFilesJSON(includeMagnet))
+      files = files.concat(await this.getFormattedWebVideoFilesJSON(includeMagnet))
     }
 
     if (Array.isArray(this.VideoStreamingPlaylists)) {
-      files = files.concat(this.getFormattedHLSVideoFilesJSON(includeMagnet))
+      files = files.concat(await this.getFormattedHLSVideoFilesJSON(includeMagnet))
     }
 
     return files
   }
 
-  toActivityPubObject (this: MVideoAP): Promise<VideoObject> {
+  toActivityPubObject (this: MVideoAP): Promise<Promise<VideoObject>> {
     return Hooks.wrapObject(
       videoModelToActivityPubObject(this),
       'filter:activity-pub.video.json-ld.build.result',

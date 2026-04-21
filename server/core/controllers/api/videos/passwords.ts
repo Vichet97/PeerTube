@@ -70,7 +70,7 @@ async function listVideoPasswords (req: express.Request, res: express.Response) 
 
   const resultList = await VideoPasswordModel.listPasswords(options)
 
-  return res.json(getFormattedObjects(resultList.data, resultList.total))
+  return res.json(await getFormattedObjects(resultList.data, resultList.total))
 }
 
 async function updateVideoPasswordList (req: express.Request, res: express.Response) {

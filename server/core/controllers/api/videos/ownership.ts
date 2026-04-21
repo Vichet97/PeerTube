@@ -109,7 +109,7 @@ async function listVideoOwnership (req: express.Request, res: express.Response) 
     req.query.sort || 'createdAt'
   )
 
-  return res.json(getFormattedObjects(resultList.data, resultList.total))
+  return res.json(await getFormattedObjects(resultList.data, resultList.total))
 }
 
 function acceptOwnership (req: express.Request, res: express.Response) {

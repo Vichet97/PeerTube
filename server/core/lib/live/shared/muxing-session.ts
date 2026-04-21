@@ -234,7 +234,7 @@ class MuxingSession extends EventEmitter implements MuxingSession {
           )
         }
 
-        this.streamingPlaylist.assignP2PMediaLoaderInfoHashes(this.videoLive.Video, this.allResolutions.map(r => ({ height: r })))
+        await this.streamingPlaylist.assignP2PMediaLoaderInfoHashes(this.videoLive.Video, this.allResolutions.map(r => ({ height: r })))
 
         await this.streamingPlaylist.save()
       } catch (err) {

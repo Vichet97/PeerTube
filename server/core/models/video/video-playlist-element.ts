@@ -329,10 +329,10 @@ export class VideoPlaylistElementModel extends SequelizeModel<VideoPlaylistEleme
 
   // ---------------------------------------------------------------------------
 
-  toFormattedJSON (
+  async toFormattedJSON (
     this: MVideoPlaylistElementFormattable,
     options: { accountId?: number } = {}
-  ): VideoPlaylistElement {
+  ): Promise<VideoPlaylistElement> {
     return {
       id: this.id,
       position: this.position,
@@ -341,7 +341,7 @@ export class VideoPlaylistElementModel extends SequelizeModel<VideoPlaylistEleme
 
       type: this.getType(options.accountId),
 
-      video: this.getVideoElement(options.accountId)
+      video: await this.getVideoElement(options.accountId)
     }
   }
 
@@ -367,11 +367,11 @@ export class VideoPlaylistElementModel extends SequelizeModel<VideoPlaylistEleme
     return VideoPlaylistElementType.REGULAR
   }
 
-  getVideoElement (this: MVideoPlaylistElementFormattable, accountId?: number) {
+  async getVideoElement (this: MVideoPlaylistElementFormattable, accountId?: number) {
     if (!this.Video) return null
     if (this.getType(accountId) !== VideoPlaylistElementType.REGULAR) return null
 
-    return this.Video.toFormattedJSON()
+    return await this.Video.toFormattedJSON()
   }
 
   toActivityPubObject (this: MVideoPlaylistElementAP): PlaylistElementObject {

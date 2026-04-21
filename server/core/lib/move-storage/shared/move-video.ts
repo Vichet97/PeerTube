@@ -20,12 +20,15 @@ export async function moveVideoToStorage (options: {
   targetStorage: FileStorageType
 
   moveWebVideoFiles: (video: MVideoWithAllFiles) => Promise<void>
-  moveHLSFiles: (video: MVideoWithAllFiles) => Promise<void>
+  moveHLSFiles: (video: MVideoWithAllFiles, options?: {
+    onInitialCutoverReady?: (options: { playlistId: number, fileIds: number[] }) => Promise<void>
+  }) => Promise<boolean> // Returns true if initial HLS cutover was deferred to a follow-up job
   moveVideoSourceFile: (source: MVideoSource) => Promise<void>
   moveCaptionFiles: (captions: MVideoCaption[], hls: MStreamingPlaylistVideoUUID) => Promise<void>
   moveThumbnailFiles?: (thumbnails: MThumbnail[]) => Promise<void>
   moveStoryboardFiles?: (storyboards: MStoryboard[]) => Promise<void>
   moveTorrentFiles?: (video: MVideoWithAllFiles) => Promise<void>
+  onInitialHLSCutoverReady?: (options: { playlistId: number, fileIds: number[] }) => Promise<void>
 }) {
   const {
     loggerTags,
@@ -49,7 +52,7 @@ export async function moveVideoToStorage (options: {
   if (!video) {
     logger.info(`Can't move video ${videoUUID}, video does not exist.`, lTagsBase(videoUUID))
     fileMutexReleaser()
-    return undefined
+    return false
   }
 
   const lTags = lTagsBase(video.uuid, video.url)
@@ -64,7 +67,7 @@ export async function moveVideoToStorage (options: {
       logger.info(`Decreased pendingMove counter for ${video.uuid}. Remaining: ${pendingMove}.`, lTags)
 
       fileMutexReleaser()
-      return undefined
+      return false
     }
 
     const { source, captions, hls, webFiles, thumbnails, storyboards } = await filterVideoResourcesToBeMoved(video, targetStorage)
@@ -88,10 +91,13 @@ export async function moveVideoToStorage (options: {
       await moveWebVideoFiles(video)
     }
 
+    let hlsCutoverDeferred = false
     if (hls) {
       logger.debug(`Moving HLS playlist of ${video.uuid}.`, lTags)
 
-      await moveHLSFiles(video)
+      hlsCutoverDeferred = await moveHLSFiles(video, {
+        onInitialCutoverReady: options.onInitialHLSCutoverReady
+      })
     }
 
     if (thumbnails.length !== 0 && moveThumbnailFiles) {
@@ -112,12 +118,19 @@ export async function moveVideoToStorage (options: {
       await moveTorrentFiles(video)
     }
 
-    const pendingMove = await VideoJobInfoModel.decrease(video.uuid, 'pendingMove')
-
-    logger.info(`Moved video ${video.uuid}. Remaining pending move: ${pendingMove}.`, lTags)
+    // Only decrement pendingMove if HLS cutover was NOT deferred to a follow-up job.
+    // If hlsCutoverDeferred is true, the follow-up job (finalizeInitialHLSCutover) will handle it.
+    if (!hlsCutoverDeferred) {
+      const pendingMove = await VideoJobInfoModel.decrease(video.uuid, 'pendingMove')
+      logger.info(`Moved video ${video.uuid}. Remaining pending move: ${pendingMove}.`, lTags)
+    } else {
+      logger.info(`Video ${video.uuid} has deferred HLS cutover to follow-up job.`, lTags)
+    }
   } finally { // Error handling is managed by the job queue
     fileMutexReleaser()
   }
+
+  return false
 }
 
 export async function onMoveVideoToStorageFailure (options: {

@@ -113,7 +113,7 @@ async function listFollowing (req: express.Request, res: express.Response) {
     state: req.query.state
   })
 
-  return res.json(getFormattedObjects(resultList.data, resultList.total))
+  return res.json(await getFormattedObjects(resultList.data, resultList.total))
 }
 
 async function listFollowers (req: express.Request, res: express.Response) {
@@ -128,7 +128,7 @@ async function listFollowers (req: express.Request, res: express.Response) {
     state: req.query.state
   })
 
-  return res.json(getFormattedObjects(resultList.data, resultList.total))
+  return res.json(await getFormattedObjects(resultList.data, resultList.total))
 }
 
 async function addFollow (req: express.Request, res: express.Response) {

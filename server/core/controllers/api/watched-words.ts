@@ -121,7 +121,7 @@ function listWatchedWordsListsFactory (accountGetter: (res: express.Response) =>
       sort: req.query.sort
     })
 
-    return res.json(getFormattedObjects(resultList.data, resultList.total))
+    return res.json(await getFormattedObjects(resultList.data, resultList.total))
   }
 }
 

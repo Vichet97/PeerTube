@@ -98,7 +98,7 @@ async function searchVideoPlaylistsDB (query: VideoPlaylistsSearchQueryAfterSani
     'filter:api.search.video-playlists.local.list.result'
   )
 
-  return res.json(getFormattedObjects(resultList.data, resultList.total))
+  return res.json(await getFormattedObjects(resultList.data, resultList.total))
 }
 
 async function searchVideoPlaylistsURI (search: string, res: express.Response) {
@@ -118,7 +118,7 @@ async function searchVideoPlaylistsURI (search: string, res: express.Response) {
 
   return res.json({
     total: videoPlaylist ? 1 : 0,
-    data: videoPlaylist ? [ videoPlaylist.toFormattedJSON() ] : []
+    data: videoPlaylist ? [ await videoPlaylist.toFormattedJSON() ] : []
   })
 }
 

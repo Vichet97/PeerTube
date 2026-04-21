@@ -93,7 +93,7 @@ export class FFmpegCommandWrapper {
     this.command = undefined
   }
 
-  buildCommand (inputs: (string | Readable)[] | string | Readable, inputFileMutexReleaser?: MutexInterface.Releaser) {
+  buildCommand (inputs: (string | Readable)[] | string | Readable, inputFileMutexReleaser?: MutexInterface.Releaser, filesLockedInParent?: boolean) {
     if (this.command) throw new Error('Command is already built')
 
     // We set cwd explicitly because ffmpeg appears to create temporary files when trancoding which fails in read-only file systems
@@ -111,7 +111,9 @@ export class FFmpegCommandWrapper {
       this.command.outputOption('-threads ' + this.threads)
     }
 
-    if (inputFileMutexReleaser) {
+    // Only release the lock after FFmpeg starts if the lock is NOT held by parent
+    // This prevents concurrent resolution jobs from competing for the lock
+    if (inputFileMutexReleaser && !filesLockedInParent) {
       this.command.on('start', () => {
         setTimeout(() => inputFileMutexReleaser(), 1000)
       })
@@ -122,18 +124,21 @@ export class FFmpegCommandWrapper {
 
   async runCommand (options: {
     silent?: boolean // false by default
+    timeoutMs?: number // Optional timeout in milliseconds
   } = {}) {
-    const { silent = false } = options
+    const { silent = false, timeoutMs } = options
 
     return new Promise<void>((res, rej) => {
       let shellCommand: string
       let promiseSettled = false
       let abortCheckInterval: ReturnType<typeof setInterval> | undefined
+      let timeoutInterval: ReturnType<typeof setTimeout> | undefined
 
       const settleReject = (err: Error) => {
         if (promiseSettled) return
         promiseSettled = true
         if (abortCheckInterval) clearInterval(abortCheckInterval)
+        if (timeoutInterval) clearTimeout(timeoutInterval)
         if (this.onSettled) this.onSettled()
         if (this.onError) this.onError(err)
         rej(err)
@@ -143,9 +148,27 @@ export class FFmpegCommandWrapper {
         if (promiseSettled) return
         promiseSettled = true
         if (abortCheckInterval) clearInterval(abortCheckInterval)
+        if (timeoutInterval) clearTimeout(timeoutInterval)
         if (this.onSettled) this.onSettled()
         if (this.onEnd) this.onEnd()
         res()
+      }
+
+      // Timeout fallback: if FFmpeg hangs and doesn't emit 'end', reject after timeout
+      if (timeoutMs && timeoutMs > 0) {
+        timeoutInterval = setTimeout(() => {
+          if (!promiseSettled) {
+            this.logger.warn('FFmpeg command timed out after ms, killing process.', { timeoutMs, shellCommand, ...this.lTags })
+            this.command.kill('SIGKILL')
+            // Don't reject immediately - give the 'close' event a chance to fire first
+            // If 'close' fires, it will handle settling; if not, timeout will reject
+            setTimeout(() => {
+              if (!promiseSettled) {
+                settleReject(new Error(`FFmpeg command timed out after ${timeoutMs}ms`))
+              }
+            }, 1000)
+          }
+        }, timeoutMs)
       }
 
       if (this.abortSignal) {
@@ -170,6 +193,25 @@ export class FFmpegCommandWrapper {
         err.stderr = stderr
 
         settleReject(err)
+      })
+
+      // Handle 'close' event as well: this fires when FFmpeg exits regardless of how it terminated.
+      // This is critical for cases where FFmpeg crashes, is killed, or exits in certain ways where
+      // 'end' may not fire. We treat 'close' with code 0 as success if not already resolved.
+      // Note: 'close' is not in fluent-ffmpeg types but is a standard Node.js EventEmitter event
+      ;(this.command as any).on('close', (code: number) => {
+        if (promiseSettled) return
+
+        // Log unexpected close
+        if (code !== 0) {
+          this.logger.warn('FFmpeg process closed with code (not 0).', { code, shellCommand, ...this.lTags })
+          settleReject(new Error(`FFmpeg process exited with code ${code}`))
+        } else {
+          // FFmpeg exited successfully but 'end' may not have fired
+          // This can happen with certain FFmpeg versions or commands
+          this.logger.debug('FFmpeg process closed with code 0 (end event may have already fired or been skipped).', { shellCommand, ...this.lTags })
+          settleResolve()
+        }
       })
 
       this.command.on('end', (stdout, stderr) => {

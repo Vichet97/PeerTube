@@ -236,7 +236,7 @@ async function createAbuse (options: {
     sendAbuse(reporterAccount.Actor, abuseInstance, abuseInstance.FlaggedAccount, transaction)
   }
 
-  const abuseJSON = abuseInstance.toFormattedAdminJSON()
+  const abuseJSON = await abuseInstance.toFormattedAdminJSON()
   auditLogger.create(reporterAccount.Actor.getIdentifier(), new AbuseAuditView(abuseJSON))
 
   if (!skipNotification) {

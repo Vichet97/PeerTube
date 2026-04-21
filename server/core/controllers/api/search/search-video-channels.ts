@@ -108,7 +108,7 @@ async function searchVideoChannelsDB (query: VideoChannelsSearchQueryAfterSaniti
     'filter:api.search.video-channels.local.list.result'
   )
 
-  return res.json(getFormattedObjects(resultList.data, resultList.total))
+  return res.json(await getFormattedObjects(resultList.data, resultList.total))
 }
 
 async function searchVideoChannelURI (search: string, res: express.Response) {
@@ -140,7 +140,7 @@ async function searchVideoChannelURI (search: string, res: express.Response) {
 
   return res.json({
     total: videoChannel ? 1 : 0,
-    data: videoChannel ? [ videoChannel.toFormattedJSON() ] : []
+    data: videoChannel ? [ await videoChannel.toFormattedJSON() ] : []
   })
 }
 

@@ -65,6 +65,19 @@ export class VideoJobInfoModel extends SequelizeModel<VideoJobInfoModel> {
     return VideoJobInfoModel.findOne({ where, transaction })
   }
 
+  static loadByUUID (videoUUID: string, transaction?: Transaction) {
+    return VideoJobInfoModel.findOne({
+      include: [
+        {
+          model: VideoModel.unscoped(),
+          required: true,
+          where: { uuid: videoUUID }
+        }
+      ],
+      transaction
+    })
+  }
+
   static async increaseOrCreate (videoUUID: string, column: VideoJobInfoColumnType, amountArg = 1): Promise<number> {
     const options = { type: QueryTypes.SELECT as QueryTypes.SELECT, bind: { videoUUID } }
     const amount = forceNumber(amountArg)

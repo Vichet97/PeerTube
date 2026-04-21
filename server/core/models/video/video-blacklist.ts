@@ -117,7 +117,7 @@ export class VideoBlacklistModel extends SequelizeModel<VideoBlacklistModel> {
     return VideoBlacklistModel.findOne(query)
   }
 
-  toFormattedJSON (this: MVideoBlacklistFormattable): VideoBlacklist {
+  async toFormattedJSON (this: MVideoBlacklistFormattable): Promise<VideoBlacklist> {
     return {
       id: this.id,
       createdAt: this.createdAt,
@@ -126,7 +126,7 @@ export class VideoBlacklistModel extends SequelizeModel<VideoBlacklistModel> {
       unfederated: this.unfederated,
       type: this.type,
 
-      video: this.Video.toFormattedJSON()
+      video: await this.Video.toFormattedJSON()
     }
   }
 }

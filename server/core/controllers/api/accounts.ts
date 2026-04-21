@@ -143,7 +143,7 @@ export {
 
 // ---------------------------------------------------------------------------
 
-function getAccount (req: express.Request, res: express.Response) {
+async function getAccount (req: express.Request, res: express.Response) {
   const account = res.locals.account
 
   if (account.isOutdated()) {
@@ -156,7 +156,7 @@ function getAccount (req: express.Request, res: express.Response) {
 async function listAccounts (req: express.Request, res: express.Response) {
   const resultList = await AccountModel.listForApi(req.query.start, req.query.count, req.query.sort)
 
-  return res.json(getFormattedObjects(resultList.data, resultList.total))
+  return res.json(await getFormattedObjects(resultList.data, resultList.total))
 }
 
 async function listAccountChannels (req: express.Request, res: express.Response) {
@@ -170,7 +170,7 @@ async function listAccountChannels (req: express.Request, res: express.Response)
     search: req.query.search
   })
 
-  return res.json(getFormattedObjects(resultList.data, resultList.total))
+  return res.json(await getFormattedObjects(resultList.data, resultList.total))
 }
 
 async function listAccountChannelsSync (req: express.Request, res: express.Response) {
@@ -185,7 +185,7 @@ async function listAccountChannelsSync (req: express.Request, res: express.Respo
 
   const resultList = await VideoChannelSyncModel.listByAccountForAPI(options)
 
-  return res.json(getFormattedObjects(resultList.data, resultList.total))
+  return res.json(await getFormattedObjects(resultList.data, resultList.total))
 }
 
 async function listAccountPlaylists (req: express.Request, res: express.Response) {
@@ -220,7 +220,7 @@ async function listAccountPlaylists (req: express.Request, res: express.Response
       : undefined
   })
 
-  return res.json(getFormattedObjects(resultList.data, resultList.total))
+  return res.json(await getFormattedObjects(resultList.data, resultList.total))
 }
 
 async function listAccountVideos (req: express.Request, res: express.Response) {
@@ -254,7 +254,7 @@ async function listAccountVideos (req: express.Request, res: express.Response) {
     'filter:api.accounts.videos.list.result'
   )
 
-  return res.json(getFormattedObjects(resultList.data, resultList.total, guessAdditionalAttributesFromQuery(query)))
+  return res.json(await getFormattedObjects(resultList.data, resultList.total, guessAdditionalAttributesFromQuery(query)))
 }
 
 async function listAccountRatings (req: express.Request, res: express.Response) {
@@ -267,7 +267,7 @@ async function listAccountRatings (req: express.Request, res: express.Response) 
     sort: req.query.sort,
     type: req.query.rating
   })
-  return res.json(getFormattedObjects(resultList.data, resultList.total))
+  return res.json(await getFormattedObjects(resultList.data, resultList.total))
 }
 
 async function listAccountFollowers (req: express.Request, res: express.Response) {
@@ -285,5 +285,5 @@ async function listAccountFollowers (req: express.Request, res: express.Response
     state: 'accepted'
   })
 
-  return res.json(getFormattedObjects(resultList.data, resultList.total))
+  return res.json(await getFormattedObjects(resultList.data, resultList.total))
 }

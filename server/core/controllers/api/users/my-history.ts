@@ -50,7 +50,7 @@ async function listMyVideosHistory (req: express.Request, res: express.Response)
 
   const resultList = await UserVideoHistoryModel.listForApi(user, req.query.start, req.query.count, req.query.search)
 
-  return res.json(getFormattedObjects(resultList.data, resultList.total))
+  return res.json(await getFormattedObjects(resultList.data, resultList.total))
 }
 
 async function removeUserHistoryElement (req: express.Request, res: express.Response) {

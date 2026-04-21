@@ -649,7 +649,7 @@ export class VideoPlaylistModel extends SequelizeModel<VideoPlaylistModel> {
     return isOutdated(this, ACTIVITY_PUB.VIDEO_PLAYLIST_REFRESH_INTERVAL)
   }
 
-  toFormattedJSON (this: MVideoPlaylistFormattable): VideoPlaylist {
+  async toFormattedJSON (this: MVideoPlaylistFormattable): Promise<VideoPlaylist> {
     return {
       id: this.id,
       uuid: this.uuid,
@@ -668,7 +668,7 @@ export class VideoPlaylistModel extends SequelizeModel<VideoPlaylistModel> {
 
       thumbnailPath: this.getThumbnailStaticPath(),
       thumbnails: this.Thumbnail
-        ? [ this.Thumbnail.toFormattedJSON() ]
+        ? [ await this.Thumbnail.toFormattedJSON() ]
         : [],
 
       embedPath: this.getEmbedStaticPath(),

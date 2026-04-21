@@ -213,17 +213,17 @@ async function addVODPodcastItem (options: {
 }) {
   const { feed, video, captionsGroup } = options
 
-  const webVideos = video.getFormattedWebVideoFilesJSON(true)
-    .map(f => buildVODWebVideoFile(video, f))
+  const webVideoResults = await video.getFormattedWebVideoFilesJSON(true)
+  const webVideos = webVideoResults.map(f => buildVODWebVideoFile(video, f))
     .sort(sortObjectComparator('bitrate', 'asc'))
 
-  const streamingPlaylistFiles = buildVODStreamingPlaylistsIfMissingWebVideoFile(video)
+  const streamingPlaylistFiles = await buildVODStreamingPlaylistsIfMissingWebVideoFile(video)
 
   // Order matters here, the first media URI will be the "default"
   // So web videos are default if enabled
   const media = [ ...webVideos, ...streamingPlaylistFiles ]
 
-  const videoCaptions = buildVODCaptions(captionsGroup[video.id])
+  const videoCaptions = await buildVODCaptions(captionsGroup[video.id])
   const item = await generatePodcastItem({ video, liveItem: false, media })
 
   feed.addPodcastItem({ ...item, subTitle: videoCaptions })
@@ -246,7 +246,7 @@ async function addLivePodcastItem (options: {
       break
   }
 
-  const item = await generatePodcastItem({ video, liveItem: true, media: buildLiveStreamingPlaylists(video) })
+  const item = await generatePodcastItem({ video, liveItem: true, media: await buildLiveStreamingPlaylists(video) })
 
   feed.addPodcastLiveItem({ ...item, status, start: video.updatedAt.toISOString() })
 }
@@ -254,8 +254,9 @@ async function addLivePodcastItem (options: {
 // ---------------------------------------------------------------------------
 
 function buildVODWebVideoFile (video: MVideo, videoFile: VideoFile) {
+  const fileUrl = videoFile.fileUrl
   const sources = [
-    { uri: videoFile.fileUrl },
+    { uri: fileUrl },
     { uri: videoFile.torrentUrl, contentType: 'application/x-bittorrent' }
   ]
 
@@ -264,7 +265,7 @@ function buildVODWebVideoFile (video: MVideo, videoFile: VideoFile) {
   }
 
   return {
-    type: getAppleMimeType(extname(videoFile.fileUrl), videoFile.resolution.id === VideoResolution.H_NOVIDEO),
+    type: getAppleMimeType(extname(fileUrl), videoFile.resolution.id === VideoResolution.H_NOVIDEO),
     title: videoFile.resolution.label,
     length: videoFile.size,
     bitrate: Math.round(videoFile.size / video.duration * 8),
@@ -273,13 +274,13 @@ function buildVODWebVideoFile (video: MVideo, videoFile: VideoFile) {
   }
 }
 
-function buildVODStreamingPlaylistsIfMissingWebVideoFile (video: MVideoFullLight) {
+async function buildVODStreamingPlaylistsIfMissingWebVideoFile (video: MVideoFullLight) {
   const hls = video.getHLSPlaylist()
   if (!hls) return []
 
   const { separatedAudioFile } = video.getMaxQualityAudioAndVideoFiles()
 
-  return [
+  const items = await Promise.all([
     ...hls.VideoFiles
       .filter(videoFile => !video.VideoFiles.some(f => f.fps === videoFile.fps && f.resolution === videoFile.resolution))
       .sort(sortObjectComparator('resolution', 'asc'))
@@ -310,18 +311,20 @@ function buildVODStreamingPlaylistsIfMissingWebVideoFile (video: MVideoFullLight
         }
       }),
 
-    {
+    (async () => ({
       type: 'application/x-mpegURL',
       title: 'HLS',
       sources: [
-        { uri: hls.getMasterPlaylistUrl(video) }
+        { uri: await hls.getMasterPlaylistUrl(video) }
       ],
       language: video.language
-    }
-  ]
+    }))()
+  ])
+
+  return items
 }
 
-function buildLiveStreamingPlaylists (video: MVideoFullLight) {
+async function buildLiveStreamingPlaylists (video: MVideoFullLight) {
   const hls = video.getHLSPlaylist()
 
   return [
@@ -329,25 +332,26 @@ function buildLiveStreamingPlaylists (video: MVideoFullLight) {
       type: 'application/x-mpegURL',
       title: `HLS live stream`,
       sources: [
-        { uri: hls.getMasterPlaylistUrl(video) }
+        { uri: await hls.getMasterPlaylistUrl(video) }
       ],
       language: video.language
     }
   ]
 }
 
-function buildVODCaptions (videoCaptions: MVideoCaptionVideo[]) {
-  return videoCaptions.map(caption => {
+async function buildVODCaptions (videoCaptions: MVideoCaptionVideo[]) {
+  const results = await Promise.all(videoCaptions.map(async caption => {
     const type = MIMETYPES.VIDEO_CAPTIONS.EXT_MIMETYPE[extname(caption.filename)]
     if (!type) return null
 
     return {
-      url: caption.getLocalFileUrl(),
+      url: await caption.getLocalFileUrl(),
       language: caption.language,
       type,
       rel: 'captions'
     }
-  }).filter(c => c)
+  }))
+  return results.filter(c => c)
 }
 
 function categoryToItunes (category: number) {

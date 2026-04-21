@@ -270,9 +270,9 @@ export class AccountVideoRateModel extends SequelizeModel<AccountVideoRateModel>
 
   // ---------------------------------------------------------------------------
 
-  toFormattedJSON (this: MAccountVideoRateFormattable): AccountVideoRate {
+  async toFormattedJSON (this: MAccountVideoRateFormattable): Promise<AccountVideoRate> {
     return {
-      video: this.Video.toFormattedJSON(),
+      video: await this.Video.toFormattedJSON(),
       rating: this.type
     }
   }

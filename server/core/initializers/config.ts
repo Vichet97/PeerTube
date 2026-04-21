@@ -267,13 +267,22 @@ const CONFIG = {
     ENABLED: config.get<boolean>('object_storage.enabled'),
     CONCURRENCY: config.has('object_storage.concurrency') ? config.get<number>('object_storage.concurrency') : 5,
     UPLOAD_CONCURRENCY: config.has('object_storage.upload_concurrency') ? config.get<number>('object_storage.upload_concurrency') : 10,
-    MOVE_TO_FILE_SYSTEM_CONCURRENCY: config.has('object_storage.move_to_file_system_concurrency') ? config.get<number>('object_storage.move_to_file_system_concurrency') : 5,
+    MOVE_TO_FILE_SYSTEM_CONCURRENCY:
+      config.has('object_storage.move_to_file_system_concurrency')
+        ? config.get<number>('object_storage.move_to_file_system_concurrency')
+        : 5,
     KEEP_LOCAL_FILE_AFTER_MOVE: config.get<number>('object_storage.keep_local_file_after_move') * 60 * 1000,
+    MOVE_FILE_DELAY: config.has('object_storage.move_file_delay')
+      ? config.get<number>('object_storage.move_file_delay')
+      : 30000,
     MAX_UPLOAD_PART: bytes.parse(config.get<string>('object_storage.max_upload_part')),
     MAX_REQUEST_ATTEMPTS: config.get<number>('object_storage.max_request_attempts'),
     ENDPOINT: config.get<string>('object_storage.endpoint'),
     REGION: config.get<string>('object_storage.region'),
     FORCE_PATH_STYLE: config.get<boolean>('object_storage.force_path_style'),
+    USE_PRESIGNED_PUBLIC_URLS: config.get<boolean>('object_storage.use_presigned_public_urls'),
+    PRESIGNED_PUBLIC_URLS_EXPIRATION_HOURS: config.get<number>('object_storage.presigned_public_urls_expiration_hours'),
+    PRESIGNED_PROXY_BASE_PATH: config.get<string>('object_storage.public_presigned_base_path'),
     UPLOAD_ACL: {
       PUBLIC: config.get<string>('object_storage.upload_acl.public'),
       PRIVATE: config.get<string>('object_storage.upload_acl.private')

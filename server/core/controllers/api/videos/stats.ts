@@ -3,6 +3,7 @@ import {
   Job as JobModel,
   JobState,
   JobType,
+  MoveStoragePayload,
   ResultList,
   VideoStatsOverallQuery,
   VideoStatsTimeserieMetric,
@@ -10,7 +11,12 @@ import {
   VideoStatsUserAgentQuery
 } from '@peertube/peertube-models'
 import { Job } from 'bullmq'
+import { CONFIG } from '../../../initializers/config.js'
 import { LocalVideoViewerModel } from '@server/models/view/local-video-viewer.js'
+import { VideoModel } from '../../../models/video/video.js'
+import { VideoCaptionModel } from '../../../models/video/video-caption.js'
+import { VideoPathManager } from '../../../lib/video-path-manager.js'
+import { FileStorage } from '@peertube/peertube-models'
 import express from 'express'
 import {
   asyncMiddleware,
@@ -22,6 +28,7 @@ import {
   videoTimeseriesStatsValidator
 } from '../../../middlewares/index.js'
 import { JobQueue } from '../../../lib/job-queue/job-queue.js'
+import { isMoveVideoStoragePayload } from '@peertube/peertube-models'
 
 const statsRouter = express.Router()
 
@@ -186,8 +193,9 @@ async function retryRelatedJob (req: express.Request, res: express.Response) {
 
 async function formatJob (job: Job): Promise<JobModel> {
   const state = await job.getState()
+  const payload = job.data as MoveStoragePayload
 
-  return {
+  const formattedJob: JobModel = {
     id: job.id,
     state: state as JobState,
     type: job.queueName as JobType,
@@ -202,6 +210,72 @@ async function formatJob (job: Job): Promise<JobModel> {
     finishedOn: new Date(job.finishedOn),
     processedOn: new Date(job.processedOn)
   }
+
+  // Add source/destination info for move-to-object-storage jobs
+  if (job.queueName === 'move-to-object-storage' && isMoveVideoStoragePayload(payload)) {
+    const sourcePaths: string[] = []
+    const destinationPaths: string[] = []
+
+    // Load video with files to get file info
+    const video = await VideoModel.loadWithFiles(payload.videoUUID)
+    if (video) {
+      // Web videos on file system
+      for (const f of video.VideoFiles || []) {
+        if (f.storage === FileStorage.FILE_SYSTEM) {
+          sourcePaths.push(VideoPathManager.Instance.getFSVideoFileOutputPath(video, f))
+          destinationPaths.push(
+            `${CONFIG.OBJECT_STORAGE.ENDPOINT}/${CONFIG.OBJECT_STORAGE.WEB_VIDEOS.BUCKET_NAME}/` +
+            `${CONFIG.OBJECT_STORAGE.WEB_VIDEOS.PREFIX || ''}${f.filename}`
+          )
+        }
+      }
+
+      // HLS files
+      for (const playlist of video.VideoStreamingPlaylists || []) {
+        for (const f of playlist.VideoFiles || []) {
+          if (f.storage === FileStorage.FILE_SYSTEM) {
+            sourcePaths.push(VideoPathManager.Instance.getFSHLSOutputPath(video, f.filename))
+            destinationPaths.push(
+              `${CONFIG.OBJECT_STORAGE.ENDPOINT}/${CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS.BUCKET_NAME}/` +
+              `${CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS.PREFIX || ''}hls/${video.uuid}/${f.filename}`
+            )
+          }
+        }
+      }
+
+      // Thumbnails
+      for (const t of video.Thumbnails || []) {
+        if (t.storage === FileStorage.FILE_SYSTEM) {
+          sourcePaths.push(t.getFSPath())
+          destinationPaths.push(
+            `${CONFIG.OBJECT_STORAGE.ENDPOINT}/${CONFIG.OBJECT_STORAGE.THUMBNAILS.BUCKET_NAME}/` +
+            `${CONFIG.OBJECT_STORAGE.THUMBNAILS.PREFIX || ''}${t.filename}`
+          )
+        }
+      }
+
+      // Captions
+      const captions = await VideoCaptionModel.listVideoCaptions(video.id)
+      for (const c of captions) {
+        if (c.storage === FileStorage.FILE_SYSTEM) {
+          sourcePaths.push(c.getFSFilePath())
+          destinationPaths.push(
+            `${CONFIG.OBJECT_STORAGE.ENDPOINT}/${CONFIG.OBJECT_STORAGE.CAPTIONS.BUCKET_NAME}/` +
+            `${CONFIG.OBJECT_STORAGE.CAPTIONS.PREFIX || ''}${c.filename}`
+          )
+        }
+      }
+    }
+
+    // Add as metadata
+    formattedJob.data = {
+      ...payload,
+      _sourcePaths: sourcePaths,
+      _destinationPaths: destinationPaths
+    }
+  }
+
+  return formattedJob
 }
 
 function getJobError (job: Job) {

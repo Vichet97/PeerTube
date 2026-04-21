@@ -496,13 +496,17 @@ export class AbuseModel extends SequelizeModel<AbuseModel> {
     }
   }
 
-  buildBaseVideoAbuse (this: MAbuseUserFormattable): UserVideoAbuse {
+  async buildBaseVideoAbuse (this: MAbuseUserFormattable): Promise<UserVideoAbuse | null> {
     if (!this.VideoAbuse) return null
 
     const abuseModel = this.VideoAbuse
     const entity = abuseModel.Video || abuseModel.deletedVideo
 
     const video = abuseModel.Video
+
+    const thumbnails = video?.Thumbnails
+      ? await Promise.all(video.Thumbnails.map(t => t.toFormattedJSON()))
+      : []
 
     return {
       id: entity.id,
@@ -518,7 +522,7 @@ export class AbuseModel extends SequelizeModel<AbuseModel> {
       blacklisted: video?.isBlacklisted() || false,
 
       thumbnailPath: video?.getSmallestThumbnailStaticPath('16:9'),
-      thumbnails: video?.Thumbnails.map(t => t.toFormattedJSON()) || [],
+      thumbnails,
 
       channel: video?.VideoChannel.toFormattedJSON() || abuseModel.deletedVideo?.channel
     }
@@ -548,7 +552,7 @@ export class AbuseModel extends SequelizeModel<AbuseModel> {
     }
   }
 
-  toFormattedAdminJSON (this: MAbuseAdminFormattable): AdminAbuse {
+  async toFormattedAdminJSON (this: MAbuseAdminFormattable): Promise<AdminAbuse> {
     const countReportsForVideo = this.get('countReportsForVideo') as number
     const nthReportForVideo = this.get('nthReportForVideo') as number
 
@@ -557,7 +561,7 @@ export class AbuseModel extends SequelizeModel<AbuseModel> {
 
     const countMessages = this.get('countMessages') as number
 
-    const baseVideo = this.buildBaseVideoAbuse()
+    const baseVideo = await this.buildBaseVideoAbuse()
     const video: AdminVideoAbuse = baseVideo
       ? Object.assign(baseVideo, {
         countReports: countReportsForVideo,
@@ -584,10 +588,10 @@ export class AbuseModel extends SequelizeModel<AbuseModel> {
     })
   }
 
-  toFormattedUserJSON (this: MAbuseUserFormattable): UserAbuse {
+  async toFormattedUserJSON (this: MAbuseUserFormattable): Promise<UserAbuse> {
     const countMessages = this.get('countMessages') as number
 
-    const video = this.buildBaseVideoAbuse()
+    const video = await this.buildBaseVideoAbuse()
     const comment = this.buildBaseVideoCommentAbuse()
     const abuse = this.buildBaseAbuse(countMessages || 0)
 

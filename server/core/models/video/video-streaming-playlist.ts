@@ -288,8 +288,8 @@ export class VideoStreamingPlaylistModel extends SequelizeModel<VideoStreamingPl
     return doesExist({ sequelize: this.sequelize, query, bind: { videoUUID, storage } })
   }
 
-  assignP2PMediaLoaderInfoHashes (video: MVideo, files: { height: number }[]) {
-    const masterPlaylistUrl = this.getMasterPlaylistUrl(video)
+  async assignP2PMediaLoaderInfoHashes (video: MVideo, files: { height: number }[]) {
+    const masterPlaylistUrl = await this.getMasterPlaylistUrl(video)
 
     this.p2pMediaLoaderInfohashes = VideoStreamingPlaylistModel.buildP2PMediaLoaderInfoHashes(masterPlaylistUrl, files)
   }
@@ -315,7 +315,8 @@ export class VideoStreamingPlaylistModel extends SequelizeModel<VideoStreamingPl
 
     return buildObjectStoragePublicFileUrl({
       bucket: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS,
-      key: generateHLSObjectStorageKey(video, this.playlistFilename)
+      key: generateHLSObjectStorageKey(video, this.playlistFilename),
+      fileType: 'streaming-playlists'
     })
   }
 
@@ -342,7 +343,8 @@ export class VideoStreamingPlaylistModel extends SequelizeModel<VideoStreamingPl
 
     return buildObjectStoragePublicFileUrl({
       bucket: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS,
-      key: generateHLSObjectStorageKey(video, this.segmentsSha256Filename)
+      key: generateHLSObjectStorageKey(video, this.segmentsSha256Filename),
+      fileType: 'streaming-playlists'
     })
   }
 

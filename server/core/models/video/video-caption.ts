@@ -280,7 +280,7 @@ export class VideoCaptionModel extends SequelizeModel<VideoCaptionModel> {
 
   // ---------------------------------------------------------------------------
 
-  toFormattedJSON (this: MVideoCaptionFormattable): VideoCaption {
+  async toFormattedJSON (this: MVideoCaptionFormattable): Promise<VideoCaption> {
     return {
       language: {
         id: this.language,
@@ -293,14 +293,14 @@ export class VideoCaptionModel extends SequelizeModel<VideoCaptionModel> {
         ? null // On object storage
         : this.getFileStaticPath(),
 
-      fileUrl: this.getLocalFileUrl(),
-      m3u8Url: this.getM3U8Url(this.Video),
+      fileUrl: await this.getLocalFileUrl(),
+      m3u8Url: await this.getM3U8Url(this.Video),
 
       updatedAt: this.updatedAt.toISOString()
     }
   }
 
-  toActivityPubObject (this: MVideoCaptionLanguageUrl, video: MVideo): VideoCaptionObject {
+  async toActivityPubObject (this: MVideoCaptionLanguageUrl, video: MVideo): Promise<VideoCaptionObject> {
     return {
       identifier: this.language,
       name: VideoCaptionModel.getLanguageLabel(this.language),
@@ -310,12 +310,12 @@ export class VideoCaptionModel extends SequelizeModel<VideoCaptionModel> {
         {
           type: 'Link',
           mediaType: 'text/vtt',
-          href: this.getLocalFileUrl()
+          href: await this.getLocalFileUrl()
         },
         {
           type: 'Link',
           mediaType: 'application/x-mpegURL',
-          href: this.getM3U8Url(video)
+          href: await this.getM3U8Url(video)
         }
       ]
     }
@@ -391,7 +391,7 @@ export class VideoCaptionModel extends SequelizeModel<VideoCaptionModel> {
 
   // ---------------------------------------------------------------------------
 
-  getLocalFileUrl (this: MVideoCaptionUrl) {
+  async getLocalFileUrl (this: MVideoCaptionUrl) {
     if (this.isLocal() && this.storage === FileStorage.OBJECT_STORAGE) {
       const video = (this as MVideoCaptionUrl & { Video?: MVideoPrivacy }).Video
 
@@ -404,7 +404,8 @@ export class VideoCaptionModel extends SequelizeModel<VideoCaptionModel> {
 
       return buildObjectStoragePublicFileUrl({
         bucket: CONFIG.OBJECT_STORAGE.CAPTIONS,
-        key: generateCaptionObjectStorageKey(this.filename)
+        key: generateCaptionObjectStorageKey(this.filename),
+        fileType: 'captions'
       })
     }
 
@@ -414,7 +415,7 @@ export class VideoCaptionModel extends SequelizeModel<VideoCaptionModel> {
 
   // ---------------------------------------------------------------------------
 
-  getM3U8Url (this: MVideoCaptionUrl, video: MVideoOwned & MVideoPrivacy) {
+  async getM3U8Url (this: MVideoCaptionUrl, video: MVideoOwned & MVideoPrivacy) {
     if (!this.m3u8Filename) return null
     if (!this.isLocal()) return this.m3u8Url
 
@@ -428,7 +429,8 @@ export class VideoCaptionModel extends SequelizeModel<VideoCaptionModel> {
 
       return buildObjectStoragePublicFileUrl({
         bucket: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS, // M3U8 caption file is in the streaming playlists bucket
-        key: generateHLSObjectStorageKey(video, this.m3u8Filename)
+        key: generateHLSObjectStorageKey(video, this.m3u8Filename),
+        fileType: 'streaming-playlists'
       })
     }
 

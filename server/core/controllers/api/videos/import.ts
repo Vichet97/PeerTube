@@ -171,9 +171,11 @@ async function handleTorrentImport (req: express.Request, res: express.Response,
 
   await JobQueue.Instance.createJob({ type: 'video-import', payload })
 
-  auditLogger.create(getAuditIdFromRes(res), new VideoImportAuditView(videoImport.toFormattedJSON()))
+  const videoImportFormatted = await videoImport.toFormattedJSON()
 
-  return res.json(videoImport.toFormattedJSON()).end()
+  auditLogger.create(getAuditIdFromRes(res), new VideoImportAuditView(videoImportFormatted))
+
+  return res.json(videoImportFormatted).end()
 }
 
 function statusFromYtDlImportError (err: YoutubeDlImportError): HttpStatusCodeType {
@@ -207,9 +209,11 @@ async function handleYoutubeDlImport (req: express.Request, res: express.Respons
     })
     await JobQueue.Instance.createJob(job)
 
-    auditLogger.create(getAuditIdFromRes(res), new VideoImportAuditView(videoImport.toFormattedJSON()))
+    const videoImportFormatted = await videoImport.toFormattedJSON()
 
-    return res.json(videoImport.toFormattedJSON()).end()
+    auditLogger.create(getAuditIdFromRes(res), new VideoImportAuditView(videoImportFormatted))
+
+    return res.json(videoImportFormatted).end()
   } catch (err) {
     logger.error('An error occurred while importing the video %s. ', targetUrl, { err })
 

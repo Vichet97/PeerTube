@@ -30,7 +30,7 @@ import { MStreamingPlaylistFiles, MUserId, MVideo, MVideoAP, MVideoFile } from '
 import { sortByResolutionDesc } from './shared/index.js'
 import { getCategoryLabel, getLanguageLabel, getLicenceLabel } from './video-api-format.js'
 
-export function videoModelToActivityPubObject (video: MVideoAP): VideoObject {
+export async function videoModelToActivityPubObject (video: MVideoAP): Promise<VideoObject> {
   const language = video.language
     ? { identifier: video.language, name: getLanguageLabel(video.language) }
     : undefined
@@ -42,6 +42,11 @@ export function videoModelToActivityPubObject (video: MVideoAP): VideoObject {
   const licence = video.licence
     ? { identifier: video.licence + '', name: getLicenceLabel(video.licence) }
     : undefined
+
+  const [ videoFileUrls, streamingPlaylistUrls ] = await Promise.all([
+    buildVideoFileUrls({ video, files: video.VideoFiles }),
+    buildStreamingPlaylistUrls(video)
+  ])
 
   const url: ActivityUrlObject[] = [
     // HTML url should be the first element in the array so Mastodon correctly displays the embed
@@ -57,9 +62,9 @@ export function videoModelToActivityPubObject (video: MVideoAP): VideoObject {
       href: video.url
     } as ActivityUrlObject,
 
-    ...buildVideoFileUrls({ video, files: video.VideoFiles }),
+    ...videoFileUrls,
 
-    ...buildStreamingPlaylistUrls(video),
+    ...streamingPlaylistUrls,
 
     ...buildTrackerUrls(video)
   ]
@@ -109,11 +114,11 @@ export function videoModelToActivityPubObject (video: MVideoAP): VideoObject {
     content: video.description,
     support: video.support,
 
-    subtitleLanguage: buildSubtitleLanguage(video),
+    subtitleLanguage: await buildSubtitleLanguage(video),
 
-    icon: buildIcon(video),
+    icon: await buildIcon(video),
 
-    preview: buildPreviewAPAttribute(video),
+    preview: await buildPreviewAPAttribute(video),
 
     aspectRatio: video.aspectRatio,
 
@@ -171,7 +176,7 @@ function buildLiveAPAttributes (video: MVideoAP) {
   }
 }
 
-function buildPreviewAPAttribute (video: MVideoAP): ActivityPubStoryboard[] {
+async function buildPreviewAPAttribute (video: MVideoAP): Promise<ActivityPubStoryboard[]> {
   if (!video.Storyboard) return undefined
 
   const storyboard = video.Storyboard
@@ -184,7 +189,7 @@ function buildPreviewAPAttribute (video: MVideoAP): ActivityPubStoryboard[] {
         {
           mediaType: 'image/jpeg',
 
-          href: storyboard.getLocalFileUrl(),
+          href: await storyboard.getLocalFileUrl(),
 
           width: storyboard.totalWidth,
           height: storyboard.totalHeight,
@@ -198,11 +203,11 @@ function buildPreviewAPAttribute (video: MVideoAP): ActivityPubStoryboard[] {
   ]
 }
 
-function buildVideoFileUrls (options: {
+async function buildVideoFileUrls (options: {
   video: MVideo
   files: MVideoFile[]
   user?: MUserId
-}): ActivityUrlObject[] {
+}): Promise<ActivityUrlObject[]> {
   const { video, files } = options
 
   if (!isArray(files)) return []
@@ -215,7 +220,7 @@ function buildVideoFileUrls (options: {
     .sort(sortByResolutionDesc)
 
   for (const file of sortedFiles) {
-    const fileAP = file.toActivityPubObject(video)
+    const fileAP = await file.toActivityPubObject(video)
     urls.push(fileAP)
 
     urls.push({
@@ -241,7 +246,7 @@ function buildVideoFileUrls (options: {
       urls.push({
         type: 'Link',
         mediaType: 'application/x-bittorrent;x-scheme-handler/magnet' as 'application/x-bittorrent;x-scheme-handler/magnet',
-        href: generateMagnetUri(video, file, trackerUrls),
+        href: await generateMagnetUri(video, file, trackerUrls),
         height: file.height || file.resolution,
         width: file.width,
         fps: file.fps
@@ -254,19 +259,22 @@ function buildVideoFileUrls (options: {
 
 // ---------------------------------------------------------------------------
 
-function buildStreamingPlaylistUrls (video: MVideoAP): ActivityPlaylistUrlObject[] {
+async function buildStreamingPlaylistUrls (video: MVideoAP): Promise<ActivityPlaylistUrlObject[]> {
   if (!isArray(video.VideoStreamingPlaylists)) return []
 
-  return video.VideoStreamingPlaylists
-    .map(playlist => ({
-      type: 'Link',
-      mediaType: 'application/x-mpegURL' as 'application/x-mpegURL',
-      href: playlist.getMasterPlaylistUrl(video),
-      tag: buildStreamingPlaylistTags(video, playlist)
-    }))
+  const results = await Promise.all(video.VideoStreamingPlaylists.map(async playlist => ({
+    type: 'Link' as const,
+    mediaType: 'application/x-mpegURL' as 'application/x-mpegURL',
+    href: await playlist.getMasterPlaylistUrl(video),
+    tag: await buildStreamingPlaylistTags(video, playlist)
+  })))
+
+  return results
 }
 
-function buildStreamingPlaylistTags (video: MVideoAP, playlist: MStreamingPlaylistFiles) {
+async function buildStreamingPlaylistTags (video: MVideoAP, playlist: MStreamingPlaylistFiles) {
+  const urls = await buildVideoFileUrls({ video, files: playlist.VideoFiles })
+
   return [
     ...playlist.p2pMediaLoaderInfohashes.map(i => ({ type: 'Infohash' as 'Infohash', name: i })),
 
@@ -277,7 +285,7 @@ function buildStreamingPlaylistTags (video: MVideoAP, playlist: MStreamingPlayli
       href: playlist.getSha256SegmentsUrl(video)
     },
 
-    ...buildVideoFileUrls({ video, files: playlist.VideoFiles })
+    ...urls
   ] as ActivityTagObject[]
 }
 
@@ -323,15 +331,17 @@ function buildTags (video: MVideoAP): (ActivitySensitiveTagObject | ActivityHash
   ]
 }
 
-function buildIcon (video: MVideoAP): ActivityIconObject[] {
-  return video.Thumbnails
-    .filter(i => !!i)
-    .map(i => i.toActivityPubObject())
+async function buildIcon (video: MVideoAP): Promise<ActivityIconObject[]> {
+  const thumbnailResults = await Promise.all(
+    video.Thumbnails
+      .filter(i => !!i)
+      .map(i => i.toActivityPubObject())
+  )
+  return thumbnailResults
 }
 
-function buildSubtitleLanguage (video: MVideoAP) {
+async function buildSubtitleLanguage (video: MVideoAP) {
   if (!isArray(video.VideoCaptions)) return []
 
-  return video.VideoCaptions
-    .map(caption => caption.toActivityPubObject(video))
+  return Promise.all(video.VideoCaptions.map(caption => caption.toActivityPubObject(video)))
 }

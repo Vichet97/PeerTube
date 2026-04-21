@@ -64,7 +64,7 @@ export {
 
 async function updateVideo (req: express.Request, res: express.Response) {
   const videoFromReq = res.locals.videoAll
-  const oldVideoAuditView = new VideoAuditView(videoFromReq.toFormattedDetailsJSON())
+  const oldVideoAuditView = new VideoAuditView(await videoFromReq.toFormattedDetailsJSON())
   const body: VideoUpdate = req.body
   const user = res.locals.oauth.token.User
 
@@ -209,7 +209,7 @@ async function updateVideo (req: express.Request, res: express.Response) {
 
       auditLogger.update(
         getAuditIdFromRes(res),
-        new VideoAuditView(videoInstanceUpdated.toFormattedDetailsJSON()),
+        new VideoAuditView(await videoInstanceUpdated.toFormattedDetailsJSON()),
         oldVideoAuditView
       )
       logger.info('Video with name %s and uuid %s updated.', video.name, video.uuid, lTags(video.uuid))

@@ -5,7 +5,7 @@ import { logger } from '@server/helpers/logger.js'
 import { buildRequestError, doRequestAndSaveToFile, generateRequestStream } from '@server/helpers/requests.js'
 import { REQUEST_TIMEOUTS } from '@server/initializers/constants.js'
 import { isWebVideoFile, MVideoFile, MVideoThumbnail } from '@server/types/models/index.js'
-import { remove } from 'fs-extra/esm'
+import { pathExists, remove } from 'fs-extra/esm'
 import { Readable, Writable } from 'stream'
 import { pipeline } from 'stream/promises'
 import { lTags } from './object-storage/shared/index.js'
@@ -263,6 +263,12 @@ export class VideoDownload {
     VideoDownload.totalDownloads--
 
     for (const destination of this.tmpDestinations) {
+      // Skip if file doesn't exist (may have been already removed or never created)
+      if (!await pathExists(destination)) {
+        logger.debug('Skipping cleanup of non-existent file %s.', destination)
+        continue
+      }
+
       await remove(destination)
         .catch(err => logger.error('Cannot remove tmp destination', { err, destination, ...lTags(this.video.uuid) }))
     }

@@ -22,8 +22,8 @@ interface FormattableToJSON<U, V> {
   toFormattedJSON (args?: U): V
 }
 
-function getFormattedObjects<U, V, T extends FormattableToJSON<U, V>> (objects: T[], objectsTotal: number, formattedArg?: U) {
-  const formattedObjects = objects.map(o => o.toFormattedJSON(formattedArg))
+async function getFormattedObjects<U, V, T extends FormattableToJSON<U, V>> (objects: T[], objectsTotal: number, formattedArg?: U) {
+  const formattedObjects = await Promise.all(objects.map(o => o.toFormattedJSON(formattedArg)))
 
   return {
     total: objectsTotal,

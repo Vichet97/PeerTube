@@ -142,7 +142,7 @@ export class StoryboardModel extends SequelizeModel<StoryboardModel> {
 
   // ---------------------------------------------------------------------------
 
-  getLocalFileUrl () {
+  async getLocalFileUrl () {
     if (this.isLocal() && this.storage === FileStorage.OBJECT_STORAGE) {
       if (
         this.Video?.hasPrivateStaticPath() &&
@@ -153,7 +153,8 @@ export class StoryboardModel extends SequelizeModel<StoryboardModel> {
 
       return buildObjectStoragePublicFileUrl({
         bucket: CONFIG.OBJECT_STORAGE.STORYBOARDS,
-        key: generateStoryboardObjectStorageKey(this.filename)
+        key: generateStoryboardObjectStorageKey(this.filename),
+        fileType: 'storyboards'
       })
     }
 
@@ -191,13 +192,13 @@ export class StoryboardModel extends SequelizeModel<StoryboardModel> {
     return remove(path)
   }
 
-  toFormattedJSON (this: MStoryboardVideo): Storyboard {
+  async toFormattedJSON (this: MStoryboardVideo): Promise<Storyboard> {
     const storyboardPath = this.isLocal() && this.storage === FileStorage.OBJECT_STORAGE
-      ? this.getLocalFileUrl()
+      ? await this.getLocalFileUrl()
       : this.getFileStaticPath()
 
     return {
-      fileUrl: this.getLocalFileUrl(),
+      fileUrl: await this.getLocalFileUrl(),
       storyboardPath,
 
       totalHeight: this.totalHeight,

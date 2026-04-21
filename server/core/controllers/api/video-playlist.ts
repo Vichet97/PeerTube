@@ -164,15 +164,15 @@ async function listVideoPlaylists (req: express.Request, res: express.Response) 
     type: req.query.playlistType
   })
 
-  return res.json(getFormattedObjects(resultList.data, resultList.total))
+  return res.json(await getFormattedObjects(resultList.data, resultList.total))
 }
 
-function getVideoPlaylist (req: express.Request, res: express.Response) {
+async function getVideoPlaylist (req: express.Request, res: express.Response) {
   const videoPlaylist = res.locals.videoPlaylistSummary
 
   scheduleRefreshIfNeeded(videoPlaylist)
 
-  return res.json(videoPlaylist.toFormattedJSON())
+  return res.json(await videoPlaylist.toFormattedJSON())
 }
 
 async function createVideoPlaylist (req: express.Request, res: express.Response) {
@@ -607,7 +607,7 @@ async function listVideosOfPlaylist (req: express.Request, res: express.Response
   )
 
   const options = { accountId: user?.Account?.id }
-  return res.json(getFormattedObjects(resultList.data, resultList.total, options))
+  return res.json(await getFormattedObjects(resultList.data, resultList.total, options))
 }
 
 async function regeneratePlaylistThumbnail (videoPlaylist: MVideoPlaylistThumbnail) {

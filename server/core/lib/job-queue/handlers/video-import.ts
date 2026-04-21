@@ -376,14 +376,21 @@ async function afterImportSuccess (options: {
 
   if (video.state === VideoState.TO_MOVE_TO_EXTERNAL_STORAGE) {
     postImportTasks.push(
-      buildMoveVideoJob({
-        type: 'move-to-object-storage',
-        video,
-        moveVideoState: {
-          isNewVideo: true,
-          previousVideoState: VideoState.TO_IMPORT
+      (async () => {
+        const job = await buildMoveVideoJob({
+          type: 'move-to-object-storage',
+          video,
+          moveVideoState: {
+            isNewVideo: true,
+            previousVideoState: VideoState.TO_IMPORT
+          }
+        })
+        if (job) {
+          await JobQueue.Instance.createJob(job)
+        } else {
+          logger.info(`[VIDEO_IMPORT] Move job skipped (already pending/active) for video ${video.uuid}`)
         }
-      }).then(job => JobQueue.Instance.createJob(job))
+      })()
     )
 
     await Promise.all(postImportTasks)

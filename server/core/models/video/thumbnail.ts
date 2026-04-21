@@ -186,7 +186,7 @@ export class ThumbnailModel extends SequelizeModel<ThumbnailModel> {
     return remove(path)
   }
 
-  getLocalFileUrl () {
+  async getLocalFileUrl () {
     if (this.isLocal() && this.storage === FileStorage.OBJECT_STORAGE) {
       if (
         this.Video?.hasPrivateStaticPath() &&
@@ -197,7 +197,8 @@ export class ThumbnailModel extends SequelizeModel<ThumbnailModel> {
 
       return buildObjectStoragePublicFileUrl({
         bucket: CONFIG.OBJECT_STORAGE.THUMBNAILS,
-        key: generateThumbnailObjectStorageKey(this.filename)
+        key: generateThumbnailObjectStorageKey(this.filename),
+        fileType: 'thumbnails'
       })
     }
 
@@ -215,19 +216,19 @@ export class ThumbnailModel extends SequelizeModel<ThumbnailModel> {
 
   // ---------------------------------------------------------------------------
 
-  toFormattedJSON (): Thumbnail {
+  async toFormattedJSON (): Promise<Thumbnail> {
     return {
       height: this.height,
       width: this.width,
       aspectRatio: this.aspectRatio,
-      fileUrl: this.getLocalFileUrl()
+      fileUrl: await this.getLocalFileUrl()
     }
   }
 
-  toActivityPubObject (this: MThumbnail): ActivityIconObject {
+  async toActivityPubObject (this: MThumbnail): Promise<ActivityIconObject> {
     return {
       type: 'Image',
-      url: this.getLocalFileUrl(),
+      url: await this.getLocalFileUrl(),
       mediaType: MIMETYPES.IMAGE.EXT_MIMETYPE[extname(this.filename)],
       width: this.width,
       height: this.height

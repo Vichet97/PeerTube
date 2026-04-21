@@ -1,0 +1,624 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1776582771071,
+  "projectRoot": "/Volumes/SamsungT7/MacOS/Users/hengsarathvichet/Desktop/PeerTube",
+  "techStack": {
+    "languages": [
+      {
+        "name": "JavaScript/TypeScript",
+        "version": ">=20.x",
+        "confidence": "high",
+        "markers": [
+          "package.json"
+        ]
+      }
+    ],
+    "frameworks": [
+      {
+        "name": "express",
+        "version": "4.22.1",
+        "category": "backend"
+      },
+      {
+        "name": "mocha",
+        "version": "11.7.5",
+        "category": "testing"
+      },
+      {
+        "name": "rollup",
+        "version": "4.59.0",
+        "category": "build"
+      }
+    ],
+    "packageManager": "pnpm",
+    "runtime": "Node.js 20.x"
+  },
+  "build": {
+    "buildCommand": "pnpm build",
+    "testCommand": "pnpm test",
+    "lintCommand": "pnpm lint",
+    "devCommand": "pnpm dev",
+    "scripts": {
+      "install-node-dependencies": "pnpm install --frozen-lockfile",
+      "benchmark-server": "tsx --conditions=peertube:tsx ./scripts/benchmark.ts",
+      "benchmark-transcription": "tsx --conditions=peertube:tsx --tsconfig ./packages/transcription/tsconfig.json ./packages/transcription/src/benchmark.ts",
+      "build:client": "bash ./scripts/build/client.sh",
+      "build:embed": "bash ./scripts/build/embed.sh",
+      "build:peertube-cli": "bash ./scripts/build/peertube-cli.sh",
+      "build:peertube-runner": "bash ./scripts/build/peertube-runner.sh",
+      "build:server": "bash ./scripts/build/server.sh",
+      "build:tests": "bash ./scripts/build/tests.sh",
+      "build": "bash ./scripts/build/index.sh",
+      "ci": "bash ./scripts/ci.sh",
+      "clean:client": "bash ./scripts/clean/client/index.sh",
+      "clean:server:test": "bash ./scripts/clean/server/test.sh",
+      "client-report": "bash ./scripts/client-report.sh",
+      "client:build-stats": "tsx --conditions=peertube:tsx ./scripts/client-build-stats.ts",
+      "commander": "commander",
+      "concurrently": "concurrently",
+      "create-generate-storyboard-job": "node ./dist/scripts/create-generate-storyboard-job.js",
+      "create-import-video-file-job": "node ./dist/scripts/create-import-video-file-job.js",
+      "create-move-video-storage-job": "node ./dist/scripts/create-move-video-storage-job.js",
+      "dev:client": "bash ./scripts/dev/client.sh",
+      "dev:embed": "bash ./scripts/dev/embed.sh",
+      "dev:peertube-cli": "bash ./scripts/dev/peertube-cli.sh",
+      "dev:peertube-runner": "bash ./scripts/dev/peertube-runner.sh",
+      "dev:server": "bash ./scripts/dev/server.sh",
+      "dev": "bash ./scripts/dev/index.sh",
+      "e2e:browserstack": "bash ./scripts/e2e/browserstack.sh",
+      "e2e:local": "bash ./scripts/e2e/local.sh",
+      "eslint": "eslint",
+      "generate-cli-doc": "bash ./scripts/generate-cli-doc.sh",
+      "generate-code-contributors": "tsx --conditions=peertube:tsx ./scripts/generate-code-contributors.ts",
+      "generate-types-package": "tsx --conditions=peertube:tsx ./packages/types-generator/generate-package.ts",
+      "house-keeping": "LOGGER_LEVEL=warn node ./dist/scripts/house-keeping.js",
+      "i18n:create-custom-files": "tsx --tsconfig ./scripts/tsconfig.json --conditions=peertube:tsx ./scripts/i18n/create-custom-files.ts",
+      "i18n:update": "bash ./scripts/i18n/update.sh",
+      "lint": "npm run ci -- lint",
+      "mocha": "mocha",
+      "ng": "ng",
+      "nightly": "bash ./scripts/nightly.sh",
+      "openapi-clients": "bash ./scripts/openapi-clients.sh",
+      "parse-log": "node ./dist/scripts/parse-log.js",
+      "plugin:install": "node ./dist/scripts/plugin/install.js",
+      "plugin:uninstall": "node ./dist/scripts/plugin/uninstall.js",
+      "prune-storage": "LOGGER_LEVEL=warn node ./dist/scripts/prune-storage.js",
+      "regenerate-thumbnails": "node ./dist/scripts/regenerate-thumbnails.js",
+      "release-embed-api": "bash ./scripts/release-embed-api.sh",
+      "release": "bash ./scripts/release.sh",
+      "reset-password": "node ./dist/scripts/reset-password.js",
+      "resolve-tspaths:server-lib": "npm run resolve-tspaths -- --project server/tsconfig.lib.json --src server --out server/dist",
+      "resolve-tspaths:server": "npm run resolve-tspaths -- --project server/tsconfig.json --src server --out dist",
+      "resolve-tspaths:tests": "npm run resolve-tspaths -- --project packages/tests/tsconfig.json --src packages/tests/src --out packages/tests/dist",
+      "resolve-tspaths": "resolve-tspaths",
+      "simulate-many-viewers": "tsx --conditions=peertube:tsx ./scripts/simulate-many-viewers.ts",
+      "start:server": "node dist/server --no-client",
+      "start": "node dist/server",
+      "start:pm2": "pm2 start ecosystem.config.cjs --only peertube",
+      "restart:pm2": "pm2 restart ecosystem.config.cjs --only peertube",
+      "swagger-cli": "swagger-cli",
+      "test": "bash ./scripts/test.sh",
+      "tsc": "tsc",
+      "tsx": "tsx",
+      "update-host": "node ./dist/scripts/update-host.js"
+    }
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": true,
+    "workspaces": [],
+    "mainDirectories": [
+      "docs",
+      "scripts"
+    ],
+    "gitBranches": {
+      "defaultBranch": "develop",
+      "branchingStrategy": null
+    }
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "apps": {
+      "path": "apps",
+      "purpose": null,
+      "fileCount": 1,
+      "lastAccessed": 1776582771048,
+      "keyFiles": []
+    },
+    "client": {
+      "path": "client",
+      "purpose": null,
+      "fileCount": 11,
+      "lastAccessed": 1776582771048,
+      "keyFiles": [
+        "angular.json",
+        "eslint.config.mjs",
+        "package.json",
+        "proxy.config.json",
+        "tsconfig.json"
+      ]
+    },
+    "config": {
+      "path": "config",
+      "purpose": "Configuration files",
+      "fileCount": 14,
+      "lastAccessed": 1776582771049,
+      "keyFiles": [
+        "default.yaml",
+        "dev-1.yaml",
+        "dev.yaml",
+        "local-dev.json",
+        "local.json"
+      ]
+    },
+    "dist": {
+      "path": "dist",
+      "purpose": "Distribution/build output",
+      "fileCount": 5,
+      "lastAccessed": 1776582771049,
+      "keyFiles": [
+        "server.d.ts",
+        "server.d.ts.map",
+        "server.js",
+        "server.js.map"
+      ]
+    },
+    "docs": {
+      "path": "docs",
+      "purpose": "Documentation",
+      "fileCount": 0,
+      "lastAccessed": 1776582771049,
+      "keyFiles": []
+    },
+    "packages": {
+      "path": "packages",
+      "purpose": null,
+      "fileCount": 1,
+      "lastAccessed": 1776582771050,
+      "keyFiles": []
+    },
+    "pnpm-patches": {
+      "path": "pnpm-patches",
+      "purpose": null,
+      "fileCount": 4,
+      "lastAccessed": 1776582771051,
+      "keyFiles": [
+        "@types__markdown-it.patch",
+        "tinykeys.patch",
+        "video.js.patch",
+        "webfinger.js.patch"
+      ]
+    },
+    "scripts": {
+      "path": "scripts",
+      "purpose": "Build/utility scripts",
+      "fileCount": 21,
+      "lastAccessed": 1776582771054,
+      "keyFiles": [
+        "benchmark.ts",
+        "ci.sh",
+        "client-build-stats.ts",
+        "client-report.sh",
+        "diagnose-move-jobs.sh"
+      ]
+    },
+    "server": {
+      "path": "server",
+      "purpose": null,
+      "fileCount": 7,
+      "lastAccessed": 1776582771056,
+      "keyFiles": [
+        "package.json",
+        "server.ts",
+        "tsconfig.json",
+        "tsconfig.lib.json",
+        "tsconfig.types.json"
+      ]
+    },
+    "storage": {
+      "path": "storage",
+      "purpose": null,
+      "fileCount": 1,
+      "lastAccessed": 1776582771058,
+      "keyFiles": []
+    },
+    "support": {
+      "path": "support",
+      "purpose": null,
+      "fileCount": 1,
+      "lastAccessed": 1776582771058,
+      "keyFiles": []
+    },
+    "client/dist": {
+      "path": "client/dist",
+      "purpose": "Distribution/build output",
+      "fileCount": 0,
+      "lastAccessed": 1776582771059,
+      "keyFiles": []
+    },
+    "dist/scripts": {
+      "path": "dist/scripts",
+      "purpose": "Build/utility scripts",
+      "fileCount": 41,
+      "lastAccessed": 1776582771066,
+      "keyFiles": [
+        "create-generate-storyboard-job.d.ts",
+        "create-generate-storyboard-job.d.ts.map",
+        "create-generate-storyboard-job.js"
+      ]
+    },
+    "packages/models": {
+      "path": "packages/models",
+      "purpose": "Data models",
+      "fileCount": 3,
+      "lastAccessed": 1776582771067,
+      "keyFiles": [
+        "package.json",
+        "tsconfig.json",
+        "tsconfig.types.json"
+      ]
+    },
+    "packages/tests": {
+      "path": "packages/tests",
+      "purpose": "Test files",
+      "fileCount": 4,
+      "lastAccessed": 1776582771068,
+      "keyFiles": [
+        "package.json",
+        "requirements.txt",
+        "tsconfig.json"
+      ]
+    },
+    "scripts/build": {
+      "path": "scripts/build",
+      "purpose": "Build output",
+      "fileCount": 7,
+      "lastAccessed": 1776582771069,
+      "keyFiles": [
+        "client.sh",
+        "embed.sh",
+        "index.sh"
+      ]
+    },
+    "server/dist": {
+      "path": "server/dist",
+      "purpose": "Distribution/build output",
+      "fileCount": 5,
+      "lastAccessed": 1776582771070,
+      "keyFiles": [
+        "server.d.ts",
+        "server.d.ts.map",
+        "server.js"
+      ]
+    },
+    "server/scripts": {
+      "path": "server/scripts",
+      "purpose": "Build/utility scripts",
+      "fileCount": 11,
+      "lastAccessed": 1776582771071,
+      "keyFiles": [
+        "create-generate-storyboard-job.ts",
+        "create-generate-transcription-job.ts",
+        "create-import-video-file-job.ts"
+      ]
+    },
+    "storage/bin": {
+      "path": "storage/bin",
+      "purpose": "Executable scripts",
+      "fileCount": 3,
+      "lastAccessed": 1776582771071,
+      "keyFiles": [
+        "dbip-city-lite-latest.mmdb",
+        "dbip-country-lite-latest.mmdb"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "packages/tests/src/cli/create-move-video-storage-job.ts",
+      "accessCount": 68,
+      "lastAccessed": 1776604049104,
+      "type": "file"
+    },
+    {
+      "path": "server/core/lib/move-storage/move-to-object-storage.ts",
+      "accessCount": 66,
+      "lastAccessed": 1776668575102,
+      "type": "file"
+    },
+    {
+      "path": "server/core/lib/hls.ts",
+      "accessCount": 40,
+      "lastAccessed": 1776653656654,
+      "type": "file"
+    },
+    {
+      "path": "",
+      "accessCount": 40,
+      "lastAccessed": 1776653717935,
+      "type": "directory"
+    },
+    {
+      "path": "server/core",
+      "accessCount": 27,
+      "lastAccessed": 1776658916766,
+      "type": "directory"
+    },
+    {
+      "path": "packages/tests/src",
+      "accessCount": 16,
+      "lastAccessed": 1776611454284,
+      "type": "directory"
+    },
+    {
+      "path": "server/core/lib/move-storage/shared/move-video.ts",
+      "accessCount": 15,
+      "lastAccessed": 1776668417711,
+      "type": "file"
+    },
+    {
+      "path": "server/core/models/video/video-file.ts",
+      "accessCount": 14,
+      "lastAccessed": 1776653688115,
+      "type": "directory"
+    },
+    {
+      "path": "server/core/lib/job-queue/handlers/move-to-object-storage.ts",
+      "accessCount": 13,
+      "lastAccessed": 1776668417499,
+      "type": "file"
+    },
+    {
+      "path": "server/core/lib/job-queue/handlers/video-transcoding.ts",
+      "accessCount": 11,
+      "lastAccessed": 1776655179860,
+      "type": "directory"
+    },
+    {
+      "path": "server/core/models/video/video.ts",
+      "accessCount": 10,
+      "lastAccessed": 1776615859768,
+      "type": "directory"
+    },
+    {
+      "path": "server/core/lib/job-queue/job-queue.ts",
+      "accessCount": 10,
+      "lastAccessed": 1776658916876,
+      "type": "file"
+    },
+    {
+      "path": "server",
+      "accessCount": 9,
+      "lastAccessed": 1776615820146,
+      "type": "directory"
+    },
+    {
+      "path": "server/core/models/video/video-streaming-playlist.ts",
+      "accessCount": 9,
+      "lastAccessed": 1776653688270,
+      "type": "file"
+    },
+    {
+      "path": "server/core/lib",
+      "accessCount": 9,
+      "lastAccessed": 1776653870612,
+      "type": "directory"
+    },
+    {
+      "path": "server/core/lib/transcoding/ended-transcoding.ts",
+      "accessCount": 9,
+      "lastAccessed": 1776667384879,
+      "type": "file"
+    },
+    {
+      "path": "server/core/lib/video-jobs.ts",
+      "accessCount": 8,
+      "lastAccessed": 1776667498982,
+      "type": "file"
+    },
+    {
+      "path": "server/core/lib/video-state.ts",
+      "accessCount": 7,
+      "lastAccessed": 1776653706055,
+      "type": "file"
+    },
+    {
+      "path": "server/core/lib/video-path-manager.ts",
+      "accessCount": 7,
+      "lastAccessed": 1776654957102,
+      "type": "file"
+    },
+    {
+      "path": "packages/tests/src/shared/streaming-playlists.ts",
+      "accessCount": 5,
+      "lastAccessed": 1776608449811,
+      "type": "file"
+    },
+    {
+      "path": "server/core/lib/transcoding/hls-transcoding.ts",
+      "accessCount": 5,
+      "lastAccessed": 1776653656745,
+      "type": "directory"
+    },
+    {
+      "path": "server/core/lib/object-storage/videos.ts",
+      "accessCount": 5,
+      "lastAccessed": 1776653691722,
+      "type": "file"
+    },
+    {
+      "path": "config/default.yaml",
+      "accessCount": 5,
+      "lastAccessed": 1776653706320,
+      "type": "file"
+    },
+    {
+      "path": "server/core/lib/video-captions.ts",
+      "accessCount": 5,
+      "lastAccessed": 1776653901198,
+      "type": "file"
+    },
+    {
+      "path": "packages/tests/src/shared/sql-command.ts",
+      "accessCount": 4,
+      "lastAccessed": 1776586827823,
+      "type": "directory"
+    },
+    {
+      "path": "server/core/lib/object-storage/object-storage-helpers.ts",
+      "accessCount": 4,
+      "lastAccessed": 1776653729040,
+      "type": "file"
+    },
+    {
+      "path": "packages/tests/src/api/object-storage/videos.ts",
+      "accessCount": 3,
+      "lastAccessed": 1776598235873,
+      "type": "file"
+    },
+    {
+      "path": "server/core/initializers/config.ts",
+      "accessCount": 3,
+      "lastAccessed": 1776653706503,
+      "type": "file"
+    },
+    {
+      "path": "server/core/lib/move-storage/move-to-file-system.ts",
+      "accessCount": 3,
+      "lastAccessed": 1776653717953,
+      "type": "file"
+    },
+    {
+      "path": "server/core/lib/runners/job-handlers/shared/utils.ts",
+      "accessCount": 3,
+      "lastAccessed": 1776653781049,
+      "type": "file"
+    },
+    {
+      "path": "server/core/controllers/api/videos/upload.ts",
+      "accessCount": 2,
+      "lastAccessed": 1776584091500,
+      "type": "directory"
+    },
+    {
+      "path": "server/core/initializers/constants.ts",
+      "accessCount": 2,
+      "lastAccessed": 1776584119954,
+      "type": "directory"
+    },
+    {
+      "path": "server/core/lib/video-file.ts",
+      "accessCount": 2,
+      "lastAccessed": 1776584688774,
+      "type": "file"
+    },
+    {
+      "path": "server/core/controllers/api/videos/files.ts",
+      "accessCount": 2,
+      "lastAccessed": 1776584692662,
+      "type": "file"
+    },
+    {
+      "path": "packages/tests/src/api/videos/video-files.ts",
+      "accessCount": 2,
+      "lastAccessed": 1776611473885,
+      "type": "file"
+    },
+    {
+      "path": "server/core/lib/runners/job-handlers/vod-hls-transcoding-job-handler.ts",
+      "accessCount": 2,
+      "lastAccessed": 1776653688172,
+      "type": "file"
+    },
+    {
+      "path": "server/core/lib/transcoding/create-transcoding-job.ts",
+      "accessCount": 2,
+      "lastAccessed": 1776653728701,
+      "type": "file"
+    },
+    {
+      "path": "server/core/lib/transcoding",
+      "accessCount": 2,
+      "lastAccessed": 1776653728812,
+      "type": "directory"
+    },
+    {
+      "path": "server/core/lib/object-storage/keys.ts",
+      "accessCount": 2,
+      "lastAccessed": 1776653729200,
+      "type": "file"
+    },
+    {
+      "path": "server/core/lib/transcoding/transcoding-resolutions.ts",
+      "accessCount": 2,
+      "lastAccessed": 1776653756792,
+      "type": "file"
+    },
+    {
+      "path": "server/core/lib/paths.ts",
+      "accessCount": 1,
+      "lastAccessed": 1776583967533,
+      "type": "file"
+    },
+    {
+      "path": "server/core/lib/local-video-creator.ts",
+      "accessCount": 1,
+      "lastAccessed": 1776583968327,
+      "type": "file"
+    },
+    {
+      "path": "server/core/lib/transcoding/web-transcoding.ts",
+      "accessCount": 1,
+      "lastAccessed": 1776583990105,
+      "type": "file"
+    },
+    {
+      "path": "server/core/controllers/object-storage-proxy.ts",
+      "accessCount": 1,
+      "lastAccessed": 1776584000321,
+      "type": "file"
+    },
+    {
+      "path": "server/core/lib/transcoding/transcoding-priority.ts",
+      "accessCount": 1,
+      "lastAccessed": 1776584034765,
+      "type": "file"
+    },
+    {
+      "path": "server/core/controllers/lazy-static.ts",
+      "accessCount": 1,
+      "lastAccessed": 1776584035129,
+      "type": "file"
+    },
+    {
+      "path": "server/core/lib/object-storage/proxy.ts",
+      "accessCount": 1,
+      "lastAccessed": 1776584035198,
+      "type": "file"
+    },
+    {
+      "path": "packages/tests/src/api/transcoding/hls.ts",
+      "accessCount": 1,
+      "lastAccessed": 1776584669570,
+      "type": "file"
+    },
+    {
+      "path": "packages/tests/src/api",
+      "accessCount": 1,
+      "lastAccessed": 1776584682373,
+      "type": "directory"
+    },
+    {
+      "path": "packages/tests/src/api/videos/video-state.ts",
+      "accessCount": 1,
+      "lastAccessed": 1776584692715,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}

@@ -1,13 +1,13 @@
-import { FileStorage } from '@peertube/peertube-models'
 import { retryTransactionWrapper } from '@server/helpers/database-utils.js'
+import { logger } from '@server/helpers/logger.js'
 import { CONFIG } from '@server/initializers/config.js'
 import { VideoJobInfoModel } from '@server/models/video/video-job-info.js'
 import { MVideo } from '@server/types/models/index.js'
-import { JobQueue } from '../job-queue/job-queue.js'
-import { hasVideoResourcesToBeMoved } from '../move-storage/shared/move-video.js'
-import { buildMoveVideoJob } from '../video-jobs.js'
 import { moveToNextState } from '../video-state.js'
 
+// NOTE: Granular move jobs are created by moveToExternalStorageState in video-state.ts,
+// which is called by moveToNextState. onTranscodingEnded only triggers the state machine
+// and should NOT create move jobs to avoid double-creation when the video is already published.
 export async function onTranscodingEnded (options: {
   video: MVideo
   isNewVideo: boolean
@@ -17,12 +17,20 @@ export async function onTranscodingEnded (options: {
 
   await VideoJobInfoModel.decrease(video.uuid, 'pendingTranscode')
 
+  logger.info('[TRANSCODE_END] Transcoding ended for video %s, moveToNextState=%s', video.uuid, moveVideoToNextState)
+
   if (moveVideoToNextState) {
+    // Trigger the state machine. The state machine (moveToNextState) will decide
+    // the next state and create move jobs accordingly (via moveToExternalStorageState).
+    // We do NOT create move jobs here to avoid double-creation when video is already published.
     const changedState = await retryTransactionWrapper(moveToNextState, { video, isNewVideo })
 
-    // Still send the transcoded file to external storage if needed
-    if (!changedState && CONFIG.OBJECT_STORAGE.ENABLED && await hasVideoResourcesToBeMoved(video, FileStorage.OBJECT_STORAGE)) {
-      await JobQueue.Instance.createJob(await buildMoveVideoJob({ type: 'move-to-object-storage', video }))
+    logger.info('[TRANSCODE_END] State change for %s: changedState=%s, isNewVideo=%s', video.uuid, changedState, isNewVideo)
+
+    if (!changedState && !CONFIG.OBJECT_STORAGE.ENABLED) {
+      logger.info('[TRANSCODE_END] Video %s already published and object storage disabled, no further action needed', video.uuid)
     }
+  } else {
+    logger.info('[TRANSCODE_END] moveVideoToNextState=false for %s, skipping state transition', video.uuid)
   }
 }

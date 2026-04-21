@@ -96,7 +96,7 @@ async function listBlockedAccounts (req: express.Request, res: express.Response)
     accountId: serverActor.Account.id
   })
 
-  return res.json(getFormattedObjects(resultList.data, resultList.total))
+  return res.json(await getFormattedObjects(resultList.data, resultList.total))
 }
 
 async function blockAccount (req: express.Request, res: express.Response) {
@@ -127,7 +127,7 @@ async function listBlockedServers (req: express.Request, res: express.Response) 
     accountId: serverActor.Account.id
   })
 
-  return res.json(getFormattedObjects(resultList.data, resultList.total))
+  return res.json(await getFormattedObjects(resultList.data, resultList.total))
 }
 
 async function blockServer (req: express.Request, res: express.Response) {

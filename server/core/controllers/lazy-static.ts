@@ -117,9 +117,10 @@ async function getTorrent (req: express.Request, res: express.Response) {
 
   if (file.getVideo().isLocal()) {
     if (file.storage === FileStorage.OBJECT_STORAGE) {
-      const torrentUrl = buildObjectStoragePublicFileUrl({
+      const torrentUrl = await buildObjectStoragePublicFileUrl({
         bucket: CONFIG.OBJECT_STORAGE.TORRENTS,
-        key: generateTorrentObjectStorageKey(file.torrentFilename)
+        key: generateTorrentObjectStorageKey(file.torrentFilename),
+        fileType: 'torrents'
       })
 
       return res.redirect(torrentUrl)

@@ -5,6 +5,7 @@ import { CONFIG } from '@server/initializers/config.js'
 import { DEFAULT_AUDIO_MERGE_RESOLUTION, DEFAULT_AUDIO_RESOLUTION } from '@server/initializers/constants.js'
 import { Hooks } from '@server/lib/plugins/hooks.js'
 import { MUserId, MVideoFile, MVideoFullLight } from '@server/types/models/index.js'
+import { VideoFileModel } from '@server/models/video/video-file.js'
 import { buildOriginalFileResolution, computeResolutionsToTranscode } from '../../transcoding-resolutions.js'
 
 const lTags = loggerTagsFactory('transcoding')
@@ -66,25 +67,38 @@ export abstract class AbstractJobBuilder<P extends { transcodingPriority: Transc
     // HLS version of max resolution
     if (CONFIG.TRANSCODING.HLS.ENABLED === true) {
       const hasSplitAudioTranscoding = CONFIG.TRANSCODING.HLS.SPLIT_AUDIO_AND_VIDEO && videoFile.hasAudio()
+      const hasMaxResolutionHLS = await this.hasExistingHLSFile({
+        video,
+        resolution: maxResolution,
+        fps: maxFPS
+      })
 
-      children.push([
-        this.buildHLSJobPayload({
-          deleteWebVideoFiles: !CONFIG.TRANSCODING.WEB_VIDEOS.ENABLED,
+      if (!hasMaxResolutionHLS) {
+        children.push([
+          this.buildHLSJobPayload({
+            deleteWebVideoFiles: !CONFIG.TRANSCODING.WEB_VIDEOS.ENABLED,
 
-          separatedAudio: hasSplitAudioTranscoding,
+            separatedAudio: hasSplitAudioTranscoding,
 
+            resolution: maxResolution,
+            fps: maxFPS,
+            video,
+            isNewVideo,
+
+            inputStreams,
+            transcodingRequestAt,
+
+            transcodingPriority: 'required',
+            canMoveVideoState: true
+          })
+        ])
+      } else {
+        logger.info('Skipping original-resolution HLS job because it already exists for %s.', video.uuid, {
           resolution: maxResolution,
           fps: maxFPS,
-          video,
-          isNewVideo,
-
-          inputStreams,
-          transcodingRequestAt,
-
-          transcodingPriority: 'required',
-          canMoveVideoState: true
+          ...lTags(video.uuid)
         })
-      ])
+      }
 
       if (hasSplitAudioTranscoding) {
         hlsAudioAlreadyGenerated = true
@@ -123,6 +137,9 @@ export abstract class AbstractJobBuilder<P extends { transcodingPriority: Transc
     children = children.concat(lowerResolutionJobPayloads)
 
     this.reassignCanMoveVideoState(mergeOrOptimizePayload, children.length === 0)
+    if (children.length !== 0) {
+      this.reassignSequentialChildrenMoveToNextState(children)
+    }
 
     await this.createJobs({
       payloads: {
@@ -261,13 +278,13 @@ export abstract class AbstractJobBuilder<P extends { transcodingPriority: Transc
         type: 'vod'
       })
 
-      const parallelPayloads: P[] = []
+      const sequentialPayloadChain: P[] = []
 
       if (
         CONFIG.TRANSCODING.WEB_VIDEOS.ENABLED ||
         (resolution === VideoResolution.H_NOVIDEO && CONFIG.TRANSCODING.ALWAYS_TRANSCODE_PODCAST_OPTIMIZED_AUDIO)
       ) {
-        parallelPayloads.push(
+        sequentialPayloadChain.push(
           this.buildWebVideoJobPayload({
             video,
             resolution,
@@ -289,7 +306,7 @@ export abstract class AbstractJobBuilder<P extends { transcodingPriority: Transc
       }
 
       if (generateHLS) {
-        parallelPayloads.push(
+        sequentialPayloadChain.push(
           this.buildHLSJobPayload({
             video,
             resolution,
@@ -304,8 +321,8 @@ export abstract class AbstractJobBuilder<P extends { transcodingPriority: Transc
         )
       }
 
-      if (parallelPayloads.length !== 0) {
-        sequentialPayloads.push(parallelPayloads)
+      if (sequentialPayloadChain.length !== 0) {
+        sequentialPayloads.push(sequentialPayloadChain)
       }
     }
 
@@ -313,6 +330,39 @@ export abstract class AbstractJobBuilder<P extends { transcodingPriority: Transc
   }
 
   // ---------------------------------------------------------------------------
+
+  private async hasExistingHLSFile (options: {
+    video: MVideoFullLight
+    resolution: number
+    fps: number
+  }) {
+    const { video, resolution, fps } = options
+
+    const playlist = video.getHLSPlaylist()
+    if (!playlist) return false
+
+    const existingFile = await VideoFileModel.loadHLSFile({
+      playlistId: playlist.id,
+      resolution,
+      fps
+    })
+
+    return !!existingFile
+  }
+
+  private reassignSequentialChildrenMoveToNextState (children: P[][]) {
+    for (const chain of children) {
+      for (const payload of chain) {
+        this.reassignCanMoveVideoState(payload, false)
+      }
+    }
+
+    const lastChain = children.at(-1)
+    const lastPayload = lastChain?.at(-1)
+    if (!lastPayload) return
+
+    this.reassignCanMoveVideoState(lastPayload, true)
+  }
 
   protected abstract createJobs (options: {
     video: MVideoFullLight

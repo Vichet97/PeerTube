@@ -117,7 +117,7 @@ async function listLiveVideoSessions (req: express.Request, res: express.Respons
     sort: req.query.sort
   })
 
-  return res.json(getFormattedObjects(data, data.length))
+  return res.json(await getFormattedObjects(data, data.length))
 }
 
 function canSeePrivateLiveInformation (req: express.Request, res: express.Response) {

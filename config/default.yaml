@@ -175,20 +175,31 @@ static_files:
   private_files_require_auth: true
 
 object_storage:
-  enabled: true # RustFS (S3-compatible) - see docker-compose.yml
+  enabled: true
 
   # Without protocol, will default to HTTPS
-  endpoint: 'http://127.0.0.1:9002' # RustFS S3 API (localhost)
+  endpoint: 'https://io.quotaless.cloud'
 
   region: 'us-east-1'
 
-  # RustFS uses path-style requests by default
+  # Uses path-style requests (virtual hosting disabled)
   force_path_style: true
 
   upload_acl:
-    # Bucket is publicly readable; public files get public-read ACL
-    public: 'public-read'
+    # Only presigned URLs are used
+    public: null
     private: null
+
+  # Generate presigned URLs for public files (thumbnails, web videos, etc.)
+  # Set to true if your object storage requires authentication for all requests
+  use_presigned_public_urls: true
+
+  # Base path for public presigned proxy URLs (e.g., 'content' → /content/public/{type}/{key})
+  # Leave empty to use the default 'object-storage-proxy/public'
+  public_presigned_base_path: 'content'
+
+  # Presigned URL expiration time in hours (default: 6 hours)
+  presigned_public_urls_expiration_hours: 6
 
   proxy:
     # Set to true if you have private videos and need auth; false to use direct bucket URLs
@@ -199,9 +210,8 @@ object_storage:
     request_timeout: 120
 
   credentials:
-    # Match RUSTFS_ACCESS_KEY / RUSTFS_SECRET_KEY in docker-compose.yml
-    access_key_id: 'peertube'
-    secret_access_key: '016997791aA'
+    access_key_id: 'l0Uw4ErcXXG7_bOgk_J2g8Bjesal7W-8giRTjBo0cpY.mwoxYnY_rUK0kJE4ej0KPXqY_JJKND-PSCBBl-dM4rY'
+    secret_access_key: 'gatewaysecret'
 
   # Maximum amount to upload in one request to object storage
   max_upload_part: 100MB
@@ -219,6 +229,10 @@ object_storage:
   # Value is in minutes (integer). Useful to avoid short race conditions for in-flight streaming requests.
   keep_local_file_after_move: 1
 
+  # Delay in milliseconds before retrying move jobs when files are not ready yet.
+  # Useful when transcoding is still in progress and files haven't been written to disk.
+  move_file_delay: 30000
+
   # Maximum number of attempts to make a request to object storage
   # Some object storage providers (for instance Backblaze) expects the client to retry upload upon 5xx errors
   # If you're using such a provider then you can increase this value
@@ -226,11 +240,10 @@ object_storage:
 
   streaming_playlists:
     # Bucket name created on your object storage provider
-    # PeerTube will access it via {bucket_name}.example.com
-    bucket_name: 'vod'
+    bucket_name: 'data'
 
-    # Allows setting all buckets to the same value but with a different prefix
-    prefix: 'streaming-playlists/'
+    # Root path in bucket
+    prefix: 'personal-files/vod/streaming-playlists/'
 
     # Base url for object URL generation, scheme and host will be replaced by this URL
     # Useful when you want to use a CDN/external proxy
@@ -243,40 +256,40 @@ object_storage:
     store_live_streams: false
 
   web_videos:
-    bucket_name: 'vod'
-    prefix: 'web-videos/'
+    bucket_name: 'data'
+    prefix: 'personal-files/vod/web-videos/'
     base_url: ''
 
   user_exports:
-    bucket_name: 'vod'
-    prefix: 'user-exports/'
+    bucket_name: 'data'
+    prefix: 'personal-files/vod/user-exports/'
     base_url: ''
 
   # Same settings but for original video files
   original_video_files:
-    bucket_name: 'vod'
-    prefix: 'original-video-files/'
+    bucket_name: 'data'
+    prefix: 'personal-files/vod/original-video-files/'
     base_url: ''
 
   # Video captions
   captions:
-    bucket_name: 'vod'
-    prefix: 'captions/'
+    bucket_name: 'data'
+    prefix: 'personal-files/vod/captions/'
     base_url: ''
 
   storyboards:
-    bucket_name: 'vod'
-    prefix: 'storyboards/'
-    base_url: '' 
+    bucket_name: 'data'
+    prefix: 'personal-files/vod/storyboards/'
+    base_url: ''
 
   thumbnails:
-    bucket_name: 'vod'
-    prefix: 'thumbnails/'
-    base_url: '' 
+    bucket_name: 'data'
+    prefix: 'personal-files/vod/thumbnails/'
+    base_url: ''
 
   torrents:
-    bucket_name: 'vod'
-    prefix: 'torrents/'
+    bucket_name: 'data'
+    prefix: 'personal-files/vod/torrents/'
     base_url: '' 
 
 log:

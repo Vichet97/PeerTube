@@ -251,13 +251,13 @@ export class VideoImportModel extends SequelizeModel<VideoImportModel> {
     return this.targetUrl || this.magnetUri || this.torrentName
   }
 
-  toFormattedJSON (this: MVideoImportFormattable): VideoImport {
+  async toFormattedJSON (this: MVideoImportFormattable): Promise<VideoImport> {
     const videoFormatOptions = {
       completeDescription: true,
       additionalAttributes: { state: true, waitTranscoding: true, scheduledUpdate: true }
     }
     const video = this.Video
-      ? Object.assign(this.Video.toFormattedJSON(videoFormatOptions), { tags: this.Video.Tags.map(t => t.name) })
+      ? Object.assign(await this.Video.toFormattedJSON(videoFormatOptions), { tags: this.Video.Tags.map(t => t.name) })
       : undefined
 
     const videoChannelSync = this.VideoChannelSync

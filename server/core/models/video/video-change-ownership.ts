@@ -136,13 +136,13 @@ export class VideoChangeOwnershipModel extends SequelizeModel<VideoChangeOwnersh
     })
   }
 
-  toFormattedJSON (this: MVideoChangeOwnershipFormattable): VideoChangeOwnership {
+  async toFormattedJSON (this: MVideoChangeOwnershipFormattable): Promise<VideoChangeOwnership> {
     return {
       id: this.id,
       status: this.status,
       initiatorAccount: this.Initiator.toFormattedJSON(),
       nextOwnerAccount: this.NextOwner.toFormattedJSON(),
-      video: this.Video.toFormattedJSON(),
+      video: await this.Video.toFormattedJSON(),
       createdAt: this.createdAt
     }
   }

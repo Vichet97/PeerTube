@@ -190,7 +190,7 @@ async function getVideo (req: express.Request, res: express.Response) {
     JobQueue.Instance.createJobAsync({ type: 'activitypub-refresher', payload: { type: 'video', url: video.url } })
   }
 
-  return res.json(video.toFormattedDetailsJSON())
+  return res.json(await video.toFormattedDetailsJSON())
 }
 
 async function listVideos (req: express.Request, res: express.Response) {
@@ -217,7 +217,7 @@ async function listVideos (req: express.Request, res: express.Response) {
     'filter:api.videos.list.result'
   )
 
-  return res.json(getFormattedObjects(resultList.data, resultList.total, guessAdditionalAttributesFromQuery(query)))
+  return res.json(await getFormattedObjects(resultList.data, resultList.total, guessAdditionalAttributesFromQuery(query)))
 }
 
 async function removeVideo (req: express.Request, res: express.Response) {
@@ -245,7 +245,7 @@ async function removeVideo (req: express.Request, res: express.Response) {
     })
   })
 
-  auditLogger.delete(getAuditIdFromRes(res), new VideoAuditView(videoInstance.toFormattedDetailsJSON()))
+  auditLogger.delete(getAuditIdFromRes(res), new VideoAuditView(await videoInstance.toFormattedDetailsJSON()))
   logger.info('Video with name %s and uuid %s deleted.', videoInstance.name, videoInstance.uuid)
 
   Hooks.runAction('action:api.video.deleted', { video: videoInstance, req, res })

@@ -97,7 +97,7 @@ async function listBlacklist (req: express.Request, res: express.Response) {
     type: req.query.type
   })
 
-  return res.json(getFormattedObjects(resultList.data, resultList.total))
+  return res.json(await getFormattedObjects(resultList.data, resultList.total))
 }
 
 async function removeVideoFromBlacklistController (req: express.Request, res: express.Response) {

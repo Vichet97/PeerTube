@@ -104,7 +104,7 @@ async function generateVideoFeed (req: express.Request, res: express.Response) {
     videoChannelId: videoChannel?.id
   })
 
-  addVideosToFeed(feed, data)
+  await addVideosToFeed(feed, data)
 
   // Now the feed generation is done, let's send it!
   return sendFeed(feed, req, res)
@@ -145,12 +145,12 @@ async function generateVideoFeedForSubscriptions (req: express.Request, res: exp
 
 // ---------------------------------------------------------------------------
 
-function addVideosToFeed (feed: Feed, videos: VideoModel[]) {
+async function addVideosToFeed (feed: Feed, videos: VideoModel[]) {
   /**
    * Adding video items to the feed object, one at a time
    */
   for (const video of videos) {
-    const formattedVideoFiles = video.getFormattedAllVideoFilesJSON(false)
+    const formattedVideoFiles = await video.getFormattedAllVideoFilesJSON(false)
 
     const torrents = formattedVideoFiles.map(videoFile => ({
       title: video.name,

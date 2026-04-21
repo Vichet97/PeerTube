@@ -23,7 +23,7 @@ import { JobQueue } from './job-queue/job-queue.js'
 import { hasVideoResourcesToBeMoved } from './move-storage/shared/move-video.js'
 import { Notifier } from './notifier/notifier.js'
 import { cleanupStagedTranscriptionAudio, prepareStagedTranscriptionAudio } from './transcription-audio-staging.js'
-import { buildMoveVideoJob } from './video-jobs.js'
+import { buildCaptionMoveJob, buildMoveVideoJob } from './video-jobs.js'
 import { TranscriptionJobHandler } from './runners/index.js'
 import { VideoPathManager } from './video-path-manager.js'
 
@@ -61,8 +61,14 @@ export async function createLocalCaption (options: {
     })
   })
 
-  if (CONFIG.OBJECT_STORAGE.ENABLED) {
-    await JobQueue.Instance.createJob({ type: 'move-to-object-storage', payload: { captionId: videoCaption.id } })
+  if (CONFIG.OBJECT_STORAGE.ENABLED && videoCaption.storage === FileStorage.FILE_SYSTEM) {
+    const job = await buildCaptionMoveJob(videoCaption.id)
+    if (job) {
+      await JobQueue.Instance.createJob(job)
+      logger.info(`Created move job for caption ${videoCaption.filename}`, lTags(video.uuid))
+    } else {
+      logger.info(`Caption ${videoCaption.filename} already has a pending move job, skipping`, lTags(video.uuid))
+    }
   }
 
   logger.info(`Created/replaced caption ${videoCaption.filename} of ${language} of video ${video.uuid}`, lTags(video.uuid))
@@ -330,7 +336,12 @@ export async function onTranscriptionEnded (options: {
 
   // Trigger move-to-object-storage if there are still resources remaining on file system.
   if (CONFIG.OBJECT_STORAGE.ENABLED && await hasVideoResourcesToBeMoved(video, FileStorage.OBJECT_STORAGE)) {
-    await JobQueue.Instance.createJob(await buildMoveVideoJob({ type: 'move-to-object-storage', video }))
+    const job = await buildMoveVideoJob({ type: 'move-to-object-storage', video })
+    if (job) {
+      await JobQueue.Instance.createJob(job)
+    } else {
+      logger.info(`Move job skipped (already pending/active) for video ${video.uuid}`, lTags(video.uuid))
+    }
   }
 
   logger.info(`Transcription ended for ${video.uuid}`, lTags(video.uuid, ...customLTags))
@@ -342,7 +353,7 @@ export async function upsertCaptionPlaylistOnFS (caption: MVideoCaption, video: 
 
   logger.debug(`Creating caption playlist ${m3u8Destination} of video ${video.uuid}`, lTags(video.uuid))
 
-  const content = buildCaptionM3U8Content({ video, caption })
+  const content = await buildCaptionM3U8Content({ video, caption })
   await ensureDir(dirname(m3u8Destination))
   await writeFile(m3u8Destination, content, 'utf8')
 

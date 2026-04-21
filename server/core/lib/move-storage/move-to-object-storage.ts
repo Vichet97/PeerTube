@@ -1,8 +1,8 @@
-import { FileStorage, VideoStateType } from '@peertube/peertube-models'
+import { FileStorage, VideoState, VideoStateType } from '@peertube/peertube-models'
 import { logger, LoggerTags, loggerTagsFactory } from '@server/helpers/logger.js'
 import { CONFIG } from '@server/initializers/config.js'
 import { P2P_MEDIA_LOADER_PEER_VERSION } from '@server/initializers/constants.js'
-import { buildCaptionM3U8Content } from '@server/lib/hls.js'
+import { buildCaptionM3U8Content, updateM3U8AndShaPlaylist } from '@server/lib/hls.js'
 import {
   BucketInfo,
   checkObjectStorageReadiness,
@@ -23,7 +23,18 @@ import { moveToFailedMoveToObjectStorageState, moveToNextState } from '@server/l
 import { updateTorrentMetadata } from '@server/lib/webtorrent.js'
 import { VideoCaptionModel } from '@server/models/video/video-caption.js'
 import { VideoModel } from '@server/models/video/video.js'
-import { MStreamingPlaylistVideo, MVideo, MVideoCaption, MVideoFile, MVideoWithAllFiles, MThumbnail, MStoryboard, isStreamingPlaylist } from '@server/types/models/index.js'
+import { VideoJobInfoModel } from '@server/models/video/video-job-info.js'
+import { JobQueue } from '@server/lib/job-queue/index.js'
+import { buildMoveVideoJob } from '@server/lib/video-jobs.js'
+import {
+  MStreamingPlaylistVideo,
+  MVideo,
+  MVideoCaption,
+  MVideoFile,
+  MVideoWithAllFiles,
+  MThumbnail,
+  MStoryboard
+} from '@server/types/models/index.js'
 import { MVideoSource } from '@server/types/models/video/video-source.js'
 import { pathExists, remove } from 'fs-extra/esm'
 import { rmdir } from 'fs/promises'
@@ -43,10 +54,25 @@ export async function moveVideoToObjectStorage (options: {
     previousVideoState: VideoStateType
   }
 
-  loggerTags: LoggerTags['tags']
-}) {
-  const { videoUUID, moveVideoState, loggerTags } = options
+  hlsCutover?: {
+    playlistId: number
+    fileIds: number[]
+  }
 
+  loggerTags: LoggerTags['tags']
+
+  onProgress?: (percent: number) => void
+}) {
+  const { videoUUID, moveVideoState, hlsCutover, loggerTags, onProgress } = options
+
+  // This is the deferred HLS cutover finalization job
+  // Just finalize the cutover and return - no state transitions here
+  if (hlsCutover) {
+    await finalizeInitialHLSCutover({ videoUUID, moveVideoState, hlsCutover, onProgress })
+    return
+  }
+
+  // Normal move: move files and handle state transitions
   await moveVideoToStorage({
     videoUUID,
     loggerTags: [ ...lTagsBase().tags, ...loggerTags ],
@@ -59,13 +85,43 @@ export async function moveVideoToObjectStorage (options: {
     moveCaptionFiles,
     moveThumbnailFiles,
     moveStoryboardFiles,
-    moveTorrentFiles
+    moveTorrentFiles,
+    onInitialHLSCutoverReady: async cutover => {
+      if (onProgress) onProgress(90) // HLS cutover starting
+      const job = await buildMoveVideoJob({
+        type: 'move-to-object-storage',
+        video: { uuid: videoUUID },
+        moveVideoState,
+        hlsCutover: cutover,
+        isFollowUp: true
+      })
+      if (job) {
+        await JobQueue.Instance.createJob(job)
+      }
+    }
   })
 
-  if (options.moveVideoState) {
-    await moveToNextState({ video: { uuid: videoUUID }, ...moveVideoState })
+  // Handle state transitions after normal move completion
+  if (moveVideoState) {
+    const videoForStateCheck = await VideoModel.loadFull(videoUUID)
+    if (!videoForStateCheck) {
+      logger.warn('[MOVE_STORAGE] Video %s not found during state transition', videoUUID)
+      return
+    }
+
+    const isAlreadyPublished = videoForStateCheck.state === VideoState.PUBLISHED
+
+    if (isAlreadyPublished) {
+      logger.info('[MOVE_STORAGE] Video %s is already published, skipping state transition after object storage move', videoUUID)
+    } else {
+      await moveToNextState({ video: { uuid: videoUUID }, ...moveVideoState })
+    }
   } else {
     const videoFull = await VideoModel.loadFull(videoUUID)
+    if (!videoFull) {
+      logger.warn('[MOVE_STORAGE] Video %s not found during federation', videoUUID)
+      return
+    }
     await federateVideoIfNeeded(videoFull, false, undefined)
   }
 }
@@ -81,6 +137,224 @@ export function moveCaptionToObjectStorage (options: {
     loggerTags: [ ...lTagsBase().tags, ...loggerTags ],
     moveCaptionFiles
   })
+}
+
+// ---------------------------------------------------------------------------
+// Granular move functions for independent file/playlist moves
+// ---------------------------------------------------------------------------
+
+export async function moveVideoFileToObjectStorage (videoUUID: string, fileId: number) {
+  const video = await VideoModel.loadWithFiles(videoUUID)
+  if (!video) {
+    throw new Error(`Video ${videoUUID} not found`)
+  }
+
+  const videoFile = video.VideoFiles.find(f => f.id === fileId)
+  if (!videoFile) {
+    throw new Error(`Video file ${fileId} not found`)
+  }
+
+  if (videoFile.storage === FileStorage.OBJECT_STORAGE) {
+    logger.info('[GRANULAR_MOVE] File %s already on object storage, skipping', fileId)
+    return
+  }
+
+  const sourcePath = VideoPathManager.Instance.getFSVideoFileOutputPath(video, videoFile)
+  const destinationKey = `${CONFIG.OBJECT_STORAGE.WEB_VIDEOS.PREFIX || ''}${videoFile.filename}`
+
+  logger.info('[GRANULAR_MOVE] Moving video file %s to object storage', fileId, {
+    sourcePath,
+    destinationBucket: CONFIG.OBJECT_STORAGE.WEB_VIDEOS.BUCKET_NAME,
+    destinationKey,
+    ...lTagsBase()
+  })
+
+  await storeWebVideoFile(video, videoFile)
+
+  await removeLocalFileAfterMove({
+    path: sourcePath,
+    objectStorageKey: videoFile.filename,
+    bucketInfo: CONFIG.OBJECT_STORAGE.WEB_VIDEOS
+  })
+
+  videoFile.storage = FileStorage.OBJECT_STORAGE
+  await videoFile.save()
+
+  logger.info('[GRANULAR_MOVE] Video file %s moved successfully', fileId, { ...lTagsBase() })
+}
+
+export async function moveHLSSegmentFilesToObjectStorage (videoUUID: string, playlistId: number, fileIds: number[]) {
+  const video = await VideoModel.loadWithFiles(videoUUID)
+  if (!video) {
+    throw new Error(`Video ${videoUUID} not found`)
+  }
+
+  const playlist = video.VideoStreamingPlaylists?.find(p => p.id === playlistId)
+  if (!playlist) {
+    throw new Error(`Playlist ${playlistId} not found`)
+  }
+
+  const filesToMove = playlist.VideoFiles.filter(f => fileIds.includes(f.id))
+
+  for (const videoFile of filesToMove) {
+    if (videoFile.storage === FileStorage.OBJECT_STORAGE) {
+      logger.info('[GRANULAR_MOVE] HLS file %s already on object storage, skipping', videoFile.id)
+      continue
+    }
+
+    const fragmentFilename = videoFile.filename
+    const fragmentPath = VideoPathManager.Instance.getFSHLSOutputPath(video, fragmentFilename)
+    const playlistFilename = getHLSResolutionPlaylistFilename(fragmentFilename)
+    const playlistPath = VideoPathManager.Instance.getFSHLSOutputPath(video, playlistFilename)
+
+    const fragmentExists = await pathExists(fragmentPath)
+    const resolutionPlaylistExists = await pathExists(playlistPath)
+
+    if (!fragmentExists && !resolutionPlaylistExists) {
+      logger.info('[GRANULAR_MOVE] Both fragment and resolution playlist missing for file %s, marking as OBJECT_STORAGE', videoFile.id)
+      videoFile.storage = FileStorage.OBJECT_STORAGE
+      await videoFile.save()
+      continue
+    }
+
+    // Step 1: Upload fragment if it exists locally
+    if (fragmentExists) {
+      const fragmentDestKey = `${CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS.PREFIX || ''}hls/${videoUUID}/${fragmentFilename}`
+      logger.info('[GRANULAR_MOVE] Uploading HLS fragment %s', fragmentFilename, {
+        sourcePath: fragmentPath,
+        destinationBucket: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS.BUCKET_NAME,
+        destinationKey: fragmentDestKey,
+        ...lTagsBase()
+      })
+      await storeHLSFileFromFilename(video, fragmentFilename)
+      await ensureObjectStorageFileReady({
+        objectStorageKey: fragmentDestKey,
+        bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS
+      })
+      logger.info('[GRANULAR_MOVE] HLS fragment %s uploaded to object storage', fragmentFilename, { ...lTagsBase() })
+    }
+
+    // Step 2: Upload resolution playlist if it exists locally
+    if (resolutionPlaylistExists) {
+      const playlistDestKey = `${CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS.PREFIX || ''}hls/${videoUUID}/${playlistFilename}`
+      logger.info('[GRANULAR_MOVE] Uploading HLS resolution playlist %s', playlistFilename, {
+        sourcePath: playlistPath,
+        destinationBucket: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS.BUCKET_NAME,
+        destinationKey: playlistDestKey,
+        ...lTagsBase()
+      })
+      await storeHLSFileFromFilename(video, playlistFilename)
+      await ensureObjectStorageFileReady({
+        objectStorageKey: playlistDestKey,
+        bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS
+      })
+      logger.info('[GRANULAR_MOVE] HLS resolution playlist %s uploaded to object storage', playlistFilename, { ...lTagsBase() })
+    }
+
+    // Step 3: Delete LOCAL files ONLY after both are confirmed uploaded
+    if (fragmentExists) {
+      await removeLocalPathNow(fragmentPath)
+      logger.info('[GRANULAR_MOVE] Deleted local fragment %s', fragmentPath, { ...lTagsBase() })
+    }
+    if (resolutionPlaylistExists) {
+      await removeLocalPathNow(playlistPath)
+      logger.info('[GRANULAR_MOVE] Deleted local resolution playlist %s', playlistPath, { ...lTagsBase() })
+    }
+
+    videoFile.storage = FileStorage.OBJECT_STORAGE
+    await videoFile.save()
+    logger.info('[GRANULAR_MOVE] HLS segment file %s marked as OBJECT_STORAGE', videoFile.id, { ...lTagsBase() })
+  }
+}
+
+// Pure upload: uploads pre-generated master playlist + sha from LOCAL filesystem.
+// Regeneration must be done by the caller BEFORE calling this function.
+export async function moveMasterPlaylistToObjectStorage (videoUUID: string, playlistId: number) {
+  const video = await VideoModel.loadWithFiles(videoUUID)
+  if (!video) {
+    throw new Error(`Video ${videoUUID} not found`)
+  }
+
+  const playlist = video.VideoStreamingPlaylists?.find(p => p.id === playlistId)
+  if (!playlist) {
+    throw new Error(`Playlist ${playlistId} not found`)
+  }
+
+  const masterPlaylistFilename = playlist.playlistFilename
+  const masterPath = VideoPathManager.Instance.getFSHLSOutputPath(video, masterPlaylistFilename)
+  const shaPath = VideoPathManager.Instance.getFSHLSOutputPath(video, playlist.segmentsSha256Filename)
+
+  if (!(await pathExists(masterPath))) {
+    throw new Error(`Master playlist not found at ${masterPath}`)
+  }
+  if (!(await pathExists(shaPath))) {
+    throw new Error(`SHA file not found at ${shaPath}`)
+  }
+
+  logger.info('[GRANULAR_MOVE] Uploading master playlist to object storage', {
+    videoUUID,
+    playlistFilename: masterPlaylistFilename,
+    segmentsSha256Filename: playlist.segmentsSha256Filename,
+    destinationBucket: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS.BUCKET_NAME,
+    ...lTagsBase()
+  })
+
+  await storeHLSFileFromFilename(video, masterPlaylistFilename)
+  await storeHLSFileFromFilename(video, playlist.segmentsSha256Filename)
+
+  await checkObjectStorageReadiness({
+    key: generateHLSObjectStorageKey(video, masterPlaylistFilename),
+    bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS,
+    maxRetries: 30,
+    retryIntervalMs: 10000
+  })
+
+  const allFilesOnObjectStorage = playlist.VideoFiles.every(f => f.storage === FileStorage.OBJECT_STORAGE)
+  if (allFilesOnObjectStorage) {
+    playlist.storage = FileStorage.OBJECT_STORAGE
+    await playlist.save()
+    logger.info('[GRANULAR_MOVE] HLS playlist %s storage updated to OBJECT_STORAGE', playlistId, { ...lTagsBase() })
+  }
+}
+
+export async function moveThumbnailToObjectStorage (videoUUID: string, thumbnailId: number) {
+  const video = await VideoModel.loadWithFiles(videoUUID)
+  if (!video) {
+    throw new Error(`Video ${videoUUID} not found`)
+  }
+
+  const thumbnail = video.Thumbnails?.find(t => t.id === thumbnailId)
+  if (!thumbnail) {
+    throw new Error(`Thumbnail ${thumbnailId} not found`)
+  }
+
+  if (thumbnail.storage === FileStorage.OBJECT_STORAGE) {
+    logger.info('[GRANULAR_MOVE] Thumbnail %s already on object storage, skipping', thumbnailId)
+    return
+  }
+
+  const sourcePath = thumbnail.getFSPath()
+  const destinationKey = `${CONFIG.OBJECT_STORAGE.THUMBNAILS.PREFIX || ''}${thumbnail.filename}`
+
+  logger.info('[GRANULAR_MOVE] Moving thumbnail %s to object storage', thumbnailId, {
+    sourcePath,
+    destinationBucket: CONFIG.OBJECT_STORAGE.THUMBNAILS.BUCKET_NAME,
+    destinationKey,
+    ...lTagsBase()
+  })
+
+  await storeThumbnail(sourcePath, thumbnail.filename)
+
+  await removeLocalFileAfterMove({
+    path: sourcePath,
+    objectStorageKey: thumbnail.filename,
+    bucketInfo: CONFIG.OBJECT_STORAGE.THUMBNAILS
+  })
+
+  thumbnail.storage = FileStorage.OBJECT_STORAGE
+  await thumbnail.save()
+
+  logger.info('[GRANULAR_MOVE] Thumbnail %s moved successfully', thumbnailId, { ...lTagsBase() })
 }
 
 export async function onMoveVideoToObjectStorageFailure (options: {
@@ -104,6 +378,16 @@ async function moveVideoSourceFile (source: MVideoSource) {
   if (source.storage !== FileStorage.FILE_SYSTEM) return
 
   const sourcePath = VideoPathManager.Instance.getFSOriginalVideoFilePath(source.keptOriginalFilename)
+  const destinationKey = `${CONFIG.OBJECT_STORAGE.ORIGINAL_VIDEO_FILES.PREFIX || ''}${source.keptOriginalFilename}`
+
+  logger.info('[MOVE_STORAGE] Moving original video file to object storage', {
+    sourcePath,
+    destinationBucket: CONFIG.OBJECT_STORAGE.ORIGINAL_VIDEO_FILES.BUCKET_NAME,
+    destinationKey,
+    filename: source.keptOriginalFilename,
+    ...lTagsBase()
+  })
+
   await storeOriginalVideoFile(sourcePath, source.keptOriginalFilename)
 
   logger.debug('Checking readiness before marking original video file as moved to object storage', lTagsBase())
@@ -115,6 +399,13 @@ async function moveVideoSourceFile (source: MVideoSource) {
 
   source.storage = FileStorage.OBJECT_STORAGE
   await source.save()
+
+  logger.info('[MOVE_STORAGE] Original video file moved successfully', {
+    sourcePath,
+    destinationKey,
+    filename: source.keptOriginalFilename,
+    ...lTagsBase()
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -127,6 +418,17 @@ async function moveCaptionFiles (captions: MVideoCaption[], hls: MStreamingPlayl
 
     if (caption.storage === FileStorage.FILE_SYSTEM) {
       const captionPath = caption.getFSFilePath()
+      const destinationKey = `${CONFIG.OBJECT_STORAGE.CAPTIONS.PREFIX || ''}${caption.filename}`
+
+      logger.info('[MOVE_STORAGE] Moving caption file to object storage', {
+        captionId: caption.id,
+        sourcePath: captionPath,
+        destinationBucket: CONFIG.OBJECT_STORAGE.CAPTIONS.BUCKET_NAME,
+        destinationKey,
+        filename: caption.filename,
+        language: caption.language,
+        ...lTagsBase()
+      })
 
       await storeVideoCaption(captionPath, caption.filename)
 
@@ -140,6 +442,14 @@ async function moveCaptionFiles (captions: MVideoCaption[], hls: MStreamingPlayl
       // Assign new values before building the m3u8 file
       caption.storage = FileStorage.OBJECT_STORAGE
       await caption.save()
+
+      logger.info('[MOVE_STORAGE] Caption file moved successfully', {
+        captionId: caption.id,
+        sourcePath: captionPath,
+        destinationKey,
+        filename: caption.filename,
+        ...lTagsBase()
+      })
     }
 
     if (hls) {
@@ -148,7 +458,7 @@ async function moveCaptionFiles (captions: MVideoCaption[], hls: MStreamingPlayl
       const m3u8PathToRemove = caption.getFSM3U8Path(hls.Video)
 
       // Caption file URL has been updated, so we must also update the HLS caption playlist
-      const content = buildCaptionM3U8Content({ video: hls.Video, caption })
+      const content = await buildCaptionM3U8Content({ video: hls.Video, caption })
 
       caption.m3u8Filename = VideoCaptionModel.generateM3U8Filename(caption.filename)
 
@@ -186,8 +496,38 @@ async function moveCaptionFiles (captions: MVideoCaption[], hls: MStreamingPlayl
 async function moveWebVideoFiles (video: MVideoWithAllFiles) {
   const queue = new PQueue({ concurrency: CONFIG.OBJECT_STORAGE.UPLOAD_CONCURRENCY })
 
+  const filesToMove = video.VideoFiles.filter(f => f.storage === FileStorage.FILE_SYSTEM)
+
+  if (filesToMove.length > 0) {
+    logger.info('[MOVE_STORAGE] Starting web video files move to object storage', {
+      videoUUID: video.uuid,
+      fileCount: filesToMove.length,
+      files: filesToMove.map(f => ({
+        filename: f.filename,
+        resolution: f.resolution,
+        size: f.size,
+        sourcePath: VideoPathManager.Instance.getFSVideoFileOutputPath(video, f),
+        destinationKey: `${CONFIG.OBJECT_STORAGE.WEB_VIDEOS.PREFIX || ''}${f.filename}`,
+        destinationBucket: CONFIG.OBJECT_STORAGE.WEB_VIDEOS.BUCKET_NAME
+      })),
+      ...lTagsBase()
+    })
+  }
+
   await queue.addAll(video.VideoFiles.map(file => async () => {
     if (file.storage !== FileStorage.FILE_SYSTEM) return
+
+    const sourcePath = VideoPathManager.Instance.getFSVideoFileOutputPath(video, file)
+    const destinationKey = `${CONFIG.OBJECT_STORAGE.WEB_VIDEOS.PREFIX || ''}${file.filename}`
+
+    logger.debug('[MOVE_STORAGE] Moving web video file to object storage', {
+      filename: file.filename,
+      resolution: file.resolution,
+      sourcePath,
+      destinationBucket: CONFIG.OBJECT_STORAGE.WEB_VIDEOS.BUCKET_NAME,
+      destinationKey,
+      ...lTagsBase()
+    })
 
     await storeWebVideoFile(video, file)
 
@@ -199,48 +539,145 @@ async function moveWebVideoFiles (video: MVideoWithAllFiles) {
       objectStorageKey: file.filename,
       bucketInfo: CONFIG.OBJECT_STORAGE.WEB_VIDEOS
     })
+
+    logger.info('[MOVE_STORAGE] Web video file moved successfully', {
+      filename: file.filename,
+      resolution: file.resolution,
+      sourcePath,
+      destinationKey,
+      ...lTagsBase()
+    })
   }))
 }
 
-async function moveHLSFiles (video: MVideoWithAllFiles) {
+async function moveHLSFiles (video: MVideoWithAllFiles, options?: {
+  onInitialCutoverReady?: (options: { playlistId: number, fileIds: number[] }) => Promise<void>
+}): Promise<boolean> {
   const queue = new PQueue({ concurrency: CONFIG.OBJECT_STORAGE.UPLOAD_CONCURRENCY })
+  let initialCutoverDeferred = false
 
   for (const playlist of video.VideoStreamingPlaylists) {
 
+    const filesToMove = playlist.VideoFiles.filter(f => f.storage === FileStorage.FILE_SYSTEM)
+    if (filesToMove.length > 0) {
+      logger.info('[MOVE_STORAGE] Starting HLS files move to object storage', {
+        videoUUID: video.uuid,
+        playlistId: playlist.id,
+        playlistFilename: playlist.playlistFilename,
+        fileCount: filesToMove.length,
+        files: filesToMove.map(f => ({
+          filename: f.filename,
+          resolution: f.resolution,
+          size: f.size,
+          sourcePath: join(getHLSDirectory(video), f.filename),
+          destinationKey: `${CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS.PREFIX || ''}hls/${video.uuid}/${f.filename}`,
+          destinationBucket: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS.BUCKET_NAME
+        })),
+        ...lTagsBase()
+      })
+    }
+
     const results = await queue.addAll(playlist.VideoFiles.map(file => async () => {
-      if (file.storage !== FileStorage.FILE_SYSTEM) return false
+      if (file.storage !== FileStorage.FILE_SYSTEM) return undefined
 
       // Resolution playlist
       const playlistFilename = getHLSResolutionPlaylistFilename(file.filename)
+      const sourcePlaylistPath = join(getHLSDirectory(video), playlistFilename)
+      const destPlaylistKey = `${CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS.PREFIX || ''}hls/${video.uuid}/${playlistFilename}`
+
+      logger.debug('[MOVE_STORAGE] Moving HLS resolution playlist to object storage', {
+        filename: playlistFilename,
+        sourcePath: sourcePlaylistPath,
+        destinationBucket: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS.BUCKET_NAME,
+        destinationKey: destPlaylistKey,
+        ...lTagsBase()
+      })
+
       await storeHLSFileFromFilename(video, playlistFilename)
 
       // Resolution fragmented file
+      const sourceFragmentPath = join(getHLSDirectory(video), file.filename)
+      const destFragmentKey = `${CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS.PREFIX || ''}hls/${video.uuid}/${file.filename}`
+
+      logger.debug('[MOVE_STORAGE] Moving HLS fragment file to object storage', {
+        filename: file.filename,
+        resolution: file.resolution,
+        sourcePath: sourceFragmentPath,
+        destinationBucket: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS.BUCKET_NAME,
+        destinationKey: destFragmentKey,
+        ...lTagsBase()
+      })
+
       await storeHLSFileFromFilename(video, file.filename)
 
       const oldPath = join(getHLSDirectory(video), file.filename)
+      const fragmentObjectStorageKey = generateHLSObjectStorageKey(video, file.filename)
+      const resolutionPlaylistObjectStorageKey = generateHLSObjectStorageKey(video, playlistFilename)
+
+      await ensureObjectStorageFileReady({
+        objectStorageKey: fragmentObjectStorageKey,
+        bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS
+      })
+      await ensureObjectStorageFileReady({
+        objectStorageKey: resolutionPlaylistObjectStorageKey,
+        bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS
+      })
+
+      if (playlist.storage === FileStorage.FILE_SYSTEM) {
+        return {
+          file,
+          oldPath,
+          sourcePlaylistPath,
+          playlistId: playlist.id
+        }
+      }
 
       await onVideoFileMoved({
         videoOrPlaylist: Object.assign(playlist, { Video: video }),
         file,
         oldPath,
-        objectStorageKey: file.filename,
+        objectStorageKey: fragmentObjectStorageKey,
         bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS
       })
-
-      // Resolution playlist file is in the same HLS directory
-      const resolutionPlaylistObjectStorageKey = generateHLSObjectStorageKey(video, playlistFilename)
       await removeLocalFileAfterMove({
-        path: join(getHLSDirectory(video), playlistFilename),
+        path: sourcePlaylistPath,
         objectStorageKey: resolutionPlaylistObjectStorageKey,
         bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS
       })
 
-      return true
+      logger.info('[MOVE_STORAGE] HLS file moved successfully', {
+        filename: file.filename,
+        resolution: file.resolution,
+        sourcePath: sourceFragmentPath,
+        destinationKey: destFragmentKey,
+        ...lTagsBase()
+      })
+
+      return {
+        file,
+        oldPath,
+        sourcePlaylistPath
+      }
     }))
 
-    const updatedFile = results.some(r => r === true)
+    const movedFiles = results.filter(r => !!r)
+    const updatedFile = movedFiles.length !== 0
 
     if (playlist.storage === FileStorage.FILE_SYSTEM) {
+      const masterPlaylistSourcePath = join(getHLSDirectory(video), playlist.playlistFilename)
+      const masterPlaylistDestKey =
+        `${CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS.PREFIX || ''}hls/${video.uuid}/${playlist.playlistFilename}`
+
+      logger.info('[MOVE_STORAGE] Moving HLS master playlist files to object storage', {
+        videoUUID: video.uuid,
+        playlistFilename: playlist.playlistFilename,
+        segmentsSha256Filename: playlist.segmentsSha256Filename,
+        sourcePath: masterPlaylistSourcePath,
+        destinationBucket: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS.BUCKET_NAME,
+        destinationKey: masterPlaylistDestKey,
+        ...lTagsBase()
+      })
+
       await storeHLSFileFromFilename(video, playlist.playlistFilename)
       await storeHLSFileFromFilename(video, playlist.segmentsSha256Filename)
 
@@ -255,25 +692,44 @@ async function moveHLSFiles (video: MVideoWithAllFiles) {
       if (!isPlaylistReady) {
         logger.warn(`HLS playlist ${playlist.playlistFilename} not ready in object storage, keeping local files`, lTagsBase())
       } else {
-        playlist.storage = FileStorage.OBJECT_STORAGE
-        await playlist.save()
-
         const segmentsSha256ObjectStorageKey = generateHLSObjectStorageKey(video, playlist.segmentsSha256Filename)
-        await removeLocalFileAfterMove({
-          path: join(getHLSDirectory(video), playlist.playlistFilename),
-          objectStorageKey: playlistObjectStorageKey,
-          bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS
-        })
-        await removeLocalFileAfterMove({
-          path: join(getHLSDirectory(video), playlist.segmentsSha256Filename),
+        await ensureObjectStorageFileReady({
           objectStorageKey: segmentsSha256ObjectStorageKey,
           bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS
         })
+        const cutoverFileIds = movedFiles.map(moved => moved.file.id)
+
+        logger.info('[MOVE_STORAGE] Initial HLS cutover is ready for deferred finalization', {
+          videoUUID: video.uuid,
+          playlistId: playlist.id,
+          fileIds: cutoverFileIds,
+          playlistFilename: playlist.playlistFilename,
+          ...lTagsBase()
+        })
+
+        logger.info('[MOVE_STORAGE] HLS master playlist files moved successfully', {
+          videoUUID: video.uuid,
+          playlistFilename: playlist.playlistFilename,
+          destinationKey: masterPlaylistDestKey,
+          ...lTagsBase()
+        })
+
+        if (cutoverFileIds.length !== 0 && options?.onInitialCutoverReady) {
+          await options.onInitialCutoverReady({
+            playlistId: playlist.id,
+            fileIds: cutoverFileIds
+          })
+          initialCutoverDeferred = true
+        }
       }
     }
 
-    if (updatedFile === true) {
-      playlist.assignP2PMediaLoaderInfoHashes(video, playlist.VideoFiles)
+    if (updatedFile === true && playlist.storage === FileStorage.OBJECT_STORAGE) {
+      await updateM3U8AndShaPlaylist(video, playlist)
+    }
+
+    if (updatedFile === true && playlist.storage !== FileStorage.OBJECT_STORAGE) {
+      await playlist.assignP2PMediaLoaderInfoHashes(video, playlist.VideoFiles)
       playlist.p2pMediaLoaderPeerVersion = P2P_MEDIA_LOADER_PEER_VERSION
 
       await playlist.save()
@@ -285,38 +741,145 @@ async function moveHLSFiles (video: MVideoWithAllFiles) {
   } catch {
     // Nothing to do, directory may be not empty if there is a transcoding in progress
   }
+
+  return initialCutoverDeferred
+}
+
+async function finalizeInitialHLSCutover (options: {
+  videoUUID: string
+  moveVideoState?: {
+    isNewVideo: boolean
+    previousVideoState: VideoStateType
+  }
+  hlsCutover: {
+    playlistId: number
+    fileIds: number[]
+  }
+  onProgress?: (percent: number) => void
+}) {
+  const { videoUUID, moveVideoState, hlsCutover, onProgress } = options
+
+  if (onProgress) onProgress(0)
+
+  // Wait for local files to be ready before switching serving source to object storage
+  await waitBeforeObjectStorageCutover()
+
+  if (onProgress) onProgress(20)
+
+  const video = await VideoModel.loadWithFiles(videoUUID)
+  if (!video) {
+    logger.warn('[MOVE_STORAGE] Video %s not found during HLS cutover finalization', videoUUID)
+    return
+  }
+
+  const playlist = video.VideoStreamingPlaylists.find(p => p.id === hlsCutover.playlistId)
+  if (!playlist) {
+    logger.warn('[MOVE_STORAGE] Playlist %s not found during HLS cutover finalization', hlsCutover.playlistId)
+    return
+  }
+
+  const movedFiles = playlist.VideoFiles.filter(file => hlsCutover.fileIds.includes(file.id))
+
+  // Update playlist storage status
+  playlist.storage = FileStorage.OBJECT_STORAGE
+
+  const totalFiles = movedFiles.length
+  for (let i = 0; i < movedFiles.length; i++) {
+    const file = movedFiles[i]
+    file.storage = FileStorage.OBJECT_STORAGE
+    await updateTorrentMetadata(Object.assign(playlist, { Video: video }), file)
+    await file.save()
+
+    // Remove local files after the delay
+    await removeLocalPathNow(join(getHLSDirectory(video), file.filename))
+    await removeLocalPathNow(join(getHLSDirectory(video), getHLSResolutionPlaylistFilename(file.filename)))
+
+    // Update progress (20-80% for file processing)
+    if (onProgress) {
+      const fileProgress = 20 + Math.floor(((i + 1) / totalFiles) * 60)
+      onProgress(fileProgress)
+    }
+  }
+
+  // Update playlist with new P2P info
+  await playlist.assignP2PMediaLoaderInfoHashes(video, playlist.VideoFiles)
+  playlist.p2pMediaLoaderPeerVersion = P2P_MEDIA_LOADER_PEER_VERSION
+  await playlist.save()
+
+  if (onProgress) onProgress(85)
+
+  // Remove master playlist files
+  await removeLocalPathNow(join(getHLSDirectory(video), playlist.playlistFilename))
+  await removeLocalPathNow(join(getHLSDirectory(video), playlist.segmentsSha256Filename))
+
+  if (onProgress) onProgress(90)
+
+  logger.info('[MOVE_STORAGE] Initial HLS cutover finalized for video %s', videoUUID)
+
+  // Decrement pendingMove and check if all move work is done
+  const pendingMove = await VideoJobInfoModel.decrease(videoUUID, 'pendingMove')
+  logger.info('[MOVE_STORAGE] pendingMove after HLS cutover finalization for %s: %d', videoUUID, pendingMove)
+
+  // Only transition state when ALL move work is complete (pendingMove reaches 0)
+  if (pendingMove === 0) {
+    logger.info('[MOVE_STORAGE] All move work complete for %s, transitioning state', videoUUID)
+
+    if (onProgress) onProgress(95)
+
+    if (moveVideoState) {
+      const videoForStateCheck = await VideoModel.loadFull(videoUUID)
+      const isAlreadyPublished = videoForStateCheck?.state === VideoState.PUBLISHED
+
+      if (isAlreadyPublished) {
+        logger.info('[MOVE_STORAGE] Video %s is already published, skipping state transition after object storage move', videoUUID)
+      } else {
+        await moveToNextState({ video: { uuid: videoUUID }, ...moveVideoState })
+      }
+    } else {
+      const videoFull = await VideoModel.loadFull(videoUUID)
+      await federateVideoIfNeeded(videoFull, false, undefined)
+    }
+  } else {
+    logger.info('[MOVE_STORAGE] More move work pending for %s (pendingMove: %d), deferring state transition', videoUUID, pendingMove)
+  }
+
+  if (onProgress) onProgress(100)
 }
 
 async function onVideoFileMoved (options: {
   videoOrPlaylist: MVideo | MStreamingPlaylistVideo
   file: MVideoFile
   oldPath: string
-  objectStorageKey?: string
-  bucketInfo?: BucketInfo
+  objectStorageKey: string
+  bucketInfo: BucketInfo
 }) {
   const { videoOrPlaylist, file, oldPath, objectStorageKey, bucketInfo } = options
 
-  let actualObjectStorageKey = objectStorageKey
+  logger.debug('Checking readiness before marking file as moved to object storage', {
+    filename: file.filename,
+    sourcePath: oldPath,
+    destinationBucket: bucketInfo.BUCKET_NAME,
+    destinationKey: objectStorageKey,
+    ...lTagsBase()
+  })
 
-  if (isStreamingPlaylist(videoOrPlaylist) && bucketInfo === CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS) {
-    actualObjectStorageKey = generateHLSObjectStorageKey(videoOrPlaylist.Video, objectStorageKey)
-  }
-
-  // Check readiness BEFORE updating database
-  logger.debug('Checking readiness before marking file as moved to object storage', lTagsBase())
   await removeLocalFileAfterMove({
     path: oldPath,
-    objectStorageKey: actualObjectStorageKey,
+    objectStorageKey,
     bucketInfo
   })
 
-  // Only update database after readiness is confirmed
   file.storage = FileStorage.OBJECT_STORAGE
 
   await updateTorrentMetadata(videoOrPlaylist, file)
   await file.save()
 
-  logger.debug('Removed %s after confirming object storage readiness', oldPath, lTagsBase())
+  logger.debug('Removed %s after confirming object storage readiness', oldPath, {
+    filename: file.filename,
+    sourcePath: oldPath,
+    destinationKey: objectStorageKey,
+    ...lTagsBase()
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -324,10 +887,38 @@ async function onVideoFileMoved (options: {
 async function moveThumbnailFiles (thumbnails: MThumbnail[]) {
   const queue = new PQueue({ concurrency: CONFIG.OBJECT_STORAGE.UPLOAD_CONCURRENCY })
 
+  const filesToMove = thumbnails.filter(t => t.storage === FileStorage.FILE_SYSTEM)
+  if (filesToMove.length > 0) {
+    logger.info('[MOVE_STORAGE] Starting thumbnails move to object storage', {
+      thumbnailCount: filesToMove.length,
+      thumbnails: filesToMove.map(t => ({
+        filename: t.filename,
+        width: t.width,
+        height: t.height,
+        sourcePath: t.getFSPath(),
+        destinationKey: `${CONFIG.OBJECT_STORAGE.THUMBNAILS.PREFIX || ''}${t.filename}`,
+        destinationBucket: CONFIG.OBJECT_STORAGE.THUMBNAILS.BUCKET_NAME
+      })),
+      ...lTagsBase()
+    })
+  }
+
   await queue.addAll(thumbnails.map(thumbnail => async () => {
     if (thumbnail.storage !== FileStorage.FILE_SYSTEM) return
 
     const thumbnailPath = thumbnail.getFSPath()
+    const destinationKey = `${CONFIG.OBJECT_STORAGE.THUMBNAILS.PREFIX || ''}${thumbnail.filename}`
+
+    logger.debug('[MOVE_STORAGE] Moving thumbnail to object storage', {
+      filename: thumbnail.filename,
+      width: thumbnail.width,
+      height: thumbnail.height,
+      sourcePath: thumbnailPath,
+      destinationBucket: CONFIG.OBJECT_STORAGE.THUMBNAILS.BUCKET_NAME,
+      destinationKey,
+      ...lTagsBase()
+    })
+
     await storeThumbnail(thumbnailPath, thumbnail.filename)
 
     logger.debug(`Checking readiness before marking thumbnail file as moved to object storage`, lTagsBase())
@@ -339,6 +930,15 @@ async function moveThumbnailFiles (thumbnails: MThumbnail[]) {
 
     thumbnail.storage = FileStorage.OBJECT_STORAGE
     await thumbnail.save()
+
+    logger.info('[MOVE_STORAGE] Thumbnail moved successfully', {
+      filename: thumbnail.filename,
+      width: thumbnail.width,
+      height: thumbnail.height,
+      sourcePath: thumbnailPath,
+      destinationKey,
+      ...lTagsBase()
+    })
   }))
 }
 
@@ -347,10 +947,34 @@ async function moveThumbnailFiles (thumbnails: MThumbnail[]) {
 async function moveStoryboardFiles (storyboards: MStoryboard[]) {
   const queue = new PQueue({ concurrency: CONFIG.OBJECT_STORAGE.UPLOAD_CONCURRENCY })
 
+  const filesToMove = storyboards.filter(s => s.storage === FileStorage.FILE_SYSTEM)
+  if (filesToMove.length > 0) {
+    logger.info('[MOVE_STORAGE] Starting storyboards move to object storage', {
+      storyboardCount: filesToMove.length,
+      storyboards: filesToMove.map(s => ({
+        filename: s.filename,
+        sourcePath: s.getFSPath(),
+        destinationKey: `${CONFIG.OBJECT_STORAGE.STORYBOARDS.PREFIX || ''}${s.filename}`,
+        destinationBucket: CONFIG.OBJECT_STORAGE.STORYBOARDS.BUCKET_NAME
+      })),
+      ...lTagsBase()
+    })
+  }
+
   await queue.addAll(storyboards.map(storyboard => async () => {
     if (storyboard.storage !== FileStorage.FILE_SYSTEM) return
 
     const storyboardPath = storyboard.getFSPath()
+    const destinationKey = `${CONFIG.OBJECT_STORAGE.STORYBOARDS.PREFIX || ''}${storyboard.filename}`
+
+    logger.debug('[MOVE_STORAGE] Moving storyboard to object storage', {
+      filename: storyboard.filename,
+      sourcePath: storyboardPath,
+      destinationBucket: CONFIG.OBJECT_STORAGE.STORYBOARDS.BUCKET_NAME,
+      destinationKey,
+      ...lTagsBase()
+    })
+
     await storeStoryboard(storyboardPath, storyboard.filename)
 
     logger.debug(`Checking readiness before marking storyboard file as moved to object storage`, lTagsBase())
@@ -362,6 +986,13 @@ async function moveStoryboardFiles (storyboards: MStoryboard[]) {
 
     storyboard.storage = FileStorage.OBJECT_STORAGE
     await storyboard.save()
+
+    logger.info('[MOVE_STORAGE] Storyboard moved successfully', {
+      filename: storyboard.filename,
+      sourcePath: storyboardPath,
+      destinationKey,
+      ...lTagsBase()
+    })
   }))
 }
 
@@ -375,6 +1006,21 @@ async function moveTorrentFiles (video: MVideoWithAllFiles) {
 
   const queue = new PQueue({ concurrency: CONFIG.OBJECT_STORAGE.UPLOAD_CONCURRENCY })
 
+  const filesToMove = allFiles.filter(f => f.torrentFilename)
+  if (filesToMove.length > 0) {
+    logger.info('[MOVE_STORAGE] Starting torrent files move to object storage', {
+      videoUUID: video.uuid,
+      fileCount: filesToMove.length,
+      torrents: filesToMove.map(f => ({
+        filename: f.torrentFilename,
+        sourcePath: join(CONFIG.STORAGE.TORRENTS_DIR, f.torrentFilename),
+        destinationKey: `${CONFIG.OBJECT_STORAGE.TORRENTS.PREFIX || ''}${f.torrentFilename}`,
+        destinationBucket: CONFIG.OBJECT_STORAGE.TORRENTS.BUCKET_NAME
+      })),
+      ...lTagsBase()
+    })
+  }
+
   await queue.addAll(allFiles.map(file => async () => {
     if (!file.torrentFilename) return
 
@@ -386,7 +1032,17 @@ async function moveTorrentFiles (video: MVideoWithAllFiles) {
       return
     }
 
+    const destinationKey = `${CONFIG.OBJECT_STORAGE.TORRENTS.PREFIX || ''}${file.torrentFilename}`
+
     try {
+      logger.debug('[MOVE_STORAGE] Moving torrent file to object storage', {
+        filename: file.torrentFilename,
+        sourcePath: torrentPath,
+        destinationBucket: CONFIG.OBJECT_STORAGE.TORRENTS.BUCKET_NAME,
+        destinationKey,
+        ...lTagsBase()
+      })
+
       await storeTorrentFile(torrentPath, file.torrentFilename)
 
       logger.debug(`Removing torrent file ${torrentPath} because it's now on object storage`, lTagsBase())
@@ -395,42 +1051,75 @@ async function moveTorrentFiles (video: MVideoWithAllFiles) {
         objectStorageKey: file.torrentFilename,
         bucketInfo: CONFIG.OBJECT_STORAGE.TORRENTS
       })
+
+      logger.info('[MOVE_STORAGE] Torrent file moved successfully', {
+        filename: file.torrentFilename,
+        sourcePath: torrentPath,
+        destinationKey,
+        ...lTagsBase()
+      })
     } catch (err) {
       logger.warn(`Cannot move torrent file ${torrentPath} to object storage`, { err, ...lTagsBase() })
     }
   }))
 }
 
+async function ensureObjectStorageFileReady (options: {
+  objectStorageKey: string
+  bucketInfo: BucketInfo
+}) {
+  const { objectStorageKey, bucketInfo } = options
+
+  const isReady = await checkObjectStorageReadiness({
+    key: objectStorageKey,
+    bucketInfo,
+    maxRetries: 30,
+    retryIntervalMs: 10000
+  })
+
+  if (!isReady) {
+    logger.error(
+      'Object storage file %s is not ready after max retries, keeping local file and failing job',
+      objectStorageKey,
+      lTagsBase()
+    )
+    throw new Error(`Object storage file ${objectStorageKey} is not ready after max retries`)
+  }
+}
+
+async function waitBeforeObjectStorageCutover () {
+  const delayMs = CONFIG.OBJECT_STORAGE.KEEP_LOCAL_FILE_AFTER_MOVE
+  if (!delayMs) return
+
+  logger.info(
+    'Keeping local HLS files for %d ms before switching serving source to object storage.',
+    delayMs,
+    lTagsBase()
+  )
+
+  await new Promise(resolve => setTimeout(resolve, delayMs))
+}
+
+async function removeLocalPathNow (path: string) {
+  await remove(path)
+  await removeParentDirIfEmpty(path)
+}
+
 async function removeLocalFileAfterMove (options: {
   path: string
   objectStorageKey?: string
   bucketInfo?: BucketInfo
+  skipReadinessCheck?: boolean
 }) {
-  const { path, objectStorageKey, bucketInfo } = options
+  const { path, objectStorageKey, bucketInfo, skipReadinessCheck } = options
   const delayMs = CONFIG.OBJECT_STORAGE.KEEP_LOCAL_FILE_AFTER_MOVE
 
-  // Check readiness before removal if object storage key is provided
-  if (objectStorageKey && bucketInfo) {
-    const isReady = await checkObjectStorageReadiness({
-      key: objectStorageKey,
-      bucketInfo,
-      maxRetries: 30,
-      retryIntervalMs: 10000
-    })
-
-    if (!isReady) {
-      logger.error(
-        'Object storage file %s is not ready after max retries, keeping local file and failing job',
-        objectStorageKey,
-        lTagsBase()
-      )
-      throw new Error(`Object storage file ${objectStorageKey} is not ready after max retries`)
-    }
+  if (objectStorageKey && bucketInfo && !skipReadinessCheck) {
+    await ensureObjectStorageFileReady({ objectStorageKey, bucketInfo })
   }
 
   if (!delayMs) {
-    await remove(path)
-    await removeParentDirIfEmpty(path)
+    await removeLocalPathNow(path)
     return
   }
 
@@ -442,11 +1131,8 @@ async function removeLocalFileAfterMove (options: {
   )
 
   const timer = setTimeout(() => {
-    remove(path)
-      .then(async () => {
-        logger.debug('Removed delayed local file %s after object storage move.', path, lTagsBase())
-        await removeParentDirIfEmpty(path)
-      })
+    removeLocalPathNow(path)
+      .then(() => logger.debug('Removed delayed local file %s after object storage move.', path, lTagsBase()))
       .catch(err => logger.warn('Cannot remove delayed local file %s.', path, { err, ...lTagsBase() }))
   }, delayMs)
 

@@ -130,7 +130,7 @@ export class VideosRedundancyScheduler extends AbstractScheduler {
       } catch (err) {
         logger.error(
           'Cannot extend or remove expiration of %s video from our redundancy system.',
-          this.buildEntryLogId(redundancyModel),
+          await this.buildEntryLogId(redundancyModel),
           { err, ...lTags(redundancyModel.getVideoUUID()) }
         )
       }
@@ -157,7 +157,7 @@ export class VideosRedundancyScheduler extends AbstractScheduler {
       } catch (err) {
         logger.error(
           'Cannot remove redundancy %s from our redundancy system.',
-          this.buildEntryLogId(redundancyModel),
+          await this.buildEntryLogId(redundancyModel),
           lTags(redundancyModel.getVideoUUID())
         )
       }
@@ -220,7 +220,7 @@ export class VideosRedundancyScheduler extends AbstractScheduler {
     logger.info('Duplicating %s streaming playlist in videos redundancy with "%s" strategy.', video.url, strategy, lTags(video.uuid))
 
     const destDirectory = join(DIRECTORIES.HLS_REDUNDANCY, video.uuid)
-    const masterPlaylistUrl = playlist.getMasterPlaylistUrl(video)
+    const masterPlaylistUrl = await playlist.getMasterPlaylistUrl(video)
 
     const maxSizeKB = this.getTotalFileSizes([ playlist ]) / 1000
     const toleranceKB = maxSizeKB + ((5 * maxSizeKB) / 100) // 5% more tolerance
@@ -284,7 +284,7 @@ export class VideosRedundancyScheduler extends AbstractScheduler {
     return new Date(Date.now() + expiresAfterMs)
   }
 
-  private buildEntryLogId (object: MVideoRedundancyStreamingPlaylistVideo) {
+  private async buildEntryLogId (object: MVideoRedundancyStreamingPlaylistVideo) {
     return `${object.VideoStreamingPlaylist.getMasterPlaylistUrl(object.VideoStreamingPlaylist.Video)}`
   }
 

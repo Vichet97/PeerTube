@@ -150,8 +150,10 @@ async function createMoveStorageJobs (req: express.Request, res: express.Respons
           type: storage === 'object-storage' ? 'move-to-object-storage' : 'move-to-file-system',
           video: videoFull
         })
-        await JobQueue.Instance.createJob(job)
-        jobsCreated++
+        if (job) {
+          await JobQueue.Instance.createJob(job)
+          jobsCreated++
+        }
       } catch (err) {
         // Continue with other videos if one fails
       }

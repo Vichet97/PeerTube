@@ -17,9 +17,12 @@ export interface BaseTranscodeVODOptions {
 
   outputPath: string
 
-  // Will be released after the ffmpeg started
+  // Will be released after the ffmpeg started (optional, controlled by caller)
   // To prevent a bug where the input file does not exist anymore when running ffmpeg
-  inputFileMutexReleaser: MutexInterface.Releaser
+  inputFileMutexReleaser?: MutexInterface.Releaser
+
+  // When true, the lock is held by the parent handler, so FFmpeg won't release it
+  filesLockedInParent?: boolean
 
   resolution: number
   fps: number
@@ -70,14 +73,16 @@ export type TranscodeVODOptions =
 
 export class FFmpegVOD {
   private readonly commandWrapper: FFmpegCommandWrapper
+  private readonly timeoutMs?: number
 
   private ended = false
 
-  constructor (options: FFmpegCommandWrapperOptions) {
+  constructor (options: FFmpegCommandWrapperOptions, timeoutMs?: number) {
     this.commandWrapper = new FFmpegCommandWrapper(options)
+    this.timeoutMs = timeoutMs
   }
 
-  async transcode (options: TranscodeVODOptions) {
+  async transcode (options: TranscodeVODOptions & { timeoutMs?: number }) {
     const builders: {
       [type in TranscodeVODOptionsType]: (options: TranscodeVODOptions) => Promise<void> | void
     } = {
@@ -88,18 +93,21 @@ export class FFmpegVOD {
       'video': this.buildVODCommand.bind(this)
     }
 
-    this.commandWrapper.debugLog('Will run transcode.', { options })
+    const { timeoutMs: optionsTimeout, ...transcodeOptions } = options
+    const effectiveTimeout = optionsTimeout ?? this.timeoutMs
 
-    const inputPaths = [ options.videoInputPath, options.separatedAudioInputPath ].filter(e => !!e)
+    this.commandWrapper.debugLog('Will run transcode.', { options: transcodeOptions })
 
-    this.commandWrapper.buildCommand(inputPaths, options.inputFileMutexReleaser)
-      .output(options.outputPath)
+    const inputPaths = [ transcodeOptions.videoInputPath, (transcodeOptions as any).separatedAudioInputPath ].filter(e => !!e)
 
-    await builders[options.type](options)
+    this.commandWrapper.buildCommand(inputPaths, (transcodeOptions as any).inputFileMutexReleaser, (transcodeOptions as any).filesLockedInParent)
+      .output(transcodeOptions.outputPath)
 
-    await this.commandWrapper.runCommand()
+    await builders[transcodeOptions.type](transcodeOptions)
 
-    await this.fixHLSPlaylistIfNeeded(options)
+    await this.commandWrapper.runCommand({ timeoutMs: effectiveTimeout })
+
+    await this.fixHLSPlaylistIfNeeded(transcodeOptions)
 
     this.ended = true
   }

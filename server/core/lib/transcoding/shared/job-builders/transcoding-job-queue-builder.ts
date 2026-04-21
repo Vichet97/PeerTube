@@ -35,8 +35,9 @@ export class TranscodingJobQueueBuilder extends AbstractJobBuilder<FullPayload> 
     const requiredPriority = await getTranscodingJobPriority({ user, type: 'vod-required' })
     const optionalPriority = await getTranscodingJobPriority({ user, type: 'vod-optional' })
 
-    const nextTranscodingSequentialJobs = children.map(p => {
-      return p.map(payload => {
+    const flattenedSequentialJobs = children
+      .flat()
+      .map(payload => {
         return this.buildTranscodingJob({
           payload,
 
@@ -45,13 +46,14 @@ export class TranscodingJobQueueBuilder extends AbstractJobBuilder<FullPayload> 
             : optionalPriority
         })
       })
-    })
 
     const transcodingJobBuilderJob: CreateJobArgument = {
       type: 'transcoding-job-builder',
       payload: {
         videoUUID: video.uuid,
-        sequentialJobs: nextTranscodingSequentialJobs
+        sequentialJobs: flattenedSequentialJobs.length !== 0
+          ? [ flattenedSequentialJobs ]
+          : []
       }
     }
 

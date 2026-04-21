@@ -87,7 +87,7 @@ export class VideoRelatedJobsComponent implements OnInit {
   }
 
   hasProgress (job: Job) {
-    return job.type === 'video-transcoding' || job.type === 'video-import'
+    return job.type === 'video-transcoding' || job.type === 'video-import' || job.type === 'move-to-object-storage'
   }
 
   getProgress (job: Job) {

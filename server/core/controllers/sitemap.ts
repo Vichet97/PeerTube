@@ -95,39 +95,41 @@ async function getSitemapLocalVideoUrls () {
     hasData = data.length !== 0
     i++
 
-    acc = acc.concat(
-      data.map(v => {
-        const contentLoc = v.getHLSPlaylist()?.getMasterPlaylistUrl(v) ||
-          v.getMaxQualityFile(VideoFileStream.VIDEO)?.getFileUrl(v) ||
-          v.getMaxQualityFile(VideoFileStream.AUDIO)?.getFileUrl(v)
+    const mapped = await Promise.all(data.map(async v => {
+      const contentLoc = v.getHLSPlaylist()
+        ? await v.getHLSPlaylist().getMasterPlaylistUrl(v)
+        : v.getMaxQualityFile(VideoFileStream.VIDEO)
+          ? await v.getMaxQualityFile(VideoFileStream.VIDEO).getFileUrl(v)
+          : v.getMaxQualityFile(VideoFileStream.AUDIO)?.getFileUrl(v)
 
-        return {
-          url: process.env.EXPERIMENTAL_SITEMAP_VIDEO_URL === 'true'
-            ? WEBSERVER.URL + '/videos/watch/' + v.uuid
-            : WEBSERVER.URL + v.getWatchStaticPath(),
-          video: [
-            {
-              // Sitemap title should be < 100 characters
-              'title': truncate(v.name, { length: 100, omission: '...' }),
-              // Sitemap description should be < 2000 characters
-              'description': truncate(v.description || v.name, { length: 2000, omission: '...' }),
-              'player_loc': v.getEmbedStaticUrl(),
-              'thumbnail_loc': WEBSERVER.URL + v.getSmallestThumbnailStaticPath('16:9'),
-              'content_loc': contentLoc,
-              'duration': v.duration,
-              'view_count': v.views,
-              'publication_date': v.publishedAt.toISOString(),
-              'uploader': v.VideoChannel.getDisplayName(),
-              'uploader:info': v.VideoChannel.getClientUrl(),
-              'live': v.isLive ? 'YES' : 'NO',
-              'family_friendly': v.nsfw ? 'NO' : 'YES',
-              'rating': (v.likes * 5) / (v.likes + v.dislikes) || 0, // Rating is between 0.0 and 5.0
-              'tag': v.Tags.map(t => t.name)
-            }
-          ]
-        }
-      })
-    )
+      return {
+        url: process.env.EXPERIMENTAL_SITEMAP_VIDEO_URL === 'true'
+          ? WEBSERVER.URL + '/videos/watch/' + v.uuid
+          : WEBSERVER.URL + v.getWatchStaticPath(),
+        video: [
+          {
+            // Sitemap title should be < 100 characters
+            'title': truncate(v.name, { length: 100, omission: '...' }),
+            // Sitemap description should be < 2000 characters
+            'description': truncate(v.description || v.name, { length: 2000, omission: '...' }),
+            'player_loc': v.getEmbedStaticUrl(),
+            'thumbnail_loc': WEBSERVER.URL + v.getSmallestThumbnailStaticPath('16:9'),
+            'content_loc': contentLoc,
+            'duration': v.duration,
+            'view_count': v.views,
+            'publication_date': v.publishedAt.toISOString(),
+            'uploader': v.VideoChannel.getDisplayName(),
+            'uploader:info': v.VideoChannel.getClientUrl(),
+            'live': v.isLive ? 'YES' : 'NO',
+            'family_friendly': v.nsfw ? 'NO' : 'YES',
+            'rating': (v.likes * 5) / (v.likes + v.dislikes) || 0, // Rating is between 0.0 and 5.0
+            'tag': v.Tags.map(t => t.name)
+          }
+        ]
+      }
+    }))
+
+    acc = acc.concat(mapped)
   }
 
   return acc

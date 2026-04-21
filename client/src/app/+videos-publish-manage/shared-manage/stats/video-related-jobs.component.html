@@ -87,9 +87,31 @@
       ].join('\n') }}</pre>
     </div>
 
-    <div>
-      <pre>{{ stringifyValue(job.data) }}</pre>
-    </div>
+    @if (job.type === 'move-to-object-storage' && job.data._sourcePaths?.length) {
+      <div class="move-job-paths">
+        <h4 i18n>Files to move</h4>
+        <table class="table">
+          <thead>
+            <tr>
+              <th i18n>Source Path</th>
+              <th i18n>Destination Path</th>
+            </tr>
+          </thead>
+          <tbody>
+            @for (source of job.data._sourcePaths; track $index) {
+              <tr>
+                <td><code>{{ source }}</code></td>
+                <td><code>{{ job.data._destinationPaths[$index] }}</code></td>
+              </tr>
+            }
+          </tbody>
+        </table>
+      </div>
+    } @else {
+      <div>
+        <pre>{{ stringifyValue(job.data) }}</pre>
+      </div>
+    }
 
     <div>
       <pre>{{ stringifyValue(job.error) }}</pre>

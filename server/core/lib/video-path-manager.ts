@@ -16,7 +16,7 @@ import {
 } from '@server/types/models/index.js'
 import { MVideoSource } from '@server/types/models/video/video-source.js'
 import { Mutex } from 'async-mutex'
-import { remove } from 'fs-extra/esm'
+import { pathExists, remove } from 'fs-extra/esm'
 import { extname, join } from 'path'
 import { makeHLSFileAvailable, makeOriginalFileAvailable, makeWebVideoFileAvailable } from './object-storage/index.js'
 import { getHLSDirectory, getHLSResolutionPlaylistFilename } from './paths.js'
@@ -226,6 +226,12 @@ class VideoPathManager {
     const cleanup = async () => {
       for (const { destination, clean } of created) {
         if (!destination || !clean) continue
+
+        // Skip if file doesn't exist (may have been already removed or never created)
+        if (!await pathExists(destination)) {
+          logger.debug('Skipping cleanup of non-existent file %s.', destination)
+          continue
+        }
 
         try {
           await remove(destination)

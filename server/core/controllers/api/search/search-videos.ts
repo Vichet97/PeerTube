@@ -131,7 +131,7 @@ async function searchVideosDB (query: VideosSearchQueryAfterSanitize, req: expre
     'filter:api.search.videos.local.list.result'
   )
 
-  return res.json(getFormattedObjects(resultList.data, resultList.total, guessAdditionalAttributesFromQuery(query)))
+  return res.json(await getFormattedObjects(resultList.data, resultList.total, guessAdditionalAttributesFromQuery(query)))
 }
 
 async function searchVideoURI (url: string, res: express.Response) {
@@ -161,7 +161,7 @@ async function searchVideoURI (url: string, res: express.Response) {
 
   return res.json({
     total: video ? 1 : 0,
-    data: video ? [ video.toFormattedJSON() ] : []
+    data: video ? [ await video.toFormattedJSON() ] : []
   })
 }
 

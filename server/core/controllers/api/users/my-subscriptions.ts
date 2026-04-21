@@ -154,7 +154,7 @@ async function listUserSubscriptions (req: express.Request, res: express.Respons
     search: req.query.search
   })
 
-  return res.json(getFormattedObjects(resultList.data, resultList.total))
+  return res.json(await getFormattedObjects(resultList.data, resultList.total))
 }
 
 async function getUserSubscriptionVideos (req: express.Request, res: express.Response) {
@@ -180,5 +180,5 @@ async function getUserSubscriptionVideos (req: express.Request, res: express.Res
     'filter:api.user.me.subscription-videos.list.result'
   )
 
-  return res.json(getFormattedObjects(resultList.data, resultList.total, guessAdditionalAttributesFromQuery(query)))
+  return res.json(await getFormattedObjects(resultList.data, resultList.total, guessAdditionalAttributesFromQuery(query)))
 }

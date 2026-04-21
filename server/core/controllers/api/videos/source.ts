@@ -200,16 +200,17 @@ async function addVideoJobsAfterUpload (video: MVideoFullLight, videoFile: MVide
   ]
 
   if (video.state === VideoState.TO_MOVE_TO_EXTERNAL_STORAGE) {
-    jobs.push(
-      await buildMoveVideoJob({
-        type: 'move-to-object-storage',
-        video,
-        moveVideoState: {
-          isNewVideo: false,
-          previousVideoState: undefined
-        }
-      })
-    )
+    const job = await buildMoveVideoJob({
+      type: 'move-to-object-storage',
+      video,
+      moveVideoState: {
+        isNewVideo: false,
+        previousVideoState: undefined
+      }
+    })
+    if (job) {
+      jobs.push(job)
+    }
   }
 
   if (video.state === VideoState.TO_TRANSCODE) {
