@@ -40,6 +40,7 @@ node_modules
 /dist
 /PeerTube.iml
 *.swp
+.omx
 .kilocode
 # Zanata
 /.zanata-cache
