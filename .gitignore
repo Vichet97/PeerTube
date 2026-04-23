@@ -40,7 +40,7 @@ node_modules
 /dist
 /PeerTube.iml
 *.swp
-
+.kilocode
 # Zanata
 /.zanata-cache
 /scripts/i18n/generate-iso639-target.ts

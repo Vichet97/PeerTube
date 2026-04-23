@@ -178,7 +178,7 @@ object_storage:
   enabled: true
 
   # Without protocol, will default to HTTPS
-  endpoint: 'https://io.quotaless.cloud'
+  endpoint: 'http://127.0.0.1:9001'
 
   region: 'us-east-1'
 
@@ -210,8 +210,8 @@ object_storage:
     request_timeout: 120
 
   credentials:
-    access_key_id: 'l0Uw4ErcXXG7_bOgk_J2g8Bjesal7W-8giRTjBo0cpY.mwoxYnY_rUK0kJE4ej0KPXqY_JJKND-PSCBBl-dM4rY'
-    secret_access_key: 'gatewaysecret'
+    access_key_id: 'peertube'
+    secret_access_key: '016997791aA'
 
   # Maximum amount to upload in one request to object storage
   max_upload_part: 100MB
