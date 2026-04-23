@@ -183,7 +183,14 @@ export async function updateTorrentMetadata (videoOrPlaylist: MVideo | MStreamin
 
   if (useObjectStorage) {
     if (!hasLocalTorrent) {
-      await makeTorrentFileAvailable(oldTorrentFilename, oldTorrentPath)
+      try {
+        await makeTorrentFileAvailable(oldTorrentFilename, oldTorrentPath)
+      } catch (err) {
+        // Torrent doesn't exist in object storage - regenerate it
+        logger.warn(`Torrent file ${oldTorrentFilename} not found in object storage, regenerating for video ${video.uuid}`)
+        await createTorrentAndSetInfoHash(videoOrPlaylist, videoFile)
+        return
+      }
     }
   } else {
     if (!hasLocalTorrent) {
