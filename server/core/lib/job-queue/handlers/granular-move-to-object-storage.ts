@@ -9,12 +9,14 @@ import { CONFIG } from '@server/initializers/config.js'
 import { VideoJobInfoModel } from '@server/models/video/video-job-info.js'
 import { VideoModel } from '@server/models/video/video.js'
 import { VideoPathManager } from '@server/lib/video-path-manager.js'
-import { pathExists, remove } from 'fs-extra/esm'
+import { pathExists, remove, move } from 'fs-extra/esm'
 import { Job } from 'bullmq'
 import { moveVideoFileToObjectStorage } from '@server/lib/move-storage/move-to-object-storage.js'
 import { moveThumbnailToObjectStorage } from '@server/lib/move-storage/move-to-object-storage.js'
 import { moveMasterPlaylistToObjectStorage } from '@server/lib/move-storage/move-to-object-storage.js'
 import { moveHLSSegmentFilesToObjectStorage } from '@server/lib/move-storage/move-to-object-storage.js'
+import { MStreamingPlaylist, MVideo } from '@server/types/models/index.js'
+import { makeHLSFileAvailable } from '@server/lib/object-storage/videos.js'
 
 export async function processGranularMoveToObjectStorage (job: Job) {
   const payload = job.data
@@ -102,7 +104,7 @@ async function processMoveVideoFile (
     logger.info('[GRANULAR_MOVE] Video file %s move completed', fileId)
 
     // Check if all files are moved to determine if we should transition video state
-    await checkAndTransitionVideoState(videoUUID, isNewVideo, previousVideoState)
+    await checkAndTransitionVideoState(videoUUID, isNewVideo, previousVideoState, false)
 
   } catch (err) {
     logger.error('[GRANULAR_MOVE] Failed to move video file %s: %s', fileId, err.message || err)
@@ -133,8 +135,9 @@ async function processMoveHLSPlaylist (
 
   // Check if playlist is already in object storage
   if (playlist.storage === FileStorage.OBJECT_STORAGE) {
-    logger.info('[GRANULAR_MOVE] Playlist %s is already in object storage, skipping job %s', playlistId, job.id)
-    return
+    logger.info('[GRANULAR_MOVE] Playlist %s is already in object storage, will still process files', playlistId, job.id)
+    // Continue processing - we still need to move individual files that may not be on OBJECT_STORAGE yet
+    // The isFirstResolutionMove will be false, so we'll only move files and regenerate master playlist
   }
 
   // Check if files exist before attempting to move
@@ -174,7 +177,7 @@ async function processMoveHLSPlaylist (
   // If ALL files were already in object storage, skip the job entirely
   if (filesToMove.length === 0 && skippedFileIds.length === fileIds.length) {
     logger.info('[GRANULAR_MOVE] All files for playlist %s are already in object storage, skipping job %s', playlistId, job.id)
-    await checkAndTransitionVideoState(videoUUID, isNewVideo, previousVideoState)
+    await checkAndTransitionVideoState(videoUUID, isNewVideo, previousVideoState, false)
     return
   }
 
@@ -206,60 +209,54 @@ async function processMoveHLSPlaylist (
 
   updateProgress(0)
 
-  // Check if there are pending transcoding jobs for this video
-  // If yes, we should NOT upload/delete the master playlist yet because other resolutions are still transcoding
-  // Also check if master playlist is already in object storage
-  const hasPendingTranscodingJobs = await checkHasPendingTranscodingJobs(videoUUID)
-  const playlistAlreadyOnOS = playlist.storage === FileStorage.OBJECT_STORAGE as any
-  const shouldMoveMasterPlaylist = !hasPendingTranscodingJobs && !playlistAlreadyOnOS
+  // Determine if this is the first resolution being moved to object storage
+  const isFirstResolutionMove = playlist.storage !== FileStorage.OBJECT_STORAGE
 
-  if (hasPendingTranscodingJobs) {
-    logger.info('[GRANULAR_MOVE] Pending transcoding jobs found for %s, will move segments but skip master playlist upload', videoUUID)
-  } else if (playlistAlreadyOnOS) {
-    logger.info('[GRANULAR_MOVE] Playlist already on object storage for %s, skipping master playlist upload', videoUUID)
+  if (isFirstResolutionMove) {
+    logger.info('[GRANULAR_MOVE] First resolution move for %s, will upload master playlist and update storage', videoUUID)
   } else {
-    logger.info('[GRANULAR_MOVE] No pending transcoding for %s, will upload master playlist', videoUUID)
+    logger.info('[GRANULAR_MOVE] Subsequent resolution move for %s, will update local master playlist only', videoUUID)
   }
 
   try {
-    // Step 1: Regenerate master playlist + SHA while LOCAL segment files still exist
-    // This ensures the SHA can read from local files for fast hashing
-    logger.info('[GRANULAR_MOVE] Regenerating master playlist and SHA before segment moves for playlist %s', playlistId)
+    // Step 0: Ensure local master playlist exists
+    // If local master playlist is missing (e.g., deleted after first resolution), download from OS
+    await ensureLocalMasterPlaylistExists(video, playlist)
+
+    // Step 1: Upload fragment + resolution playlist files to object storage
+    // This must be done BEFORE setting file.storage = OBJECT_STORAGE
+    // because regenerating master playlist needs to hash these files (via makeAvailable)
+    updateProgress(20)
+    await moveHLSSegmentFilesToObjectStorage(videoUUID, playlistId, effectiveFileIds)
+    // Note: moveHLSSegmentFilesToObjectStorage sets videoFile.storage = OBJECT_STORAGE
+
+    // Step 2: If this is the first resolution, set playlist.storage to OBJECT_STORAGE
+    // BEFORE regenerating master playlist so it generates OS segment URLs
+    if (isFirstResolutionMove) {
+      playlist.storage = FileStorage.OBJECT_STORAGE
+      await playlist.save()
+      logger.info('[GRANULAR_MOVE] Set playlist.storage = OBJECT_STORAGE before master regeneration', playlistId)
+    }
+
+    // Step 3: Regenerate master playlist + SHA
+    // When playlist.storage = OBJECT_STORAGE and file.storage = OBJECT_STORAGE,
+    // this generates OS segment URLs and SHA256 by downloading from object storage
+    logger.info('[GRANULAR_MOVE] Regenerating master playlist and SHA for playlist %s', playlistId)
     const { updateM3U8AndShaPlaylist } = await import('@server/lib/hls.js')
     await updateM3U8AndShaPlaylist(video, playlist)
 
-    // Step 2: Upload fragment + resolution playlist files, then delete locally
-    // This is done by moveHLSSegmentFilesToObjectStorage
-    updateProgress(20)
-    await moveHLSSegmentFilesToObjectStorage(videoUUID, playlistId, effectiveFileIds)
-
-    // Step 3: Upload master playlist + SHA, then delete locally
-    // Do this AFTER segment files are uploaded so master references valid URLs
-    // BUT only if there are no pending transcoding jobs
-    if (shouldMoveMasterPlaylist) {
-      updateProgress(80)
-      await moveMasterPlaylistToObjectStorage(videoUUID, playlistId)
-
-      // Step 4: Delete local master + SHA files
-      const masterPath = VideoPathManager.Instance.getFSHLSOutputPath(video, playlist.playlistFilename)
-      const shaPath = VideoPathManager.Instance.getFSHLSOutputPath(video, playlist.segmentsSha256Filename)
-      await removeLocalPathNow(masterPath)
-      await removeLocalPathNow(shaPath)
-      logger.info('[GRANULAR_MOVE] Deleted local master playlist and SHA for playlist %s', playlistId)
-    } else {
-      logger.info('[GRANULAR_MOVE] Skipped master playlist upload/delete for %s due to pending transcoding', playlistId)
-      updateProgress(100)
-      logger.info('[GRANULAR_MOVE] HLS playlist %s bundle move completed (segments only)', playlistId)
-      // Still check state transition, but don't complete the full bundle move
-      await checkAndTransitionVideoState(videoUUID, isNewVideo, previousVideoState)
-      return
-    }
+    // Step 4: Upload master playlist to object storage
+    // Master playlist now has correct OS segment URLs
+    updateProgress(80)
+    await moveMasterPlaylistToObjectStorage(videoUUID, playlistId)
+    logger.info('[GRANULAR_MOVE] Master playlist uploaded with OS URLs', playlistId)
 
     updateProgress(100)
-    logger.info('[GRANULAR_MOVE] HLS playlist %s bundle move completed', playlistId)
 
-    // Check if all files are moved to determine if we should transition video state
-    await checkAndTransitionVideoState(videoUUID, isNewVideo, previousVideoState)
+    // Step 5: Transition video state
+    // This is done immediately after first resolution move to publish the video
+    // Subsequent resolution moves will not trigger state transition
+    await checkAndTransitionVideoState(videoUUID, isNewVideo, previousVideoState, isFirstResolutionMove)
 
   } catch (err) {
     logger.error('[GRANULAR_MOVE] Failed to move HLS playlist %s: %s', playlistId, err.message || err)
@@ -316,7 +313,7 @@ async function processMoveThumbnail (
     logger.info('[GRANULAR_MOVE] Thumbnail %s move completed', thumbnailId)
 
     // Check if all files are moved to determine if we should transition video state
-    await checkAndTransitionVideoState(videoUUID, isNewVideo, previousVideoState)
+    await checkAndTransitionVideoState(videoUUID, isNewVideo, previousVideoState, false)
 
   } catch (err) {
     logger.error('[GRANULAR_MOVE] Failed to move thumbnail %s: %s', thumbnailId, err.message || err)
@@ -328,63 +325,65 @@ async function processMoveThumbnail (
 // Helper functions
 // ---------------------------------------------------------------------------
 
-// Check if there are pending transcoding jobs for this video
-// Used to determine if we should upload/delete the master playlist
-async function checkHasPendingTranscodingJobs (videoUUID: string): Promise<boolean> {
-  const { JobQueue } = await import('@server/lib/job-queue/index.js')
-  const pendingJobs = await JobQueue.Instance.listVideoUUIDsWithPendingTranscodingJobs()
-  return pendingJobs.has(videoUUID)
+async function ensureLocalMasterPlaylistExists (video: MVideo, playlist: MStreamingPlaylist) {
+  const masterPath = VideoPathManager.Instance.getFSHLSOutputPath(video, playlist.playlistFilename)
+  const masterExists = await pathExists(masterPath)
+
+  if (masterExists) {
+    logger.debug('[GRANULAR_MOVE] Local master playlist exists at %s', masterPath)
+    return
+  }
+
+  logger.info('[GRANULAR_MOVE] Local master playlist not found at %s, attempting to restore', masterPath)
+
+  // Try to download from object storage
+  if (playlist.storage === FileStorage.OBJECT_STORAGE) {
+    try {
+      const tmpPath = await makeHLSFileAvailable(video, playlist.playlistFilename, VideoPathManager.Instance.buildTMPDestination(playlist.playlistFilename))
+
+      await move(tmpPath, masterPath)
+      logger.info('[GRANULAR_MOVE] Restored master playlist from object storage to %s', masterPath)
+      return
+    } catch (err) {
+      logger.warn('[GRANULAR_MOVE] Failed to download master playlist from object storage: %s', err.message || err)
+    }
+  }
+
+  // If download failed or not on object storage, regenerate
+  logger.info('[GRANULAR_MOVE] Regenerating master playlist locally')
+  const { updateM3U8AndShaPlaylist } = await import('@server/lib/hls.js')
+  await updateM3U8AndShaPlaylist(video, playlist)
+  logger.info('[GRANULAR_MOVE] Regenerated master playlist at %s', masterPath)
 }
 
-async function checkAndTransitionVideoState (videoUUID: string, isNewVideo: boolean, previousVideoState: any) {
+async function checkAndTransitionVideoState (videoUUID: string, isNewVideo: boolean, previousVideoState: any, isFirstResolutionMove: boolean) {
+  // For first resolution move, transition video state immediately
+  // This publishes the video so users can start watching from object storage
+  if (isFirstResolutionMove) {
+    logger.info('[GRANULAR_MOVE] First resolution moved, transitioning video state now', videoUUID)
+
+    const { moveToNextState } = await import('@server/lib/video-state.js')
+    await moveToNextState({ video: { uuid: videoUUID }, isNewVideo, previousVideoState })
+    return
+  }
+
+  // For subsequent moves, just wait for pendingMove to reach 0
+  // Local master playlist is kept for SHA256 regeneration during subsequent moves
+  // It will be deleted when the video is fully processed (by the video transcoding job)
   const pendingMove = await VideoJobInfoModel.decrease(videoUUID, 'pendingMove')
   logger.info('[GRANULAR_MOVE] Decremented pendingMove for %s, remaining: %d', videoUUID, pendingMove)
 
-  // Only transition video state when ALL move jobs have completed (pendingMove reaches 0)
   if (pendingMove > 0) {
-    logger.info('[GRANULAR_MOVE] More move jobs pending for %s (pendingMove: %d), skipping state transition', videoUUID, pendingMove)
+    logger.info('[GRANULAR_MOVE] More move jobs pending for %s (pendingMove: %d), skipping', videoUUID, pendingMove)
     return
   }
 
-  // Check if there are still pending transcoding jobs
-  // If yes, we should NOT publish yet because the master playlist hasn't been uploaded
-  const hasPendingTranscoding = await checkHasPendingTranscodingJobs(videoUUID)
-  if (hasPendingTranscoding) {
-    logger.info('[GRANULAR_MOVE] Pending transcoding jobs found for %s, skipping state transition until master playlist is uploaded', videoUUID)
-    return
-  }
-
-  // Check if master playlist is on object storage
-  const masterOnObjectStorage = await checkMasterPlaylistOnObjectStorage(videoUUID)
-  if (!masterOnObjectStorage) {
-    logger.info('[GRANULAR_MOVE] Master playlist not yet on object storage for %s, uploading now before state transition', videoUUID)
-    // Trigger master playlist upload
-    await uploadMasterPlaylistNow(videoUUID)
-  }
-
-  // All move jobs complete, no pending transcoding, master playlist on object storage - safe to transition
-  logger.info('[GRANULAR_MOVE] All conditions met for %s, calling moveToNextState', videoUUID)
-  const { moveToNextState } = await import('@server/lib/video-state.js')
-  await moveToNextState({ video: { uuid: videoUUID }, isNewVideo, previousVideoState })
+  // All moves complete - delete local master playlist
+  logger.info('[GRANULAR_MOVE] All move jobs complete for %s, deleting local master playlist', videoUUID)
+  await deleteLocalMasterPlaylist(videoUUID)
 }
 
-async function checkMasterPlaylistOnObjectStorage (videoUUID: string): Promise<boolean> {
-  try {
-    const video = await VideoModel.loadWithFiles(videoUUID)
-    if (!video) return false
-
-    const playlist = video.VideoStreamingPlaylists?.[0]
-    if (!playlist) return false
-
-    // Check if playlist storage is OBJECT_STORAGE
-    return playlist.storage === FileStorage.OBJECT_STORAGE as any
-  } catch (err) {
-    logger.warn('[GRANULAR_MOVE] Error checking master playlist storage for %s: %s', videoUUID, err)
-    return false
-  }
-}
-
-async function uploadMasterPlaylistNow (videoUUID: string) {
+async function deleteLocalMasterPlaylist (videoUUID: string) {
   try {
     const video = await VideoModel.loadWithFiles(videoUUID)
     if (!video) return
@@ -392,30 +391,16 @@ async function uploadMasterPlaylistNow (videoUUID: string) {
     const playlist = video.VideoStreamingPlaylists?.[0]
     if (!playlist) return
 
-    // Check if playlist storage is already OBJECT_STORAGE
-    if (playlist.storage === FileStorage.OBJECT_STORAGE as any) {
-      logger.info('[GRANULAR_MOVE] Master playlist already on object storage for %s', videoUUID)
-      return
-    }
-
-    // Regenerate master playlist with object storage URLs
-    const { updateM3U8AndShaPlaylist } = await import('@server/lib/hls.js')
-    await updateM3U8AndShaPlaylist(video, playlist)
-
-    // Upload master playlist to object storage
-    const { moveMasterPlaylistToObjectStorage } = await import('@server/lib/move-storage/move-to-object-storage.js')
-    await moveMasterPlaylistToObjectStorage(videoUUID, playlist.id)
-
-    // Delete local master playlist
+    // Delete local master playlist and SHA if they exist
     const masterPath = VideoPathManager.Instance.getFSHLSOutputPath(video, playlist.playlistFilename)
     const shaPath = VideoPathManager.Instance.getFSHLSOutputPath(video, playlist.segmentsSha256Filename)
+
     await removeLocalPathNow(masterPath)
     await removeLocalPathNow(shaPath)
-
-    logger.info('[GRANULAR_MOVE] Master playlist uploaded to object storage for %s', videoUUID)
+    logger.info('[GRANULAR_MOVE] Local master playlist and SHA deleted for %s', videoUUID)
   } catch (err) {
-    logger.error('[GRANULAR_MOVE] Failed to upload master playlist for %s: %s', videoUUID, err)
-    throw err
+    logger.warn('[GRANULAR_MOVE] Error deleting local master playlist for %s: %s', videoUUID, err)
+    // Don't throw - this is cleanup, shouldn't block state transition
   }
 }
 

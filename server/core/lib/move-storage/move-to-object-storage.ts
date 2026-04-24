@@ -265,6 +265,11 @@ export async function moveHLSSegmentFilesToObjectStorage (videoUUID: string, pla
     await videoFile.save()
     logger.info('[GRANULAR_MOVE] HLS segment file %s marked as OBJECT_STORAGE', videoFile.id, { ...lTagsBase() })
   }
+
+  // Note: Do NOT set playlist.storage = OBJECT_STORAGE here yet.
+  // The playlist.storage will be set to OBJECT_STORAGE only after the master playlist
+  // is successfully uploaded to object storage. This ensures video players can find
+  // the master playlist when they request it from object storage.
 }
 
 // Pure upload: uploads pre-generated master playlist + sha from LOCAL filesystem.
@@ -296,6 +301,7 @@ export async function moveMasterPlaylistToObjectStorage (videoUUID: string, play
     playlistFilename: masterPlaylistFilename,
     segmentsSha256Filename: playlist.segmentsSha256Filename,
     destinationBucket: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS.BUCKET_NAME,
+    playlistStorageAlreadySet: playlist.storage === FileStorage.OBJECT_STORAGE,
     ...lTagsBase()
   })
 
@@ -309,12 +315,9 @@ export async function moveMasterPlaylistToObjectStorage (videoUUID: string, play
     retryIntervalMs: 10000
   })
 
-  const allFilesOnObjectStorage = playlist.VideoFiles.every(f => f.storage === FileStorage.OBJECT_STORAGE)
-  if (allFilesOnObjectStorage) {
-    playlist.storage = FileStorage.OBJECT_STORAGE
-    await playlist.save()
-    logger.info('[GRANULAR_MOVE] HLS playlist %s storage updated to OBJECT_STORAGE', playlistId, { ...lTagsBase() })
-  }
+  // Note: playlist.storage is already set to OBJECT_STORAGE by the caller before regenerating
+  // We don't need to set it again here
+  logger.info('[GRANULAR_MOVE] HLS playlist %s master playlist uploaded to object storage', playlistId, { ...lTagsBase() })
 }
 
 export async function moveThumbnailToObjectStorage (videoUUID: string, thumbnailId: number) {
