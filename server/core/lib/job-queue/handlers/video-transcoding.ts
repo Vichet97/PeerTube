@@ -2,6 +2,7 @@ import {
   HLSTranscodingPayload,
   MergeAudioTranscodingPayload,
   NewWebVideoResolutionTranscodingPayload,
+  VideoState,
   OptimizeTranscodingPayload,
   VideoResolution,
   VideoTranscodingPayload
@@ -12,6 +13,7 @@ import { onTranscodingEnded } from '@server/lib/transcoding/ended-transcoding.js
 import { generateHlsPlaylistResolution } from '@server/lib/transcoding/hls-transcoding.js'
 import { mergeAudioVideofile, optimizeOriginalVideofile, transcodeNewWebVideoResolution } from '@server/lib/transcoding/web-transcoding.js'
 import { removeAllWebVideoFiles } from '@server/lib/video-file.js'
+import { JobQueue } from '@server/lib/job-queue/index.js'
 import { VideoPathManager } from '@server/lib/video-path-manager.js'
 import { moveToFailedTranscodingState } from '@server/lib/video-state.js'
 import { UserModel } from '@server/models/user/user.js'
@@ -107,6 +109,10 @@ async function handleWebVideoMergeAudioJob (job: Job, payload: MergeAudioTransco
 
   logger.info('Merge audio transcoding job for %s ended.', video.uuid, lTags(video.uuid), { payload })
 
+  if (CONFIG.OBJECT_STORAGE.ENABLED) {
+    await publishVideoAfterFirstTranscodingBatchIfNeeded({ videoUUID: video.uuid, isNewVideo: payload.isNewVideo })
+  }
+
   await onTranscodingEnded({ isNewVideo: payload.isNewVideo, moveVideoToNextState: payload.canMoveVideoState, video })
 }
 
@@ -124,6 +130,10 @@ async function handleWebVideoOptimizeJob (job: Job, payload: OptimizeTranscoding
   await optimizeOriginalVideofile({ video, job })
 
   logger.info('Optimize transcoding job for %s ended.', video.uuid, lTags(video.uuid), { payload })
+
+  if (CONFIG.OBJECT_STORAGE.ENABLED) {
+    await publishVideoAfterFirstTranscodingBatchIfNeeded({ videoUUID: video.uuid, isNewVideo: payload.isNewVideo })
+  }
 
   await onTranscodingEnded({ isNewVideo: payload.isNewVideo, moveVideoToNextState: payload.canMoveVideoState, video })
 }
@@ -145,6 +155,10 @@ async function handleNewWebVideoResolutionJob (job: Job, payload: NewWebVideoRes
 
   logger.info('Web Video transcoding job for %s ended.', video.uuid, lTags(video.uuid), { payload })
 
+  if (CONFIG.OBJECT_STORAGE.ENABLED) {
+    await publishVideoAfterFirstTranscodingBatchIfNeeded({ videoUUID: video.uuid, isNewVideo: payload.isNewVideo })
+  }
+
   // Always move video to next state, we're ready enough with this resolution
   await onTranscodingEnded({ isNewVideo: payload.isNewVideo, moveVideoToNextState: payload.canMoveVideoState, video })
 }
@@ -154,6 +168,10 @@ async function handleNewWebVideoResolutionJob (job: Job, payload: NewWebVideoRes
 async function handleHLSJob (job: Job, payload: HLSTranscodingPayload, videoArg: MVideoFullLight) {
   // [LOGGER] HLS job started
   logger.info('[TRANSCODE_HANDLER] HLS transcoding job started for %s', videoArg.uuid, { payload })
+
+  if (CONFIG.OBJECT_STORAGE.ENABLED) {
+    await waitForPreviousHLSMoveJobs(videoArg.uuid)
+  }
 
   const inputFileMutexReleaser = await VideoPathManager.Instance.lockFiles(videoArg.uuid)
   let video: MVideoFullLight
@@ -216,6 +234,13 @@ async function handleHLSJob (job: Job, payload: HLSTranscodingPayload, videoArg:
   // [LOGGER] Missing stream check
   logger.info('[TRANSCODE_HANDLER] Missing stream check for %s: %s', videoStillExists.uuid, !!missingStream)
 
+  if (CONFIG.OBJECT_STORAGE.ENABLED && !missingStream) {
+    await publishVideoAfterFirstTranscodingBatchIfNeeded({
+      videoUUID: videoStillExists.uuid,
+      isNewVideo: payload.isNewVideo
+    })
+  }
+
   if (!missingStream && payload.deleteWebVideoFiles === true) {
     const resolutionExceptions = CONFIG.TRANSCODING.ALWAYS_TRANSCODE_PODCAST_OPTIMIZED_AUDIO
       ? [ VideoResolution.H_NOVIDEO ]
@@ -237,4 +262,71 @@ async function handleHLSJob (job: Job, payload: HLSTranscodingPayload, videoArg:
 
   // [LOGGER] HLS job handler complete
   logger.info('[TRANSCODE_HANDLER] HLS job handler complete for %s', videoStillExists.uuid)
+
+}
+
+async function waitForPreviousHLSMoveJobs (videoUUID: string) {
+  const startedAt = Date.now()
+  const maxWaitMs = 1000 * 60 * 60 * 24 // Align with move-hls-playlist job TTL (24h)
+  const pollEveryMs = 2000
+  let lastLogAt = 0
+
+  while (await JobQueue.Instance.hasPendingOrActiveHLSPlaylistMoveJob({ videoUUID, excludeCleanupJobs: true })) {
+    const elapsed = Date.now() - startedAt
+    if (elapsed >= maxWaitMs) {
+      throw new Error(`Timed out after ${elapsed}ms waiting for previous HLS move jobs of video ${videoUUID}`)
+    }
+
+    // Keep logs informative without flooding.
+    if (Date.now() - lastLogAt >= 30000) {
+      logger.info(
+        '[TRANSCODE_HANDLER] Waiting for previous HLS move jobs to finish before transcoding next resolution for %s (elapsed=%dms)',
+        videoUUID,
+        elapsed
+      )
+      lastLogAt = Date.now()
+    }
+
+    await new Promise(resolve => setTimeout(resolve, pollEveryMs))
+  }
+}
+
+async function publishVideoAfterFirstTranscodingBatchIfNeeded (options: {
+  videoUUID: string
+  isNewVideo: boolean
+}) {
+  const { videoUUID, isNewVideo } = options
+
+  const video = await VideoModel.loadFull(videoUUID)
+  if (!video) return
+
+  // Publish as soon as the first playable batch exists, even when object-storage
+  // move jobs are still pending.
+  if (video.state !== VideoState.TO_TRANSCODE && video.state !== VideoState.TO_MOVE_TO_EXTERNAL_STORAGE) return
+
+  const hasWebFiles = video.VideoFiles.length !== 0
+  const hlsPlaylist = video.getHLSPlaylist()
+  const hasHLSFiles = !!hlsPlaylist && hlsPlaylist.VideoFiles.length !== 0
+  if (!hasWebFiles && !hasHLSFiles) return
+
+  const { sequelizeTypescript } = await import('@server/initializers/database.js')
+  await sequelizeTypescript.transaction(async transaction => {
+    const videoInTx = await VideoModel.loadFull(videoUUID, transaction)
+    if (!videoInTx) return
+
+    if (videoInTx.state !== VideoState.TO_TRANSCODE && videoInTx.state !== VideoState.TO_MOVE_TO_EXTERNAL_STORAGE) return
+
+    const hasWebFilesInTx = videoInTx.VideoFiles.length !== 0
+    const hlsPlaylistInTx = videoInTx.getHLSPlaylist()
+    const hasHLSFilesInTx = !!hlsPlaylistInTx && hlsPlaylistInTx.VideoFiles.length !== 0
+    if (!hasWebFilesInTx && !hasHLSFilesInTx) return
+
+    videoInTx.waitTranscoding = false
+    await videoInTx.setNewState(VideoState.PUBLISHED, isNewVideo, transaction)
+  })
+
+  logger.info(
+    '[TRANSCODE_HANDLER] Published %s after first transcoding batch so playback can start while remaining jobs continue.',
+    videoUUID
+  )
 }

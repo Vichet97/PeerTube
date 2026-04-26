@@ -13,6 +13,15 @@ import { VideoStatsService } from './video-stats.service'
 
 type ColumnName = 'id' | 'type' | 'priority' | 'state' | 'progress' | 'createdAt' | 'processed'
 
+const PROGRESS_JOB_TYPES = new Set<JobType>([
+  'video-transcoding',
+  'video-import',
+  'move-to-object-storage',
+  'move-video-file-to-object-storage',
+  'move-hls-playlist-to-object-storage',
+  'move-thumbnail-to-object-storage'
+])
+
 @Component({
   templateUrl: './video-related-jobs.component.html',
   styleUrls: [
@@ -87,7 +96,7 @@ export class VideoRelatedJobsComponent implements OnInit {
   }
 
   hasProgress (job: Job) {
-    return job.type === 'video-transcoding' || job.type === 'video-import' || job.type === 'move-to-object-storage'
+    return PROGRESS_JOB_TYPES.has(job.type)
   }
 
   getProgress (job: Job) {
@@ -104,6 +113,9 @@ export class VideoRelatedJobsComponent implements OnInit {
       'video-transcoding': $localize`Video transcoding`,
       'video-transcription': $localize`Video transcription`,
       'move-to-object-storage': $localize`Move to object storage`,
+      'move-video-file-to-object-storage': $localize`Move video file to object storage`,
+      'move-hls-playlist-to-object-storage': $localize`Move HLS playlist to object storage`,
+      'move-thumbnail-to-object-storage': $localize`Move thumbnail to object storage`,
       'move-to-file-system': $localize`Move to file system`,
       'video-import': $localize`Video import`,
       'video-file-import': $localize`Video file import`,

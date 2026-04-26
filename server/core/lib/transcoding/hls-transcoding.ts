@@ -19,6 +19,7 @@ import { VideoPathManager } from '../video-path-manager.js'
 import { buildFFmpegVOD } from './shared/index.js'
 import { JobQueue } from '../job-queue/index.js'
 import { buildGranularHLSPlaylistMoveJob } from '../video-jobs.js'
+import { VideoJobInfoModel } from '@server/models/video/video-job-info.js'
 
 // Concat TS segments from a live video to a fragmented mp4 HLS playlist
 export async function generateHlsPlaylistResolutionFromTS (options: {
@@ -162,7 +163,13 @@ export async function onHLSVideoFileTranscoding (options: {
       await move(m3u8OutputPath, resolutionPlaylistPath, { overwrite: true })
       logger.info('[TRANSCODE_HLS] Playlist file moved successfully')
     } catch (err) {
-      logger.error('[TRANSCODE_HLS] FAILED to move playlist file from %s to %s: %s', m3u8OutputPath, resolutionPlaylistPath, err.message, { err })
+      logger.error(
+        '[TRANSCODE_HLS] FAILED to move playlist file from %s to %s: %s',
+        m3u8OutputPath,
+        resolutionPlaylistPath,
+        err.message,
+        { err }
+      )
       throw err
     }
     // [LOGGER] Resolution playlist moved
@@ -230,13 +237,14 @@ export async function onHLSVideoFileTranscoding (options: {
       const hlsMoveJob = await buildGranularHLSPlaylistMoveJob({
         videoUUID: video.uuid,
         playlistId: playlist.id,
-        fileIds: [savedVideoFile.id],
+        fileIds: [ savedVideoFile.id ],
         isNewVideo: false,
         previousVideoState: video.state
       })
 
       if (hlsMoveJob) {
         await JobQueue.Instance.createJob(hlsMoveJob)
+        await VideoJobInfoModel.increaseOrCreate(video.uuid, 'pendingMove')
         logger.info('[TRANSCODE_HLS] Created HLS segment move job for file %d of video %s', savedVideoFile.id, video.uuid)
       } else {
         logger.info('[TRANSCODE_HLS] Skipped HLS segment move job (already pending) for file %d of video %s', savedVideoFile.id, video.uuid)
@@ -259,7 +267,11 @@ export async function onHLSVideoFileTranscoding (options: {
     logger.info('[TRANSCODE_HLS] Source files still exist (should be moved): playlist=%s, video=%s', srcPlaylistExists, srcVideoExists)
 
     if (!finalDestPlaylistExists || !finalDestVideoExists) {
-      logger.error('[TRANSCODE_HLS] CRITICAL: Files NOT at destination after move! playlist=%s, video=%s', finalDestPlaylistExists, finalDestVideoExists)
+      logger.error(
+        '[TRANSCODE_HLS] CRITICAL: Files NOT at destination after move! playlist=%s, video=%s',
+        finalDestPlaylistExists,
+        finalDestVideoExists
+      )
     }
 
     return { resolutionPlaylistPath, videoFile: savedVideoFile }

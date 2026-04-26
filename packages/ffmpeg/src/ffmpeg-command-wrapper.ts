@@ -93,7 +93,11 @@ export class FFmpegCommandWrapper {
     this.command = undefined
   }
 
-  buildCommand (inputs: (string | Readable)[] | string | Readable, inputFileMutexReleaser?: MutexInterface.Releaser, filesLockedInParent?: boolean) {
+  buildCommand (
+    inputs: (string | Readable)[] | string | Readable,
+    inputFileMutexReleaser?: MutexInterface.Releaser,
+    filesLockedInParent?: boolean
+  ) {
     if (this.command) throw new Error('Command is already built')
 
     // We set cwd explicitly because ffmpeg appears to create temporary files when trancoding which fails in read-only file systems
@@ -133,12 +137,15 @@ export class FFmpegCommandWrapper {
       let promiseSettled = false
       let abortCheckInterval: ReturnType<typeof setInterval> | undefined
       let timeoutInterval: ReturnType<typeof setTimeout> | undefined
+      let syntheticProgressInterval: ReturnType<typeof setInterval> | undefined
+      let emitProgress: ((percent: number) => void) | undefined
 
       const settleReject = (err: Error) => {
         if (promiseSettled) return
         promiseSettled = true
         if (abortCheckInterval) clearInterval(abortCheckInterval)
         if (timeoutInterval) clearTimeout(timeoutInterval)
+        if (syntheticProgressInterval) clearInterval(syntheticProgressInterval)
         if (this.onSettled) this.onSettled()
         if (this.onError) this.onError(err)
         rej(err)
@@ -149,6 +156,7 @@ export class FFmpegCommandWrapper {
         promiseSettled = true
         if (abortCheckInterval) clearInterval(abortCheckInterval)
         if (timeoutInterval) clearTimeout(timeoutInterval)
+        if (syntheticProgressInterval) clearInterval(syntheticProgressInterval)
         if (this.onSettled) this.onSettled()
         if (this.onEnd) this.onEnd()
         res()
@@ -172,8 +180,9 @@ export class FFmpegCommandWrapper {
       }
 
       if (this.abortSignal) {
+        const abortSignal = this.abortSignal
         abortCheckInterval = setInterval(() => {
-          if (this.abortSignal!.aborted) {
+          if (abortSignal.aborted) {
             this.command.kill('SIGKILL')
             settleReject(new Error('Video was deleted - transcoding job cancelled'))
           }
@@ -209,7 +218,10 @@ export class FFmpegCommandWrapper {
         } else {
           // FFmpeg exited successfully but 'end' may not have fired
           // This can happen with certain FFmpeg versions or commands
-          this.logger.debug('FFmpeg process closed with code 0 (end event may have already fired or been skipped).', { shellCommand, ...this.lTags })
+          this.logger.debug(
+            'FFmpeg process closed with code 0 (end event may have already fired or been skipped).',
+            { shellCommand, ...this.lTags }
+          )
           settleResolve()
         }
       })
@@ -221,13 +233,17 @@ export class FFmpegCommandWrapper {
       })
 
       if (this.updateJobProgress) {
-        this.command.on('progress', progress => {
-          if (!progress.percent) return
+        let fallbackProgress = 0
+        let lastReportedProgress = 0
+        let lastRawProgressAt = Date.now()
 
+        emitProgress = (percent: number) => {
           // Sometimes ffmpeg returns an invalid progress
-          let percent = Math.round(progress.percent)
           if (percent < 0) percent = 0
           if (percent > 100) percent = 100
+
+          if (percent <= lastReportedProgress) return
+          lastReportedProgress = percent
 
           try {
             this.updateJobProgress(percent)
@@ -236,6 +252,36 @@ export class FFmpegCommandWrapper {
             this.command.kill('SIGKILL')
             settleReject(err instanceof Error ? err : new Error(String(err)))
           }
+        }
+
+        syntheticProgressInterval = setInterval(() => {
+          if (promiseSettled) return
+
+          const now = Date.now()
+          // If ffmpeg does not emit raw progress for some time, keep a monotonic
+          // synthetic progression so UI does not look frozen at 0%.
+          if (now - lastRawProgressAt < 3000) return
+
+          fallbackProgress = Math.min(fallbackProgress + 1, 95)
+          emitProgress?.(fallbackProgress)
+        }, 1000)
+
+        this.command.on('progress', progress => {
+          lastRawProgressAt = Date.now()
+
+          // Some ffmpeg executions (notably streaming/m3u8 inputs) can emit
+          // progress events without a computable "percent". Keep a monotonic
+          // synthetic percentage so jobs don't stay visually stuck at 0%.
+          let percent: number
+          if (typeof progress.percent === 'number' && Number.isFinite(progress.percent)) {
+            percent = Math.round(progress.percent)
+          } else {
+            fallbackProgress = Math.min(fallbackProgress + 1, 95)
+            percent = fallbackProgress
+          }
+
+          if (percent > fallbackProgress) fallbackProgress = percent
+          emitProgress(percent)
         })
       }
 

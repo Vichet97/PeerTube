@@ -5,9 +5,9 @@ import { VideoJobInfoModel } from '@server/models/video/video-job-info.js'
 import { MVideo } from '@server/types/models/index.js'
 import { moveToNextState } from '../video-state.js'
 
-// NOTE: Granular move jobs are created by moveToExternalStorageState in video-state.ts,
-// which is called by moveToNextState. onTranscodingEnded only triggers the state machine
-// and should NOT create move jobs to avoid double-creation when the video is already published.
+// NOTE: onTranscodingEnded only triggers the state machine.
+// moveToNextState may queue object-storage move jobs when needed (including when
+// a video is already published and new files still need to be moved).
 export async function onTranscodingEnded (options: {
   video: MVideo
   isNewVideo: boolean

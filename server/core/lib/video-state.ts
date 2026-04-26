@@ -1,4 +1,4 @@
-import { VideoState, VideoStateType } from '@peertube/peertube-models'
+import { FileStorage, VideoState, VideoStateType } from '@peertube/peertube-models'
 import { retryTransactionWrapper } from '@server/helpers/database-utils.js'
 import { logger, loggerTagsFactory } from '@server/helpers/logger.js'
 import { CONFIG } from '@server/initializers/config.js'
@@ -9,6 +9,7 @@ import { MVideo, MVideoFullLight, MVideoUUID } from '@server/types/models/index.
 import { Transaction } from 'sequelize'
 import { federateVideoIfNeeded } from './activitypub/videos/index.js'
 import { JobQueue } from './job-queue/index.js'
+import { hasVideoResourcesToBeMoved } from './move-storage/shared/move-video.js'
 import { Notifier } from './notifier/index.js'
 import { buildGranularMoveJobs, buildMoveVideoJob } from './video-jobs.js'
 
@@ -66,7 +67,20 @@ export function moveToNextState (options: {
       if (videoDatabase.state === VideoState.PUBLISHED) {
         await federateVideoIfNeeded(videoDatabase, false, t)
 
+        const queuedMoveJobs = await enqueueMissingObjectStorageMoveJobsForPublishedVideo({
+          video: videoDatabase,
+          isNewVideo,
+          previousVideoState
+        })
+
         logger.debug(`Video ${videoDatabase.uuid} is already published, no state change.`, lTags(videoDatabase.uuid))
+        if (queuedMoveJobs > 0) {
+          logger.info(
+            '[MOVE_JOB] Video %s already published but queued %d missing object-storage move job(s).',
+            videoDatabase.uuid,
+            queuedMoveJobs
+          )
+        }
 
         return false
       }
@@ -124,16 +138,37 @@ export async function moveToExternalStorageState (options: {
     if (jobs.length > 0) {
       // Increment pendingMove once per job that was actually created
       // (duplicate jobs were already filtered out by the builders)
-      for (const _ of jobs) {
-        await VideoJobInfoModel.increaseOrCreate(video.uuid, 'pendingMove')
-      }
+      await VideoJobInfoModel.increaseOrCreate(video.uuid, 'pendingMove', jobs.length)
 
       logger.info('[MOVE_JOB] Created %d granular move jobs for %s (pendingMove now reflects job count)', jobs.length, video.uuid)
       for (const job of jobs) {
         await JobQueue.Instance.createJob(job)
       }
     } else {
-      // No files to move - decrement pendingMove and publish
+      // No granular jobs. We can still have leftover resources like local torrents,
+      // so fallback to the legacy move job when needed.
+      const hasFallbackResources = await hasVideoResourcesToBeMoved(video, FileStorage.OBJECT_STORAGE)
+
+      if (hasFallbackResources) {
+        const fallbackJob = await buildMoveVideoJob({
+          type: 'move-to-object-storage',
+          video,
+          moveVideoState: {
+            previousVideoState,
+            isNewVideo
+          }
+        })
+
+        if (fallbackJob) {
+          logger.info('[MOVE_JOB] No granular jobs for %s, created fallback move-to-object-storage job.', video.uuid)
+          await JobQueue.Instance.createJob(fallbackJob)
+        } else {
+          logger.info('[MOVE_JOB] Fallback move job already pending/active for %s, skipping duplicate.', video.uuid)
+        }
+
+        return true
+      }
+
       logger.info('[MOVE_JOB] No files to move for %s, transitioning to published', video.uuid)
       await moveToNextState({ video: { uuid: video.uuid }, isNewVideo, previousVideoState })
     }
@@ -144,6 +179,44 @@ export async function moveToExternalStorageState (options: {
 
     return false
   }
+}
+
+async function enqueueMissingObjectStorageMoveJobsForPublishedVideo (options: {
+  video: MVideoFullLight
+  isNewVideo: boolean
+  previousVideoState?: VideoStateType
+}) {
+  const { video, isNewVideo, previousVideoState } = options
+  if (!CONFIG.OBJECT_STORAGE.ENABLED) return 0
+
+  const jobs = await buildGranularMoveJobs({
+    videoUUID: video.uuid,
+    isNewVideo,
+    previousVideoState: previousVideoState ?? video.state
+  })
+
+  if (jobs.length === 0) {
+    const hasFallbackResources = await hasVideoResourcesToBeMoved(video, FileStorage.OBJECT_STORAGE)
+    if (!hasFallbackResources) return 0
+
+    const fallbackJob = await buildMoveVideoJob({
+      type: 'move-to-object-storage',
+      video: { uuid: video.uuid }
+    })
+
+    if (!fallbackJob) return 0
+
+    await JobQueue.Instance.createJob(fallbackJob)
+    return 1
+  }
+
+  await VideoJobInfoModel.increaseOrCreate(video.uuid, 'pendingMove', jobs.length)
+
+  for (const job of jobs) {
+    await JobQueue.Instance.createJob(job)
+  }
+
+  return jobs.length
 }
 
 export async function moveToFileSystemState (options: {

@@ -1,5 +1,6 @@
 import {
   FileStorage,
+  VideoStateType,
   isMoveCaptionPayload,
   isMoveVideoStoragePayload,
   MoveStoragePayload
@@ -16,8 +17,22 @@ import { VideoPathManager } from '@server/lib/video-path-manager.js'
 import { VideoModel } from '@server/models/video/video.js'
 import { pathExists } from 'fs-extra/esm'
 import { Job } from 'bullmq'
+import { join } from 'path'
 
 const lTagsBase = loggerTagsFactory('move-object-storage')
+
+type LegacyMoveToObjectStoragePayload = {
+  videoUUID: string
+  moveVideoState: {
+    isNewVideo: boolean
+    previousVideoState?: VideoStateType
+  }
+  hlsCutover?: {
+    playlistId: number
+    fileIds: number[]
+  }
+  isFollowUp?: boolean
+}
 
 export async function processMoveToObjectStorage (job: Job) {
   const rawPayload = job.data
@@ -33,13 +48,14 @@ export async function processMoveToObjectStorage (job: Job) {
     // Legacy format: moveVideoState contains isNewVideo/previousVideoState directly
     // Convert to modern format
     logger.info('[MOVE_JOB] Detected legacy move-to-object-storage job %s, converting to modern format', job.id)
-    const { isNewVideo, previousVideoState } = (rawPayload as any).moveVideoState
+    const legacyPayload = rawPayload as LegacyMoveToObjectStoragePayload
+    const { isNewVideo, previousVideoState } = legacyPayload.moveVideoState
     payload = {
-      videoUUID: (rawPayload as any).videoUUID,
+      videoUUID: legacyPayload.videoUUID,
       isNewVideo,
       previousVideoState,
-      hlsCutover: (rawPayload as any).hlsCutover,
-      isFollowUp: (rawPayload as any).isFollowUp
+      hlsCutover: legacyPayload.hlsCutover,
+      isFollowUp: legacyPayload.isFollowUp
     }
   } else if ('videoUUID' in rawPayload && Object.keys(rawPayload).length === 1) {
     // Minimal format: only videoUUID provided
@@ -59,7 +75,11 @@ export async function processMoveToObjectStorage (job: Job) {
   }
 
   const updateProgress = (percent: number) => {
-    job.updateProgress(percent).catch(err => logger.error('Cannot update move job progress', { err }))
+    const normalized = normalizeProgressPercent(percent)
+    const currentProgress = typeof job.progress === 'number' ? job.progress : 0
+    if (normalized <= currentProgress) return
+
+    job.updateProgress(normalized).catch(err => logger.error('Cannot update move job progress', { err }))
   }
 
   if (CONFIG.OBJECT_STORAGE.ENABLED !== true) {
@@ -87,6 +107,18 @@ export async function processMoveToObjectStorage (job: Job) {
     const webVideoFiles = video.VideoFiles?.filter(f => f.storage === FileStorage.FILE_SYSTEM) || []
     const hlsFiles = video.VideoStreamingPlaylists?.flatMap(p => p.VideoFiles.filter(f => f.storage === FileStorage.FILE_SYSTEM)) || []
     const thumbnails = video.Thumbnails?.filter(t => t.storage === FileStorage.FILE_SYSTEM) || []
+    const torrentFilenames = new Set<string>()
+    for (const file of [ ...video.VideoFiles, ...(video.VideoStreamingPlaylists?.flatMap(p => p.VideoFiles) || []) ]) {
+      if (file.torrentFilename) torrentFilenames.add(file.torrentFilename)
+    }
+
+    const localTorrentFiles: { filename: string, sourcePath: string }[] = []
+    for (const torrentFilename of torrentFilenames) {
+      const sourcePath = join(CONFIG.STORAGE.TORRENTS_DIR, torrentFilename)
+      if (await pathExists(sourcePath)) {
+        localTorrentFiles.push({ filename: torrentFilename, sourcePath })
+      }
+    }
 
     // [LOGGER] Video loaded with files - detailed move plan
     logger.info('[MOVE_JOB] Video %s move plan for job %s', payload.videoUUID, job.id, {
@@ -94,7 +126,8 @@ export async function processMoveToObjectStorage (job: Job) {
         webVideos: webVideoFiles.length,
         hlsFiles: hlsFiles.length,
         thumbnails: thumbnails.length,
-        captions: captionsOnFileSystem.length
+        captions: captionsOnFileSystem.length,
+        torrents: localTorrentFiles.length
       },
       webVideoFiles: webVideoFiles.map(f => ({
         filename: f.filename,
@@ -126,6 +159,12 @@ export async function processMoveToObjectStorage (job: Job) {
         destinationBucket: CONFIG.OBJECT_STORAGE.CAPTIONS.BUCKET_NAME,
         destinationKey: `${CONFIG.OBJECT_STORAGE.CAPTIONS.PREFIX || ''}${c.filename}`
       })),
+      torrents: localTorrentFiles.map(t => ({
+        filename: t.filename,
+        sourcePath: t.sourcePath,
+        destinationBucket: CONFIG.OBJECT_STORAGE.TORRENTS.BUCKET_NAME,
+        destinationKey: `${CONFIG.OBJECT_STORAGE.TORRENTS.PREFIX || ''}${t.filename}`
+      })),
       objectStorageEndpoint: CONFIG.OBJECT_STORAGE.ENDPOINT
     })
 
@@ -134,7 +173,8 @@ export async function processMoveToObjectStorage (job: Job) {
       ...webVideoFiles,
       ...hlsFiles,
       ...thumbnails,
-      ...captionsOnFileSystem
+      ...captionsOnFileSystem,
+      ...localTorrentFiles
     ]
 
     if (filesToMove.length === 0) {
@@ -185,7 +225,7 @@ export async function processMoveToObjectStorage (job: Job) {
     }
 
     // Update initial progress
-    updateProgress(0)
+    updateProgress(5)
 
     // Determine moveVideoState
     // When retrying a failed job, use the video's CURRENT state as previousVideoState
@@ -283,7 +323,7 @@ export async function processMoveToObjectStorage (job: Job) {
         const { VideoStreamingPlaylistModel } = await import('@server/models/video/video-streaming-playlist.js')
         const hls = await VideoStreamingPlaylistModel.loadHLSByVideo(caption.videoId)
 
-        if (hls && hls.storage === FileStorage.OBJECT_STORAGE) {
+        if (hls?.storage === FileStorage.OBJECT_STORAGE) {
           const video = await VideoModel.loadFull(caption.videoId)
           if (video) {
             logger.info('[MOVE_JOB] Regenerating master playlist after caption move for video %s', video.uuid)
@@ -307,6 +347,16 @@ export async function processMoveToObjectStorage (job: Job) {
   } else {
     throw new Error('Unknown payload type')
   }
+}
+
+function normalizeProgressPercent (percent: number) {
+  if (!Number.isFinite(percent)) return 0
+
+  const rounded = Math.round(percent)
+  if (rounded < 0) return 0
+  if (rounded > 100) return 100
+
+  return rounded
 }
 
 export async function onMoveToObjectStorageFailure (job: Job, err: any) {

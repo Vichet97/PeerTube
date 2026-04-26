@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-unused-expressions,@typescript-eslint/require-await */
 import { sortBy } from '@peertube/peertube-core-utils'
-import { MoveVideoStoragePayload, VideoState, VideoTranscodingPayload } from '@peertube/peertube-models'
+import { VideoState, VideoTranscodingPayload } from '@peertube/peertube-models'
 import { areMockObjectStorageTestsDisabled } from '@peertube/peertube-node-utils'
 import {
   ObjectStorageCommand,
@@ -27,7 +27,11 @@ describe('Test video state on local job queue', function () {
   before(async function () {
     this.timeout(120000)
 
-    servers = await createMultipleServers(2)
+    servers = await createMultipleServers(2, {
+      video_transcription: {
+        enabled: false
+      }
+    })
 
     await setAccessTokensToServers(servers)
     await doubleFollow(servers[0], servers[1])
@@ -221,18 +225,10 @@ describe('Test video state on local job queue', function () {
       const { uuid, publishedJobFinder } = options
 
       const { data: transcodingJobs } = await servers[0].jobs.list({ jobType: 'video-transcoding' })
-      const transcodingJob = transcodingJobs.find(j => {
+      const publishedJob = transcodingJobs.find(j => {
         const data = j.data as VideoTranscodingPayload
 
         return data.videoUUID === uuid && publishedJobFinder(data)
-      })
-
-      // Video is published in the next move to object storage job
-      const { data: objectStorageJobs } = await servers[0].jobs.list({ jobType: 'move-to-object-storage', sort: 'createdAt', count: 100 })
-      const publishedJob = objectStorageJobs.find(j => {
-        const data = j.data as MoveVideoStoragePayload
-
-        return data.videoUUID === uuid && new Date(j.processedOn) > new Date(transcodingJob.processedOn)
       })
 
       for (const server of servers) {

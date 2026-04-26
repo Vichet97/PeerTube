@@ -124,6 +124,7 @@ export type CreateJobArgument =
 export type CreateJobOptions = {
   delay?: number
   priority?: number
+  customJobId?: string
   failParentOnFailure?: boolean
 }
 
@@ -422,7 +423,7 @@ class JobQueue {
       return
     }
 
-    const jobOptions = this.buildJobOptions(options.type as JobType, pick(options, [ 'priority', 'delay' ]))
+    const jobOptions = this.buildJobOptions(options.type as JobType, pick(options, [ 'priority', 'delay', 'customJobId' ]))
 
     return queue.add('job', options.payload, jobOptions)
   }
@@ -483,12 +484,34 @@ class JobQueue {
     })
   }
 
+  async hasPendingOrActiveHLSPlaylistMoveJob (options: {
+    videoUUID: string
+    excludeCleanupJobs?: boolean
+  }): Promise<boolean> {
+    const queue = this.queues['move-hls-playlist-to-object-storage']
+    if (!queue) return false
+
+    const states: ('waiting' | 'delayed' | 'active')[] = [ 'waiting', 'delayed', 'active' ]
+    const jobs = await queue.getJobs(states, 0, 1000, true)
+
+    const { videoUUID, excludeCleanupJobs = false } = options
+
+    return jobs.some((job: Job) => {
+      const data = job.data as { videoUUID?: string, cleanupMode?: 'move' | 'cleanup' }
+      if (data?.videoUUID !== videoUUID) return false
+
+      if (excludeCleanupJobs && data.cleanupMode === 'cleanup') return false
+
+      return true
+    })
+  }
+
   async getExistingMoveJob (jobType: JobType, videoUUID: string) {
     const queue = this.queues[jobType]
     if (!queue) return null
 
     // Check all states: waiting, delayed, active, failed
-    const states: ('waiting' | 'delayed' | 'active' | 'failed')[] = ['waiting', 'delayed', 'active', 'failed']
+    const states: ('waiting' | 'delayed' | 'active' | 'failed')[] = [ 'waiting', 'delayed', 'active', 'failed' ]
     const jobs = await queue.getJobs(states, 0, 100, true)
 
     return jobs.find((job: Job) => job.data?.videoUUID === videoUUID) || null
@@ -498,7 +521,7 @@ class JobQueue {
     const queue = this.queues['move-to-object-storage']
     if (!queue) return null
 
-    const states: ('waiting' | 'delayed' | 'active' | 'failed')[] = ['waiting', 'delayed', 'active', 'failed']
+    const states: ('waiting' | 'delayed' | 'active' | 'failed')[] = [ 'waiting', 'delayed', 'active', 'failed' ]
     const jobs = await queue.getJobs(states, 0, 100, true)
 
     return jobs.find((job: Job) => job.data?.captionId === captionId) || null
@@ -508,18 +531,46 @@ class JobQueue {
     const queue = this.queues['move-hls-playlist-to-object-storage']
     if (!queue) return []
 
-    const states: ('waiting' | 'delayed' | 'active' | 'failed')[] = ['waiting', 'delayed', 'active', 'failed']
+    const states: ('waiting' | 'delayed' | 'active' | 'failed')[] = [ 'waiting', 'delayed', 'active', 'failed' ]
     const jobs = await queue.getJobs(states, 0, 100, true)
 
     // Match jobs for the same video+playlist with the SAME fileIds
     return jobs.filter((job: Job) => {
       const data = job.data as { videoUUID?: string; playlistId?: number; fileIds?: number[] }
+      const jobFileIds = data?.fileIds
+
       return data?.videoUUID === videoUUID &&
              data?.playlistId === playlistId &&
-             data?.fileIds !== undefined &&
-             fileIds.length === data.fileIds.length &&
-             fileIds.every(id => data.fileIds.includes(id))
+             !!jobFileIds &&
+             fileIds.length === jobFileIds.length &&
+             fileIds.every(id => jobFileIds.includes(id))
     })
+  }
+
+  async waitForJobCompletion (options: {
+    jobType: JobType
+    jobId: string | number
+    timeoutMs?: number
+  }) {
+    const { jobType, jobId, timeoutMs } = options
+
+    const queue = this.queues[jobType]
+    if (!queue) return
+
+    const queueEvents = this.queueEvents[jobType]
+    if (!queueEvents) return
+
+    const job = await queue.getJob(String(jobId))
+    if (!job) {
+      logger.debug(
+        '[JOB_QUEUE] Job %s in queue %s not found while waiting for completion, skipping wait',
+        jobId,
+        jobType
+      )
+      return
+    }
+
+    await job.waitUntilFinished(queueEvents, timeoutMs)
   }
 
   createSequentialJobFlow (...jobs: ((CreateJobArgument & CreateJobOptions) | undefined)[]) {
@@ -558,7 +609,7 @@ class JobQueue {
       opts: {
         failParentOnFailure: true,
 
-        ...this.buildJobOptions(job.type as JobType, pick(job, [ 'priority', 'delay', 'failParentOnFailure' ]))
+        ...this.buildJobOptions(job.type as JobType, pick(job, [ 'priority', 'delay', 'failParentOnFailure', 'customJobId' ]))
       }
     }
   }
@@ -569,6 +620,7 @@ class JobQueue {
       attempts: JOB_ATTEMPTS[type],
       priority: options.priority,
       delay: options.delay,
+      jobId: options.customJobId,
 
       ...this.buildJobRemovalOptions(type)
     }
@@ -732,7 +784,7 @@ class JobQueue {
     const hasSearch = !!trimmedSearch
 
     return jobs.filter(job => {
-      if (!job || !job.data) return false
+      if (!job?.data) return false
 
       if (hasSearch && String(job.id).toLowerCase().includes(loweredSearch)) return true
 
@@ -855,24 +907,18 @@ class JobQueue {
           const matchingJobs = jobs.filter((j: Job) => match(j.data))
 
           for (const job of matchingJobs) {
-            try {
-              await job.remove()
-              removedCount++
-            } catch (err) {
-              if (state === 'active') {
-                logger.debug(
-                  'Could not remove active job %s for video %s (worker may still be processing; it will fail with: %s).',
-                  job.id,
-                  videoUUID,
-                  CANCELLED_REASON
-                )
-              } else {
-                logger.warn('Cannot remove job %s for deleted video %s.', job.id, videoUUID, { err })
-              }
-            }
+            const removed = await this.removeJobForDeletedVideo({
+              job,
+              state,
+              videoUUID,
+              cancelledReason: CANCELLED_REASON
+            })
+
+            if (removed) removedCount++
           }
         } catch (err) {
-          if ((err as any)?.message?.includes('Could not find queue') !== true) {
+          const errMessage = err instanceof Error ? err.message : String(err)
+          if (!errMessage.includes('Could not find queue')) {
             logger.warn('Cannot list %s jobs for video %s removal.', queueName, videoUUID, { err })
           }
         }
@@ -886,6 +932,33 @@ class JobQueue {
         videoUUID,
         CANCELLED_REASON
       )
+    }
+  }
+
+  private async removeJobForDeletedVideo (options: {
+    job: Job
+    state: JobState
+    videoUUID: string
+    cancelledReason: string
+  }) {
+    const { job, state, videoUUID, cancelledReason } = options
+
+    try {
+      await job.remove()
+      return true
+    } catch (err) {
+      if (state !== 'active') {
+        logger.warn('Cannot remove job %s for deleted video %s.', job.id, videoUUID, { err })
+        return false
+      }
+
+      logger.debug(
+        'Could not remove active job %s for video %s (worker may still be processing; it will fail with: %s).',
+        job.id,
+        videoUUID,
+        cancelledReason
+      )
+      return false
     }
   }
 

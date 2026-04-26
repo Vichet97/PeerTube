@@ -1,12 +1,20 @@
 import { FileStorage, FileStorageType } from '@peertube/peertube-models'
 import { LoggerTags, logger, loggerTagsFactory } from '@server/helpers/logger.js'
+import { CONFIG } from '@server/initializers/config.js'
 import { getHLSDirectory } from '@server/lib/paths.js'
 import { VideoPathManager } from '@server/lib/video-path-manager.js'
 import { VideoCaptionModel } from '@server/models/video/video-caption.js'
 import { VideoJobInfoModel } from '@server/models/video/video-job-info.js'
 import { VideoSourceModel } from '@server/models/video/video-source.js'
 import { VideoModel } from '@server/models/video/video.js'
-import { MStreamingPlaylistVideoUUID, MVideo, MVideoCaption, MVideoWithAllFiles, MThumbnail, MStoryboard } from '@server/types/models/index.js'
+import {
+  MStreamingPlaylistVideoUUID,
+  MVideo,
+  MVideoCaption,
+  MVideoWithAllFiles,
+  MThumbnail,
+  MStoryboard
+} from '@server/types/models/index.js'
 import { MVideoSource } from '@server/types/models/video/video-source.js'
 import { StoryboardModel } from '@server/models/video/storyboard.js'
 import { ThumbnailModel } from '@server/models/video/thumbnail.js'
@@ -29,6 +37,7 @@ export async function moveVideoToStorage (options: {
   moveStoryboardFiles?: (storyboards: MStoryboard[]) => Promise<void>
   moveTorrentFiles?: (video: MVideoWithAllFiles) => Promise<void>
   onInitialHLSCutoverReady?: (options: { playlistId: number, fileIds: number[] }) => Promise<void>
+  onProgress?: (percent: number) => void
 }) {
   const {
     loggerTags,
@@ -71,24 +80,57 @@ export async function moveVideoToStorage (options: {
     }
 
     const { source, captions, hls, webFiles, thumbnails, storyboards } = await filterVideoResourcesToBeMoved(video, targetStorage)
+    const hasTorrentResources = moveTorrentFiles
+      ? await hasTorrentResourcesToBeMoved(video, targetStorage)
+      : false
+
+    const stages = [
+      captions.length !== 0,
+      !!source,
+      webFiles.length !== 0,
+      !!hls,
+      thumbnails.length !== 0 && !!moveThumbnailFiles,
+      storyboards.length !== 0 && !!moveStoryboardFiles,
+      hasTorrentResources
+    ]
+
+    const totalStages = stages.filter(Boolean).length
+    let completedStages = 0
+
+    const updateStageProgress = () => {
+      if (!options.onProgress || totalStages === 0) return
+
+      const percent = 5 + Math.round((completedStages / totalStages) * 90)
+      options.onProgress(Math.min(percent, 95))
+    }
+
+    if (options.onProgress) {
+      options.onProgress(totalStages === 0 ? 100 : 5)
+    }
 
     if (captions.length !== 0) {
       logger.debug(`Moving ${captions.length} captions of ${video.uuid}.`, lTags)
 
       const hls = video.getHLSPlaylist()
       await moveCaptionFiles(captions, hls)
+      completedStages++
+      updateStageProgress()
     }
 
     if (source) {
       logger.debug(`Moving video source ${source.keptOriginalFilename} file of video ${video.uuid}`, lTags)
 
       await moveVideoSourceFile(source)
+      completedStages++
+      updateStageProgress()
     }
 
     if (webFiles.length !== 0) {
       logger.debug(`Moving ${webFiles.length} web video files for video ${video.uuid}.`, lTags)
 
       await moveWebVideoFiles(video)
+      completedStages++
+      updateStageProgress()
     }
 
     let hlsCutoverDeferred = false
@@ -98,24 +140,32 @@ export async function moveVideoToStorage (options: {
       hlsCutoverDeferred = await moveHLSFiles(video, {
         onInitialCutoverReady: options.onInitialHLSCutoverReady
       })
+      completedStages++
+      updateStageProgress()
     }
 
     if (thumbnails.length !== 0 && moveThumbnailFiles) {
       logger.debug(`Moving ${thumbnails.length} thumbnails of ${video.uuid}.`, lTags)
 
       await moveThumbnailFiles(thumbnails)
+      completedStages++
+      updateStageProgress()
     }
 
     if (storyboards.length !== 0 && moveStoryboardFiles) {
       logger.debug(`Moving ${storyboards.length} storyboards of ${video.uuid}.`, lTags)
 
       await moveStoryboardFiles(storyboards)
+      completedStages++
+      updateStageProgress()
     }
 
-    if (moveTorrentFiles) {
+    if (moveTorrentFiles && hasTorrentResources) {
       logger.debug(`Moving torrent files of ${video.uuid}.`, lTags)
 
       await moveTorrentFiles(video)
+      completedStages++
+      updateStageProgress()
     }
 
     // Only decrement pendingMove if HLS cutover was NOT deferred to a follow-up job.
@@ -199,6 +249,42 @@ export async function filterVideoResourcesToBeMoved (videoArg: MVideo, targetSto
 
 export async function hasVideoResourcesToBeMoved (video: MVideo, targetStorage: FileStorageType) {
   const { captions, hls, source, webFiles, thumbnails, storyboards } = await filterVideoResourcesToBeMoved(video, targetStorage)
+  const hasTorrentResources = await hasTorrentResourcesToBeMoved(video, targetStorage)
 
-  return captions.length !== 0 || !!hls || !!source || webFiles.length !== 0 || thumbnails.length !== 0 || storyboards.length !== 0
+  return (
+    captions.length !== 0 ||
+    !!hls ||
+    !!source ||
+    webFiles.length !== 0 ||
+    thumbnails.length !== 0 ||
+    storyboards.length !== 0 ||
+    hasTorrentResources
+  )
+}
+
+async function hasTorrentResourcesToBeMoved (video: MVideo, targetStorage: FileStorageType) {
+  if (targetStorage !== FileStorage.OBJECT_STORAGE) return false
+  if (!video.id) return false
+
+  const videoWithFiles = await VideoModel.loadWithFiles(video.id)
+  if (!videoWithFiles) return false
+
+  const torrentFilenames = new Set<string>()
+
+  for (const file of videoWithFiles.VideoFiles) {
+    if (file.torrentFilename) torrentFilenames.add(file.torrentFilename)
+  }
+
+  for (const playlist of videoWithFiles.VideoStreamingPlaylists || []) {
+    for (const file of playlist.VideoFiles) {
+      if (file.torrentFilename) torrentFilenames.add(file.torrentFilename)
+    }
+  }
+
+  for (const torrentFilename of torrentFilenames) {
+    const torrentPath = join(CONFIG.STORAGE.TORRENTS_DIR, torrentFilename)
+    if (await pathExists(torrentPath)) return true
+  }
+
+  return false
 }

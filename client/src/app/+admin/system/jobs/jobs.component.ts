@@ -25,6 +25,15 @@ type QueryParams = TableQueryParams & {
   search?: string
 }
 
+const PROGRESS_JOB_TYPES = new Set<JobTypeClient>([
+  'video-transcoding',
+  'video-import',
+  'move-to-object-storage',
+  'move-video-file-to-object-storage',
+  'move-hls-playlist-to-object-storage',
+  'move-thumbnail-to-object-storage'
+])
+
 @Component({
   selector: 'my-jobs',
   templateUrl: './jobs.component.html',
@@ -94,6 +103,9 @@ export class JobsComponent implements OnInit {
     'manage-video-torrent',
     'move-to-file-system',
     'move-to-object-storage',
+    'move-video-file-to-object-storage',
+    'move-hls-playlist-to-object-storage',
+    'move-thumbnail-to-object-storage',
     'notify',
     'transcoding-job-builder',
     'video-channel-import',
@@ -171,11 +183,11 @@ export class JobsComponent implements OnInit {
   }
 
   hasGlobalProgress () {
-    return this.jobType === 'all' || this.jobType === 'video-transcoding' || this.jobType === 'video-import'
+    return this.jobType === 'all' || PROGRESS_JOB_TYPES.has(this.jobType)
   }
 
   hasProgress (job: Job) {
-    return job.type === 'video-transcoding' || job.type === 'video-import'
+    return PROGRESS_JOB_TYPES.has(job.type)
   }
 
   getProgress (job: Job) {

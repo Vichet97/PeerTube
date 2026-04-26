@@ -69,6 +69,23 @@ async function checkFiles (options: {
     }
   }
 
+  // Torrents
+  {
+    for (const file of getAllFiles(video)) {
+      if (!file.torrentUrl) continue
+
+      if (objectStorage) {
+        const res = await makeRawRequest({ url: file.torrentUrl, expectedStatus: HttpStatusCode.FOUND_302 })
+        const location = res.headers['location']
+
+        expectStartWith(location, `http://${ObjectStorageCommand.getMockEndpointHost()}/`)
+        await makeRawRequest({ url: location, expectedStatus: HttpStatusCode.OK_200 })
+      } else {
+        await makeRawRequest({ url: file.torrentUrl, expectedStatus: HttpStatusCode.OK_200 })
+      }
+    }
+  }
+
   // Captions
   {
     const start = objectStorage
@@ -176,6 +193,8 @@ describe('Test create move video storage job CLI', function () {
 
       await checkDirectoryIsEmpty(servers[0], join('streaming-playlists', 'hls'), [ 'private' ])
       await checkDirectoryIsEmpty(servers[0], join('streaming-playlists', 'hls', 'private'))
+
+      await checkDirectoryIsEmpty(servers[0], 'torrents')
     })
   })
 

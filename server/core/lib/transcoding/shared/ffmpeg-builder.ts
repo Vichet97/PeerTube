@@ -17,10 +17,9 @@ const DEFAULT_FFMPEG_TIMEOUT_MS = 4 * 60 * 60 * 1000
 
 export function buildFFmpegVOD (jobOrOptions?: Job | { job?: Job, videoUUID?: string, timeoutMs?: number }) {
   // BullMQ Job has 'data' and 'updateProgress'; our options object has 'job' or 'videoUUID'
-  const isJob = jobOrOptions && typeof jobOrOptions === 'object' && 'data' in jobOrOptions && 'updateProgress' in jobOrOptions
-  const options = isJob
-    ? { job: jobOrOptions as Job, videoUUID: undefined as string | undefined, timeoutMs: DEFAULT_FFMPEG_TIMEOUT_MS }
-    : (jobOrOptions as { job?: Job, videoUUID?: string, timeoutMs?: number }) || { timeoutMs: DEFAULT_FFMPEG_TIMEOUT_MS }
+  const options = isBullMQJob(jobOrOptions)
+    ? { job: jobOrOptions, timeoutMs: DEFAULT_FFMPEG_TIMEOUT_MS }
+    : (jobOrOptions || { timeoutMs: DEFAULT_FFMPEG_TIMEOUT_MS })
   const job = options?.job
   const videoUUID = options?.videoUUID
   const timeoutMs = options?.timeoutMs ?? DEFAULT_FFMPEG_TIMEOUT_MS
@@ -37,7 +36,7 @@ export function buildFFmpegVOD (jobOrOptions?: Job | { job?: Job, videoUUID?: st
     abortController = new AbortController()
     redisCheckInterval = setInterval(() => {
       Redis.Instance.isVideoDeletionFlagSet(videoUUID)
-        .then(flagged => { if (flagged) abortController!.abort() })
+        .then(flagged => { if (flagged && abortController) abortController.abort() })
         .catch(() => { /* ignore */ })
     }, 150)
   }
@@ -77,12 +76,37 @@ export function buildFFmpegVOD (jobOrOptions?: Job | { job?: Job, videoUUID?: st
       .catch(err => logger.error('Cannot update ffmpeg job progress', { err }))
   }
 
+  const setInitialProgress = () => {
+    if (!job) return
+
+    job.updateProgress(1)
+      .catch(err => logger.error('Cannot set initial ffmpeg job progress', { err }))
+  }
+
+  const setCompletedProgress = () => {
+    if (!job) return
+
+    job.updateProgress(100)
+      .catch(err => logger.error('Cannot set completed ffmpeg job progress', { err }))
+  }
+
+  setInitialProgress()
+
   return new FFmpegVOD({
     ...getFFmpegCommandWrapperOptions('vod', VideoTranscodingProfilesManager.Instance.getAvailableEncoders()),
 
     updateJobProgress,
 
+    onEnd: setCompletedProgress,
+
     abortSignal: abortController?.signal,
     onSettled: () => { if (redisCheckInterval) clearInterval(redisCheckInterval) }
   }, timeoutMs)
+}
+
+function isBullMQJob (value: unknown): value is Job {
+  return !!value &&
+    typeof value === 'object' &&
+    'data' in value &&
+    'updateProgress' in value
 }

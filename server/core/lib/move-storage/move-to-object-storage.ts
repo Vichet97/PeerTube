@@ -65,10 +65,29 @@ export async function moveVideoToObjectStorage (options: {
 }) {
   const { videoUUID, moveVideoState, hlsCutover, loggerTags, onProgress } = options
 
+  const emitProgress = (() => {
+    if (!onProgress) return undefined
+
+    let lastProgress = -1
+
+    return (percent: number) => {
+      if (!Number.isFinite(percent)) return
+
+      let normalized = Math.round(percent)
+      if (normalized < 0) normalized = 0
+      if (normalized > 100) normalized = 100
+
+      if (normalized <= lastProgress) return
+
+      lastProgress = normalized
+      onProgress(normalized)
+    }
+  })()
+
   // This is the deferred HLS cutover finalization job
   // Just finalize the cutover and return - no state transitions here
   if (hlsCutover) {
-    await finalizeInitialHLSCutover({ videoUUID, moveVideoState, hlsCutover, onProgress })
+    await finalizeInitialHLSCutover({ videoUUID, moveVideoState, hlsCutover, onProgress: emitProgress })
     return
   }
 
@@ -87,7 +106,7 @@ export async function moveVideoToObjectStorage (options: {
     moveStoryboardFiles,
     moveTorrentFiles,
     onInitialHLSCutoverReady: async cutover => {
-      if (onProgress) onProgress(90) // HLS cutover starting
+      emitProgress?.(90) // HLS cutover starting
       const job = await buildMoveVideoJob({
         type: 'move-to-object-storage',
         video: { uuid: videoUUID },
@@ -98,7 +117,9 @@ export async function moveVideoToObjectStorage (options: {
       if (job) {
         await JobQueue.Instance.createJob(job)
       }
-    }
+    },
+
+    onProgress: emitProgress
   })
 
   // Handle state transitions after normal move completion
@@ -178,12 +199,35 @@ export async function moveVideoFileToObjectStorage (videoUUID: string, fileId: n
   })
 
   videoFile.storage = FileStorage.OBJECT_STORAGE
+  // Keep torrent metadata/storage aligned with the new file storage.
+  // This uploads the torrent file to object storage (and removes local copy)
+  // when object storage is enabled.
+  await updateTorrentMetadata(video, videoFile)
   await videoFile.save()
 
   logger.info('[GRANULAR_MOVE] Video file %s moved successfully', fileId, { ...lTagsBase() })
 }
 
-export async function moveHLSSegmentFilesToObjectStorage (videoUUID: string, playlistId: number, fileIds: number[]) {
+export async function getHLSSegmentFilesToMoveCount (videoUUID: string, playlistId: number, fileIds: number[]) {
+  const video = await VideoModel.loadWithFiles(videoUUID)
+  if (!video) return 0
+
+  const playlist = video.VideoStreamingPlaylists?.find(p => p.id === playlistId)
+  if (!playlist) return 0
+
+  return playlist.VideoFiles.filter(f => fileIds.includes(f.id) && f.storage !== FileStorage.OBJECT_STORAGE).length
+}
+
+export async function moveHLSSegmentFilesToObjectStorage (
+  videoUUID: string,
+  playlistId: number,
+  fileIds: number[],
+  options: {
+    deleteLocalFiles?: boolean
+  } = {}
+) {
+  const { deleteLocalFiles = true } = options
+
   const video = await VideoModel.loadWithFiles(videoUUID)
   if (!video) {
     throw new Error(`Video ${videoUUID} not found`)
@@ -251,17 +295,22 @@ export async function moveHLSSegmentFilesToObjectStorage (videoUUID: string, pla
       logger.info('[GRANULAR_MOVE] HLS resolution playlist %s uploaded to object storage', playlistFilename, { ...lTagsBase() })
     }
 
-    // Step 3: Delete LOCAL files ONLY after both are confirmed uploaded
-    if (fragmentExists) {
-      await removeLocalPathNow(fragmentPath)
-      logger.info('[GRANULAR_MOVE] Deleted local fragment %s', fragmentPath, { ...lTagsBase() })
-    }
-    if (resolutionPlaylistExists) {
-      await removeLocalPathNow(playlistPath)
-      logger.info('[GRANULAR_MOVE] Deleted local resolution playlist %s', playlistPath, { ...lTagsBase() })
+    // Step 3: Delete local files only when requested by the caller.
+    // Granular workflow can keep local files for deferred cleanup.
+    if (deleteLocalFiles) {
+      if (fragmentExists) {
+        await removeLocalPathNow(fragmentPath)
+        logger.info('[GRANULAR_MOVE] Deleted local fragment %s', fragmentPath, { ...lTagsBase() })
+      }
+      if (resolutionPlaylistExists) {
+        await removeLocalPathNow(playlistPath)
+        logger.info('[GRANULAR_MOVE] Deleted local resolution playlist %s', playlistPath, { ...lTagsBase() })
+      }
     }
 
     videoFile.storage = FileStorage.OBJECT_STORAGE
+    // Keep torrent metadata/storage aligned with the new file storage.
+    await updateTorrentMetadata(playlist.withVideo(video), videoFile)
     await videoFile.save()
     logger.info('[GRANULAR_MOVE] HLS segment file %s marked as OBJECT_STORAGE', videoFile.id, { ...lTagsBase() })
   }
@@ -358,6 +407,16 @@ export async function moveThumbnailToObjectStorage (videoUUID: string, thumbnail
   await thumbnail.save()
 
   logger.info('[GRANULAR_MOVE] Thumbnail %s moved successfully', thumbnailId, { ...lTagsBase() })
+}
+
+export async function isThumbnailMoveNeeded (videoUUID: string, thumbnailId: number) {
+  const video = await VideoModel.loadWithFiles(videoUUID)
+  if (!video) return false
+
+  const thumbnail = video.Thumbnails?.find(t => t.id === thumbnailId)
+  if (!thumbnail) return false
+
+  return thumbnail.storage !== FileStorage.OBJECT_STORAGE
 }
 
 export async function onMoveVideoToObjectStorageFailure (options: {
@@ -762,7 +821,7 @@ async function finalizeInitialHLSCutover (options: {
 }) {
   const { videoUUID, moveVideoState, hlsCutover, onProgress } = options
 
-  if (onProgress) onProgress(0)
+  if (onProgress) onProgress(5)
 
   // Wait for local files to be ready before switching serving source to object storage
   await waitBeforeObjectStorageCutover()

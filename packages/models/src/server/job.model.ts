@@ -3,7 +3,16 @@ import { VideoFileStreamType, VideoStateType } from '../videos/index.js'
 import { VideoStudioTaskCut } from '../videos/studio/index.js'
 import { SendEmailOptions } from './emailer.model.js'
 
-export type JobState = 'active' | 'cancelled' | 'completed' | 'failed' | 'waiting' | 'delayed' | 'paused' | 'waiting-children' | 'prioritized'
+export type JobState =
+  | 'active'
+  | 'cancelled'
+  | 'completed'
+  | 'failed'
+  | 'waiting'
+  | 'delayed'
+  | 'paused'
+  | 'waiting-children'
+  | 'prioritized'
 
 export type JobType =
   | 'activitypub-cleaner'
@@ -210,7 +219,12 @@ export interface ActorKeysPayload {
 
 // ---------------------------------------------------------------------------
 
-export type MoveStoragePayload = MoveVideoStoragePayload | MoveCaptionPayload | MoveVideoFilePayload | MoveHLSPlaylistPayload | MoveThumbnailPayload
+export type MoveStoragePayload =
+  | MoveVideoStoragePayload
+  | MoveCaptionPayload
+  | MoveVideoFilePayload
+  | MoveHLSPlaylistPayload
+  | MoveThumbnailPayload
 
 export interface MoveVideoStoragePayload {
   videoUUID: string
@@ -251,6 +265,9 @@ export interface MoveHLSPlaylistPayload {
   fileIds: number[]
   isNewVideo: boolean
   previousVideoState?: VideoStateType
+  isFollowUp?: boolean
+  cleanupMode?: 'move' | 'cleanup'
+  cleanupPaths?: string[]
 }
 
 export interface MoveThumbnailPayload {
