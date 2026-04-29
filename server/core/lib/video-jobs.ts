@@ -117,18 +117,17 @@ export async function buildGranularMoveJobs (options: {
     const hlsFilesOnFS = playlist.VideoFiles.filter(f => f.storage === FileStorage.FILE_SYSTEM)
 
     if (hlsFilesOnFS.length > 0) {
-      // One HLS segment file move job per quality.
-      // Each job handles: fragment + resolution .m3u8 + master playlist + SHA (all in one go).
-      for (const file of hlsFilesOnFS) {
-        const playlistJob = await buildGranularHLSPlaylistMoveJob({
-          videoUUID,
-          playlistId: playlist.id,
-          fileIds: [file.id],
-          isNewVideo,
-          previousVideoState
-        })
-        if (playlistJob) jobs.push(playlistJob)
-      }
+      // Use a single HLS move job per playlist to avoid overlapping jobs
+      // concurrently regenerating/deleting master playlist and SHA files.
+      const playlistJob = await buildGranularHLSPlaylistMoveJob({
+        videoUUID,
+        playlistId: playlist.id,
+        fileIds: hlsFilesOnFS.map(f => f.id),
+        isNewVideo,
+        previousVideoState
+      })
+
+      if (playlistJob) jobs.push(playlistJob)
       // Master playlist and SHA are handled INSIDE the HLS playlist job — no separate job needed.
     }
   }
@@ -195,8 +194,9 @@ export async function buildGranularHLSPlaylistMoveJob (options: {
 }) {
   const { videoUUID, playlistId, fileIds, isNewVideo, previousVideoState } = options
 
-  // Check for duplicate jobs, but allow different file IDs (different qualities) to proceed.
-  // Only skip if the exact same fileIds are already queued/processing for this video/playlist.
+  // Dedupe by exact video+playlist+fileIds payload.
+  // Regular flow now queues one playlist-scoped job containing all fileIds;
+  // subset fileIds are mainly used by delayed retry jobs spawned by the handler.
   const existingJobs = await JobQueue.Instance.getExistingHLSPlaylistMoveJobs(videoUUID, playlistId, fileIds)
   if (existingJobs.length > 0) {
     const hasFailed = existingJobs.some((j: any) => j.failedReason !== undefined && j.failedReason !== null)
@@ -360,9 +360,7 @@ export async function addVideoJobsAfterCreation (options: {
 
     if (moveJobs.length > 0) {
       // Increment pendingMove once per job
-      for (const _ of moveJobs) {
-        await VideoJobInfoModel.increaseOrCreate(video.uuid, 'pendingMove')
-      }
+      await VideoJobInfoModel.increaseOrCreate(video.uuid, 'pendingMove', moveJobs.length)
 
       logger.info('[VIDEO_JOBS] Creating %d granular move jobs for %s (no transcoding)', moveJobs.length, video.uuid)
       criticalJobs.push(

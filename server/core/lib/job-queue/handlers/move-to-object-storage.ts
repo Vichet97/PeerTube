@@ -63,7 +63,8 @@ export async function processMoveToObjectStorage (job: Job) {
     logger.info('[MOVE_JOB] Detected minimal move-to-object-storage job %s, inferring state from video', job.id)
     const video = await VideoModel.load(rawPayload.videoUUID)
     if (!video) {
-      throw new Error('Video not found: ' + rawPayload.videoUUID)
+      logger.info('[MOVE_JOB] Video %s not found for minimal job %s, skipping stale job', rawPayload.videoUUID, job.id)
+      return
     }
     payload = {
       videoUUID: rawPayload.videoUUID,
