@@ -266,10 +266,19 @@ async function hashVideoRangesFromFileSystem (
 
 function updateSha256VODSegments (video: MVideo, playlistArg: MStreamingPlaylist): Promise<MStreamingPlaylistFilesVideo | null> {
   return playlistFilesQueue.add(async () => {
-    const json: { [filename: string]: { [range: string]: string } } = {}
-
     const playlist = await VideoStreamingPlaylistModel.loadWithVideoAndFiles(playlistArg.id)
     if (!playlist) return null
+
+    if (CONFIG.OBJECT_STORAGE.GENERATE_SHA256_SEGMENTS === false) {
+      if (playlist.segmentsSha256Filename) {
+        await video.removeStreamingPlaylistFile(playlist, playlist.segmentsSha256Filename)
+      }
+
+      playlist.set('segmentsSha256Filename', null)
+      return playlist.save()
+    }
+
+    const json: { [filename: string]: { [range: string]: string } } = {}
 
     const videoFiles = await VideoFileModel.listByStreamingPlaylist(playlist.id)
     const publishedVideoFiles = getPublishedVideoFiles(playlist.storage, videoFiles)

@@ -333,7 +333,9 @@ export async function processMoveToObjectStorage (job: Job) {
 
             // Upload the updated master playlist
             await storeHLSFileFromFilename(video, hls.playlistFilename)
-            await storeHLSFileFromFilename(video, hls.segmentsSha256Filename)
+            if (hls.segmentsSha256Filename) {
+              await storeHLSFileFromFilename(video, hls.segmentsSha256Filename)
+            }
             logger.info('[MOVE_JOB] Master playlist updated and uploaded after caption move')
           }
         }

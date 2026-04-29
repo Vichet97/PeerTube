@@ -163,18 +163,22 @@ async function moveHLSFiles (video: MVideoWithAllFiles, options?: {
     if (playlist.storage !== FileStorage.FILE_SYSTEM) {
       await makeHLSFileAvailable(video, playlist.playlistFilename, join(getHLSDirectory(video), playlist.playlistFilename))
 
-      await makeHLSFileAvailable(
-        video,
-        playlist.segmentsSha256Filename,
-        join(getHLSDirectory(video), playlist.segmentsSha256Filename)
-      )
+      if (playlist.segmentsSha256Filename) {
+        await makeHLSFileAvailable(
+          video,
+          playlist.segmentsSha256Filename,
+          join(getHLSDirectory(video), playlist.segmentsSha256Filename)
+        )
+      }
 
       playlist.storage = FileStorage.FILE_SYSTEM
 
       await playlist.save()
 
       await removeHLSFileObjectStorageByFilename(video, playlist.playlistFilename)
-      await removeHLSFileObjectStorageByFilename(video, playlist.segmentsSha256Filename)
+      if (playlist.segmentsSha256Filename) {
+        await removeHLSFileObjectStorageByFilename(video, playlist.segmentsSha256Filename)
+      }
     }
 
     if (updatedFile === true) {

@@ -200,6 +200,7 @@ export function checkMissedConfig () {
     'object_storage.credentials.secret_access_key',
     'object_storage.max_upload_part',
     'object_storage.upload_part_queue_size',
+    'object_storage.generate_sha256_segments',
     'object_storage.streaming_playlists.bucket_name',
     'object_storage.streaming_playlists.prefix',
     'object_storage.streaming_playlists.base_url',

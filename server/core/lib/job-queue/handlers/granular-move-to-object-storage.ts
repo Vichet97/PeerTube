@@ -505,7 +505,9 @@ function buildHLSCleanupPaths (
   }
 
   paths.push(VideoPathManager.Instance.getFSHLSOutputPath(video, playlist.playlistFilename))
-  paths.push(VideoPathManager.Instance.getFSHLSOutputPath(video, playlist.segmentsSha256Filename))
+  if (playlist.segmentsSha256Filename) {
+    paths.push(VideoPathManager.Instance.getFSHLSOutputPath(video, playlist.segmentsSha256Filename))
+  }
 
   return [ ...new Set(paths) ]
 }
@@ -656,20 +658,28 @@ async function ensureLocalMasterPlaylistExists (
   playlist: MStreamingPlaylistFiles
 ) {
   const masterPath = VideoPathManager.Instance.getFSHLSOutputPath(video, playlist.playlistFilename)
-  const shaPath = VideoPathManager.Instance.getFSHLSOutputPath(video, playlist.segmentsSha256Filename)
+  const requiresSha = !!playlist.segmentsSha256Filename
+  const shaPath = requiresSha
+    ? VideoPathManager.Instance.getFSHLSOutputPath(video, playlist.segmentsSha256Filename)
+    : null
 
   const hasMaster = await pathExists(masterPath)
-  const hasSha = await pathExists(shaPath)
+  const hasSha = requiresSha ? await pathExists(shaPath) : true
 
   if (hasMaster && hasSha) {
-    logger.debug('[GRANULAR_MOVE] Local master playlist + SHA exist at %s and %s', masterPath, shaPath)
+    logger.debug(
+      '[GRANULAR_MOVE] Local master playlist%s exist at %s%s',
+      requiresSha ? ' + SHA' : '',
+      masterPath,
+      requiresSha ? ` and ${shaPath}` : ''
+    )
     return { video, playlist }
   }
 
   if (!hasMaster) {
     logger.info('[GRANULAR_MOVE] Local master playlist not found at %s, attempting to restore', masterPath)
   }
-  if (!hasSha) {
+  if (requiresSha && !hasSha) {
     logger.info('[GRANULAR_MOVE] Local SHA file not found at %s, attempting to restore', shaPath)
   }
 
@@ -687,7 +697,7 @@ async function ensureLocalMasterPlaylistExists (
         logger.info('[GRANULAR_MOVE] Restored master playlist from object storage to %s', masterPath)
       }
 
-      if (!hasSha) {
+      if (requiresSha && !hasSha) {
         const tmpShaPath = await makeHLSFileAvailable(
           video,
           playlist.segmentsSha256Filename,
@@ -706,7 +716,7 @@ async function ensureLocalMasterPlaylistExists (
   }
 
   const hasMasterAfterRestore = await pathExists(masterPath)
-  const hasShaAfterRestore = await pathExists(shaPath)
+  const hasShaAfterRestore = requiresSha ? await pathExists(shaPath) : true
   if (hasMasterAfterRestore && hasShaAfterRestore) {
     return { video, playlist }
   }
@@ -727,17 +737,27 @@ async function ensureLocalMasterPlaylistExists (
   }
 
   const reloadedMasterPath = VideoPathManager.Instance.getFSHLSOutputPath(reloadedVideo, reloadedPlaylist.playlistFilename)
-  const reloadedShaPath = VideoPathManager.Instance.getFSHLSOutputPath(reloadedVideo, reloadedPlaylist.segmentsSha256Filename)
+  const reloadedRequiresSha = !!reloadedPlaylist.segmentsSha256Filename
+  const reloadedShaPath = reloadedRequiresSha
+    ? VideoPathManager.Instance.getFSHLSOutputPath(reloadedVideo, reloadedPlaylist.segmentsSha256Filename)
+    : null
 
-  if (await pathExists(reloadedMasterPath) && await pathExists(reloadedShaPath)) {
-    logger.info('[GRANULAR_MOVE] Regenerated master playlist + SHA at %s and %s', reloadedMasterPath, reloadedShaPath)
+  const hasReloadedMasterNow = await pathExists(reloadedMasterPath)
+  const hasReloadedShaNow = reloadedRequiresSha ? await pathExists(reloadedShaPath) : true
+  if (hasReloadedMasterNow && hasReloadedShaNow) {
+    logger.info(
+      '[GRANULAR_MOVE] Regenerated master playlist%s at %s%s',
+      reloadedRequiresSha ? ' + SHA' : '',
+      reloadedMasterPath,
+      reloadedRequiresSha ? ` and ${reloadedShaPath}` : ''
+    )
     return { video: reloadedVideo, playlist: reloadedPlaylist }
   }
 
   if (reloadedPlaylist.storage === FileStorage.OBJECT_STORAGE) {
     try {
       const hasReloadedMaster = await pathExists(reloadedMasterPath)
-      const hasReloadedSha = await pathExists(reloadedShaPath)
+      const hasReloadedSha = reloadedRequiresSha ? await pathExists(reloadedShaPath) : true
 
       if (!hasReloadedMaster) {
         const tmpMasterPath = await makeHLSFileAvailable(
@@ -750,7 +770,7 @@ async function ensureLocalMasterPlaylistExists (
         logger.info('[GRANULAR_MOVE] Restored regenerated master playlist to %s', reloadedMasterPath)
       }
 
-      if (!hasReloadedSha) {
+      if (reloadedRequiresSha && !hasReloadedSha) {
         const tmpShaPath = await makeHLSFileAvailable(
           reloadedVideo,
           reloadedPlaylist.segmentsSha256Filename,
@@ -761,7 +781,7 @@ async function ensureLocalMasterPlaylistExists (
         logger.info('[GRANULAR_MOVE] Restored regenerated SHA file to %s', reloadedShaPath)
       }
 
-      if (await pathExists(reloadedMasterPath) && await pathExists(reloadedShaPath)) {
+      if (await pathExists(reloadedMasterPath) && (!reloadedRequiresSha || await pathExists(reloadedShaPath))) {
         return { video: reloadedVideo, playlist: reloadedPlaylist }
       }
     } catch (err) {
@@ -773,7 +793,7 @@ async function ensureLocalMasterPlaylistExists (
   }
 
   throw new Error(
-    `Master playlist or SHA file not found at ${reloadedMasterPath} / ${reloadedShaPath}`
+    `Master playlist or SHA file not found at ${reloadedMasterPath}` + (reloadedRequiresSha ? ` / ${reloadedShaPath}` : '')
   )
 }
 

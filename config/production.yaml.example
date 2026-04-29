@@ -211,6 +211,10 @@ object_storage:
   # Number of parallel multipart requests for a single object upload
   upload_part_queue_size: 1
 
+  # Generate HLS segments SHA-256 JSON used by P2P segment validation.
+  # Disable to speed up some object storage pipelines at the cost of disabling this validation.
+  generate_sha256_segments: false
+
   # Maximum number of attempts to make a request to object storage
   # Some object storage providers (for instance Backblaze) expects the client to retry upload upon 5xx errors
   # If you're using such a provider then you can increase this value

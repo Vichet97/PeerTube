@@ -270,6 +270,9 @@ const CONFIG = {
     UPLOAD_PART_QUEUE_SIZE: config.has('object_storage.upload_part_queue_size')
       ? config.get<number>('object_storage.upload_part_queue_size')
       : 1,
+    GENERATE_SHA256_SEGMENTS: config.has('object_storage.generate_sha256_segments')
+      ? config.get<boolean>('object_storage.generate_sha256_segments')
+      : true,
     MOVE_TO_FILE_SYSTEM_CONCURRENCY:
       config.has('object_storage.move_to_file_system_concurrency')
         ? config.get<number>('object_storage.move_to_file_system_concurrency')

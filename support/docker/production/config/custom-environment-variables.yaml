@@ -93,6 +93,10 @@ object_storage:
     __name: "PEERTUBE_OBJECT_STORAGE_UPLOAD_PART_QUEUE_SIZE"
     __format: "json"
 
+  generate_sha256_segments:
+    __name: "PEERTUBE_OBJECT_STORAGE_GENERATE_SHA256_SEGMENTS"
+    __format: "json"
+
   max_request_attempts:
     __name: "PEERTUBE_OBJECT_STORAGE_MAX_REQUEST_ATTEMPTS"
     __format: "json"

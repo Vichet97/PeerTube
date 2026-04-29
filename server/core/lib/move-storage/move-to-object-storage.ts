@@ -336,12 +336,14 @@ export async function moveMasterPlaylistToObjectStorage (videoUUID: string, play
 
   const masterPlaylistFilename = playlist.playlistFilename
   const masterPath = VideoPathManager.Instance.getFSHLSOutputPath(video, masterPlaylistFilename)
-  const shaPath = VideoPathManager.Instance.getFSHLSOutputPath(video, playlist.segmentsSha256Filename)
+  const shaPath = playlist.segmentsSha256Filename
+    ? VideoPathManager.Instance.getFSHLSOutputPath(video, playlist.segmentsSha256Filename)
+    : undefined
 
   if (!(await pathExists(masterPath))) {
     throw new Error(`Master playlist not found at ${masterPath}`)
   }
-  if (!(await pathExists(shaPath))) {
+  if (shaPath && !(await pathExists(shaPath))) {
     throw new Error(`SHA file not found at ${shaPath}`)
   }
 
@@ -355,7 +357,9 @@ export async function moveMasterPlaylistToObjectStorage (videoUUID: string, play
   })
 
   await storeHLSFileFromFilename(video, masterPlaylistFilename)
-  await storeHLSFileFromFilename(video, playlist.segmentsSha256Filename)
+  if (playlist.segmentsSha256Filename) {
+    await storeHLSFileFromFilename(video, playlist.segmentsSha256Filename)
+  }
 
   await checkObjectStorageReadiness({
     key: generateHLSObjectStorageKey(video, masterPlaylistFilename),
@@ -741,7 +745,9 @@ async function moveHLSFiles (video: MVideoWithAllFiles, options?: {
       })
 
       await storeHLSFileFromFilename(video, playlist.playlistFilename)
-      await storeHLSFileFromFilename(video, playlist.segmentsSha256Filename)
+      if (playlist.segmentsSha256Filename) {
+        await storeHLSFileFromFilename(video, playlist.segmentsSha256Filename)
+      }
 
       const playlistObjectStorageKey = generateHLSObjectStorageKey(video, playlist.playlistFilename)
       const isPlaylistReady = await checkObjectStorageReadiness({
@@ -754,11 +760,13 @@ async function moveHLSFiles (video: MVideoWithAllFiles, options?: {
       if (!isPlaylistReady) {
         logger.warn(`HLS playlist ${playlist.playlistFilename} not ready in object storage, keeping local files`, lTagsBase())
       } else {
-        const segmentsSha256ObjectStorageKey = generateHLSObjectStorageKey(video, playlist.segmentsSha256Filename)
-        await ensureObjectStorageFileReady({
-          objectStorageKey: segmentsSha256ObjectStorageKey,
-          bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS
-        })
+        if (playlist.segmentsSha256Filename) {
+          const segmentsSha256ObjectStorageKey = generateHLSObjectStorageKey(video, playlist.segmentsSha256Filename)
+          await ensureObjectStorageFileReady({
+            objectStorageKey: segmentsSha256ObjectStorageKey,
+            bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS
+          })
+        }
         const cutoverFileIds = movedFiles.map(moved => moved.file.id)
 
         logger.info('[MOVE_STORAGE] Initial HLS cutover is ready for deferred finalization', {
@@ -872,7 +880,9 @@ async function finalizeInitialHLSCutover (options: {
 
   // Remove master playlist files
   await removeLocalPathNow(join(getHLSDirectory(video), playlist.playlistFilename))
-  await removeLocalPathNow(join(getHLSDirectory(video), playlist.segmentsSha256Filename))
+  if (playlist.segmentsSha256Filename) {
+    await removeLocalPathNow(join(getHLSDirectory(video), playlist.segmentsSha256Filename))
+  }
 
   if (onProgress) onProgress(90)
 
