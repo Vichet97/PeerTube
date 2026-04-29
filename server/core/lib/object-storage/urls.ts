@@ -3,7 +3,7 @@ import { CONFIG } from '@server/initializers/config.js'
 import { OBJECT_STORAGE_PROXY_PATHS, WEBSERVER } from '@server/initializers/constants.js'
 import { MVideoUUID } from '@server/types/models/index.js'
 import { buildKey, getClient, getEndpoint, lTags } from './shared/index.js'
-import { ObjectStoragePublicFileType, generateProxyToken } from './presigned-redirect.js'
+import { ObjectStoragePublicFileType, generateProxyToken, keepSignedQueryEncoded } from './presigned-redirect.js'
 
 // ---------------------------------------------------------------------------
 
@@ -72,11 +72,13 @@ async function generatePresignedUrlFromFileType (key: string, fileType: ObjectSt
     Key: fullKey
   })
 
-  return getSignedUrl(
+  const signedUrl = await getSignedUrl(
     await getClient(),
     command,
     { expiresIn: 3600 * CONFIG.OBJECT_STORAGE.PRESIGNED_PUBLIC_URLS_EXPIRATION_HOURS }
   )
+
+  return keepSignedQueryEncoded(signedUrl)
 }
 
 function getBucketInfoForFileType (fileType: ObjectStoragePublicFileType) {

@@ -99,7 +99,7 @@ export async function generatePresignedRedirect (options: {
       { expiresIn: 3600 * CONFIG.OBJECT_STORAGE.PRESIGNED_PUBLIC_URLS_EXPIRATION_HOURS }
     )
 
-    return res.redirect(presignedUrl)
+    return res.redirect(keepSignedQueryEncoded(presignedUrl))
   } catch (err) {
     return res.status(500).json({ error: 'Failed to generate presigned URL' })
   }
@@ -122,11 +122,13 @@ export async function generatePresignedUrl (options: {
     Key: fullKey
   })
 
-  return getSignedUrl(
+  const signedUrl = await getSignedUrl(
     await getClient(),
     command,
     { expiresIn: 3600 * CONFIG.OBJECT_STORAGE.PRESIGNED_PUBLIC_URLS_EXPIRATION_HOURS }
   )
+
+  return keepSignedQueryEncoded(signedUrl)
 }
 
 export async function getObjectContent (options: {
@@ -311,16 +313,43 @@ async function buildSegmentPresignedUrl (key: string, fileType: ObjectStoragePub
     Key: fullKey
   })
 
-  return getSignedUrl(
+  const signedUrl = await getSignedUrl(
     await getClient(),
     command,
     { expiresIn: 3600 * CONFIG.OBJECT_STORAGE.PRESIGNED_PUBLIC_URLS_EXPIRATION_HOURS }
   )
+
+  return keepSignedQueryEncoded(signedUrl)
 }
 
 function getM3U8BaseDir (key: string): string {
   const lastSlash = key.lastIndexOf('/')
   return lastSlash === -1 ? '' : key.substring(0, lastSlash)
+}
+
+export function keepSignedQueryEncoded (url: string): string {
+  const questionMarkIndex = url.indexOf('?')
+  if (questionMarkIndex === -1) return url
+
+  const base = url.substring(0, questionMarkIndex)
+  const query = url.substring(questionMarkIndex + 1)
+
+  const normalizedQuery = query.split('&').map(param => {
+    const equalIndex = param.indexOf('=')
+    if (equalIndex === -1) return param
+
+    const key = param.substring(0, equalIndex)
+    let value = param.substring(equalIndex + 1)
+
+    if (key.startsWith('X-Amz-')) {
+      // Keep reserved chars encoded in SigV4 params to avoid intermediary rewriting.
+      value = value.replace(/\+/g, '%2B').replace(/\//g, '%2F')
+    }
+
+    return `${key}=${value}`
+  }).join('&')
+
+  return `${base}?${normalizedQuery}`
 }
 
 function getBucketInfo (fileType: ObjectStoragePublicFileType) {
