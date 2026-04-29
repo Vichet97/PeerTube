@@ -437,6 +437,29 @@ async function uploadToStorage (options: {
     params: input
   })
 
+  parallelUploads3.on('httpUploadProgress', progress => {
+    const loaded = progress.loaded ?? 0
+    const total = progress.total
+    const percent = total ? Math.round((loaded / total) * 10000) / 100 : undefined
+
+    logger.debug('Object storage upload progress', {
+      bucket: bucketInfo.BUCKET_NAME,
+      key: input.Key,
+      objectStorageKey,
+      contentType,
+      acl: input.ACL,
+      queueSize: CONFIG.OBJECT_STORAGE.UPLOAD_PART_QUEUE_SIZE,
+      partSize: CONFIG.OBJECT_STORAGE.MAX_UPLOAD_PART,
+      loaded,
+      total,
+      percent,
+      part: progress.part,
+      eventBucket: progress.Bucket,
+      eventKey: progress.Key,
+      ...lTags()
+    })
+  })
+
   try {
     const response = await parallelUploads3.done()
     // Check is needed even if the HTTP status code is 200 OK
