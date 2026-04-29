@@ -315,10 +315,22 @@ async function checkObjectStorageReadiness (options: {
 }): Promise<boolean> {
   const { key, bucketInfo, maxRetries = 30, retryIntervalMs = 10000 } = options
   const requestTimeoutMs = 10000
+  const progressTags = {
+    objectStorageKey: key,
+    bucket: bucketInfo.BUCKET_NAME,
+    prefix: bucketInfo.PREFIX,
+    ...lTags()
+  }
 
   const { GetObjectCommand } = await import('@aws-sdk/client-s3')
 
-  logger.debug('Checking object storage readiness for %s%s in bucket %s', bucketInfo.PREFIX, key, bucketInfo.BUCKET_NAME, lTags())
+  logger.debug(
+    'Checking object storage readiness for %s%s in bucket %s',
+    bucketInfo.PREFIX,
+    key,
+    bucketInfo.BUCKET_NAME,
+    progressTags
+  )
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
@@ -338,7 +350,7 @@ async function checkObjectStorageReadiness (options: {
         clearTimeout(timeoutId)
 
         if (response.$metadata.httpStatusCode === 200 || response.$metadata.httpStatusCode === 206) {
-          logger.debug('Object storage file %s is ready (attempt %d)', key, attempt, lTags())
+          logger.debug('Object storage file %s is ready (attempt %d)', key, attempt, { ...progressTags, attempt })
           return true
         }
 
@@ -348,7 +360,7 @@ async function checkObjectStorageReadiness (options: {
           response.$metadata.httpStatusCode,
           attempt,
           maxRetries,
-          lTags()
+          { ...progressTags, attempt, statusCode: response.$metadata.httpStatusCode }
         )
       } catch (innerErr) {
         clearTimeout(timeoutId)
@@ -362,7 +374,7 @@ async function checkObjectStorageReadiness (options: {
           attempt,
           maxRetries,
           retryIntervalMs,
-          { err: err?.message, ...lTags() }
+          { ...progressTags, attempt, retryIntervalMs, err: err?.message }
         )
         await new Promise(resolve => setTimeout(resolve, retryIntervalMs))
       } else {
@@ -370,7 +382,7 @@ async function checkObjectStorageReadiness (options: {
           'Object storage file %s did not become ready after %d attempts',
           key,
           maxRetries,
-          { err: err?.message, ...lTags() }
+          { ...progressTags, attempt, err: err?.message }
         )
         return false
       }
@@ -421,6 +433,17 @@ async function uploadToStorage (options: {
 
   const acl = getACL(isPrivate)
   if (acl) input.ACL = acl
+  const progressTags = {
+    bucket: bucketInfo.BUCKET_NAME,
+    key: input.Key,
+    objectStorageKey,
+    prefix: bucketInfo.PREFIX,
+    contentType,
+    acl: input.ACL,
+    queueSize: CONFIG.OBJECT_STORAGE.UPLOAD_PART_QUEUE_SIZE,
+    partSize: CONFIG.OBJECT_STORAGE.MAX_UPLOAD_PART,
+    ...lTags()
+  }
 
   const { Upload } = await import('@aws-sdk/lib-storage')
 
@@ -443,20 +466,13 @@ async function uploadToStorage (options: {
     const percent = total ? Math.round((loaded / total) * 10000) / 100 : undefined
 
     logger.debug('Object storage upload progress', {
-      bucket: bucketInfo.BUCKET_NAME,
-      key: input.Key,
-      objectStorageKey,
-      contentType,
-      acl: input.ACL,
-      queueSize: CONFIG.OBJECT_STORAGE.UPLOAD_PART_QUEUE_SIZE,
-      partSize: CONFIG.OBJECT_STORAGE.MAX_UPLOAD_PART,
+      ...progressTags,
       loaded,
       total,
       percent,
       part: progress.part,
       eventBucket: progress.Bucket,
-      eventKey: progress.Key,
-      ...lTags()
+      eventKey: progress.Key
     })
   })
 
@@ -466,7 +482,7 @@ async function uploadToStorage (options: {
     // For more information, see https://docs.aws.amazon.com/AmazonS3/latest/API/API_CompleteMultipartUpload.html
     if (!response.Bucket) {
       const message = `Error uploading ${objectStorageKey} to bucket ${bucketInfo.BUCKET_NAME}`
-      logger.error(message, { response, ...lTags() })
+      logger.error(message, { ...progressTags, response })
       throw new Error(message)
     }
 
@@ -475,7 +491,7 @@ async function uploadToStorage (options: {
       bucketInfo.PREFIX,
       objectStorageKey,
       bucketInfo.BUCKET_NAME,
-      { ...lTags(), responseMetadata: response.$metadata }
+      { ...progressTags, responseMetadata: response.$metadata }
     )
   } catch (err) {
     // eslint-disable-next-line @typescript-eslint/only-throw-error
