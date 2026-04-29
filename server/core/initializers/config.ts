@@ -267,6 +267,9 @@ const CONFIG = {
     ENABLED: config.get<boolean>('object_storage.enabled'),
     CONCURRENCY: config.has('object_storage.concurrency') ? config.get<number>('object_storage.concurrency') : 5,
     UPLOAD_CONCURRENCY: config.has('object_storage.upload_concurrency') ? config.get<number>('object_storage.upload_concurrency') : 10,
+    UPLOAD_PART_QUEUE_SIZE: config.has('object_storage.upload_part_queue_size')
+      ? config.get<number>('object_storage.upload_part_queue_size')
+      : 1,
     MOVE_TO_FILE_SYSTEM_CONCURRENCY:
       config.has('object_storage.move_to_file_system_concurrency')
         ? config.get<number>('object_storage.move_to_file_system_concurrency')

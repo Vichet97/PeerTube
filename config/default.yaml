@@ -214,7 +214,10 @@ object_storage:
     secret_access_key: 'secret'
 
   # Maximum amount to upload in one request to object storage
-  max_upload_part: 100MB
+  max_upload_part: 10MB
+
+  # Number of parallel multipart requests for a single object upload
+  upload_part_queue_size: 1
 
   # Concurrency for moving videos to object storage (job concurrency)
   concurrency: 10

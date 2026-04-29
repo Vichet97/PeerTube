@@ -208,6 +208,9 @@ object_storage:
   # Maximum amount to upload in one request to object storage
   max_upload_part: 100MB
 
+  # Number of parallel multipart requests for a single object upload
+  upload_part_queue_size: 1
+
   # Maximum number of attempts to make a request to object storage
   # Some object storage providers (for instance Backblaze) expects the client to retry upload upon 5xx errors
   # If you're using such a provider then you can increase this value

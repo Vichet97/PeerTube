@@ -426,7 +426,7 @@ async function uploadToStorage (options: {
 
   const parallelUploads3 = new Upload({
     client: await getClient(),
-    queueSize: 1,
+    queueSize: CONFIG.OBJECT_STORAGE.UPLOAD_PART_QUEUE_SIZE,
     partSize: CONFIG.OBJECT_STORAGE.MAX_UPLOAD_PART,
 
     // `leavePartsOnError` must be set to `true` to avoid silently dropping failed parts

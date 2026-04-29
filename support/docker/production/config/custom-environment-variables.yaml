@@ -89,6 +89,10 @@ object_storage:
     __name: "PEERTUBE_OBJECT_STORAGE_MAX_UPLOAD_PART"
     __format: "json"
 
+  upload_part_queue_size:
+    __name: "PEERTUBE_OBJECT_STORAGE_UPLOAD_PART_QUEUE_SIZE"
+    __format: "json"
+
   max_request_attempts:
     __name: "PEERTUBE_OBJECT_STORAGE_MAX_REQUEST_ATTEMPTS"
     __format: "json"
