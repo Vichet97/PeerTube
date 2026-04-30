@@ -7,6 +7,7 @@ import {
 } from '@peertube/peertube-ffmpeg'
 import { VideoFileStream } from '@peertube/peertube-models'
 import { computeOutputFPS } from '@server/helpers/ffmpeg/index.js'
+import { DEFAULT_AUDIO_MERGE_RESOLUTION, DEFAULT_AUDIO_RESOLUTION } from '@server/initializers/constants.js'
 import { createTorrentAndSetInfoHash } from '@server/lib/webtorrent.js'
 import { VideoModel } from '@server/models/video/video.js'
 import { MVideoFile, MVideoFullLight } from '@server/types/models/index.js'
@@ -40,6 +41,20 @@ export async function optimizeOriginalVideofile (options: {
   try {
     const video = await VideoModel.loadFull(options.video.id)
     const inputVideoFile = video.getMaxQualityFile(VideoFileStream.VIDEO)
+    if (!inputVideoFile) {
+      const inputAudioFile = video.getMaxQualityFile(VideoFileStream.AUDIO)
+
+      if (!inputAudioFile) {
+        throw new Error(`Cannot optimize video ${video.uuid} because no input file is available anymore.`)
+      }
+
+      return mergeAudioVideofile({
+        video,
+        resolution: DEFAULT_AUDIO_RESOLUTION,
+        fps: Math.min(DEFAULT_AUDIO_MERGE_RESOLUTION, CONFIG.TRANSCODING.FPS.MAX),
+        job
+      })
+    }
 
     const result = await VideoPathManager.Instance.makeAvailableVideoFile(inputVideoFile, async videoInputPath => {
       const videoOutputPath = join(transcodeDirectory, video.id + '-transcoded' + newExtname)
