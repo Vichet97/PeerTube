@@ -124,19 +124,7 @@ export async function moveVideoToObjectStorage (options: {
 
   // Handle state transitions after normal move completion
   if (moveVideoState) {
-    const videoForStateCheck = await VideoModel.loadFull(videoUUID)
-    if (!videoForStateCheck) {
-      logger.warn('[MOVE_STORAGE] Video %s not found during state transition', videoUUID)
-      return
-    }
-
-    const isAlreadyPublished = videoForStateCheck.state === VideoState.PUBLISHED
-
-    if (isAlreadyPublished) {
-      logger.info('[MOVE_STORAGE] Video %s is already published, skipping state transition after object storage move', videoUUID)
-    } else {
-      await moveToNextState({ video: { uuid: videoUUID }, ...moveVideoState })
-    }
+    await maybeTransitionAfterObjectStorageMove({ videoUUID, moveVideoState, reason: 'normal move completion' })
   } else {
     const videoFull = await VideoModel.loadFull(videoUUID)
     if (!videoFull) {
@@ -899,14 +887,7 @@ async function finalizeInitialHLSCutover (options: {
     if (onProgress) onProgress(95)
 
     if (moveVideoState) {
-      const videoForStateCheck = await VideoModel.loadFull(videoUUID)
-      const isAlreadyPublished = videoForStateCheck?.state === VideoState.PUBLISHED
-
-      if (isAlreadyPublished) {
-        logger.info('[MOVE_STORAGE] Video %s is already published, skipping state transition after object storage move', videoUUID)
-      } else {
-        await moveToNextState({ video: { uuid: videoUUID }, ...moveVideoState })
-      }
+      await maybeTransitionAfterObjectStorageMove({ videoUUID, moveVideoState, reason: 'HLS cutover finalization' })
     } else {
       const videoFull = await VideoModel.loadFull(videoUUID)
       await federateVideoIfNeeded(videoFull, false, undefined)
@@ -1157,6 +1138,43 @@ async function ensureObjectStorageFileReady (options: {
     )
     throw new Error(`Object storage file ${objectStorageKey} is not ready after max retries`)
   }
+}
+
+async function maybeTransitionAfterObjectStorageMove (options: {
+  videoUUID: string
+  moveVideoState: {
+    isNewVideo: boolean
+    previousVideoState: VideoStateType
+  }
+  reason: string
+}) {
+  const { videoUUID, moveVideoState, reason } = options
+
+  const videoForStateCheck = await VideoModel.loadFull(videoUUID)
+  if (!videoForStateCheck) {
+    logger.warn('[MOVE_STORAGE] Video %s not found during state transition (%s)', videoUUID, reason)
+    return
+  }
+
+  if (videoForStateCheck.state === VideoState.PUBLISHED) {
+    logger.info('[MOVE_STORAGE] Video %s is already published, skipping state transition after object storage move', videoUUID)
+    return
+  }
+
+  if (
+    videoForStateCheck.state !== VideoState.TO_MOVE_TO_EXTERNAL_STORAGE &&
+    videoForStateCheck.state !== VideoState.TO_MOVE_TO_EXTERNAL_STORAGE_FAILED
+  ) {
+    logger.warn(
+      '[MOVE_STORAGE] Skipping state transition after object storage move for video %s in state %s (%s)',
+      videoUUID,
+      videoForStateCheck.state,
+      reason
+    )
+    return
+  }
+
+  await moveToNextState({ video: { uuid: videoUUID }, ...moveVideoState })
 }
 
 async function waitBeforeObjectStorageCutover () {

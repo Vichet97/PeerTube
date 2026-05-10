@@ -206,29 +206,83 @@ async function makeAvailable (options: {
 }) {
   const { key, destination, bucketInfo } = options
 
-  await ensureDir(dirname(options.destination))
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      await ensureDir(dirname(options.destination))
 
-  const { GetObjectCommand } = await import('@aws-sdk/client-s3')
+      const { GetObjectCommand } = await import('@aws-sdk/client-s3')
 
-  const command = new GetObjectCommand({
-    Bucket: bucketInfo.BUCKET_NAME,
-    Key: buildKey(key, bucketInfo)
-  })
+      const command = new GetObjectCommand({
+        Bucket: bucketInfo.BUCKET_NAME,
+        Key: buildKey(key, bucketInfo)
+      })
 
-  const client = await getClient()
-  const response = await client.send(command)
-    .catch(err => {
-      throw parseS3Error(err)
-    })
+      const client = await getClient()
+      const response = await client.send(command)
+        .catch(err => {
+          throw parseS3Error(err)
+        })
 
-  const file = createWriteStream(destination)
-  await pipelinePromise(response.Body as Readable, file)
+      const file = createWriteStream(destination)
+      await pipelinePromise(response.Body as Readable, file)
 
-  file.close()
+      file.close()
+      return
+    } catch (err) {
+      if (attempt < 2 && isTransientObjectStorageError(err)) {
+        logger.warn(
+          'Transient object storage error while fetching %s%s from bucket %s, retrying in 5s (attempt %d/2)',
+          bucketInfo.PREFIX,
+          key,
+          bucketInfo.BUCKET_NAME,
+          attempt
+        )
+
+        await new Promise(resolve => setTimeout(resolve, 5000))
+        continue
+      }
+
+      throw err
+    }
+  }
 }
 
 function buildKey (key: string, bucketInfo: BucketInfo) {
   return key.includes(bucketInfo.PREFIX) ? key : bucketInfo.PREFIX + key
+}
+
+// ---------------------------------------------------------------------------
+
+function isTransientObjectStorageError (err: unknown) {
+  if (!err || typeof err !== 'object') return false
+
+  const e = err as any
+  const message = [
+    e.name,
+    e.Code,
+    e.code,
+    e.message,
+    e.$response?.statusCode,
+    e.$metadata?.httpStatusCode
+  ].filter(Boolean).join(' ')
+
+  const statusCode = e.$response?.statusCode ?? e.$metadata?.httpStatusCode
+  if (statusCode && [ 500, 502, 503, 504 ].includes(statusCode)) return true
+
+  return [
+    'XMinioBackendDown',
+    'Object storage backend is unreachable',
+    'ServiceUnavailable',
+    'SlowDown',
+    'RequestTimeout',
+    'TimeoutError',
+    'ECONNRESET',
+    'ETIMEDOUT',
+    'EPIPE',
+    'aborted',
+    '500 Internal Server Error',
+    '503 Service Unavailable'
+  ].some(token => message.includes(token))
 }
 
 // ---------------------------------------------------------------------------
@@ -258,7 +312,8 @@ async function createObjectReadStream (options: {
 
   let timeoutId: ReturnType<typeof setTimeout> | undefined
   if (timeoutController && requestTimeoutMs) {
-    timeoutId = setTimeout(() => timeoutController!.abort(), requestTimeoutMs)
+    const controller = timeoutController
+    timeoutId = setTimeout(() => controller.abort(), requestTimeoutMs)
   }
 
   const command = new GetObjectCommand({
@@ -399,6 +454,7 @@ export {
   checkObjectStorageReadiness,
   createObjectReadStream,
   getObjectStorageFileSize,
+  isTransientObjectStorageError,
   listKeysOfPrefix,
   makeAvailable,
   removeObject,
