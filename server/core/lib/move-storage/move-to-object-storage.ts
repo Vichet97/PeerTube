@@ -46,6 +46,43 @@ import { moveVideoToStorage, onMoveVideoToStorageFailure } from './shared/move-v
 
 const lTagsBase = loggerTagsFactory('object-storage', 'move-object-storage')
 
+export async function maybeTransitionAfterObjectStorageMove (options: {
+  videoUUID: string
+  moveVideoState: {
+    isNewVideo: boolean
+    previousVideoState: VideoStateType
+  }
+  reason: string
+}) {
+  const { videoUUID, moveVideoState, reason } = options
+
+  const videoForStateCheck = await VideoModel.loadFull(videoUUID)
+  if (!videoForStateCheck) {
+    logger.warn('[MOVE_STORAGE] Video %s not found during state transition (%s)', videoUUID, reason)
+    return
+  }
+
+  if (videoForStateCheck.state === VideoState.PUBLISHED) {
+    logger.info('[MOVE_STORAGE] Video %s is already published, skipping state transition after object storage move', videoUUID)
+    return
+  }
+
+  if (
+    videoForStateCheck.state !== VideoState.TO_MOVE_TO_EXTERNAL_STORAGE &&
+    videoForStateCheck.state !== VideoState.TO_MOVE_TO_EXTERNAL_STORAGE_FAILED
+  ) {
+    logger.warn(
+      '[MOVE_STORAGE] Skipping state transition after object storage move for video %s in state %s (%s)',
+      videoUUID,
+      videoForStateCheck.state,
+      reason
+    )
+    return
+  }
+
+  await moveToNextState({ video: { uuid: videoUUID }, ...moveVideoState })
+}
+
 export async function moveVideoToObjectStorage (options: {
   videoUUID: string
 
@@ -1138,43 +1175,6 @@ async function ensureObjectStorageFileReady (options: {
     )
     throw new Error(`Object storage file ${objectStorageKey} is not ready after max retries`)
   }
-}
-
-async function maybeTransitionAfterObjectStorageMove (options: {
-  videoUUID: string
-  moveVideoState: {
-    isNewVideo: boolean
-    previousVideoState: VideoStateType
-  }
-  reason: string
-}) {
-  const { videoUUID, moveVideoState, reason } = options
-
-  const videoForStateCheck = await VideoModel.loadFull(videoUUID)
-  if (!videoForStateCheck) {
-    logger.warn('[MOVE_STORAGE] Video %s not found during state transition (%s)', videoUUID, reason)
-    return
-  }
-
-  if (videoForStateCheck.state === VideoState.PUBLISHED) {
-    logger.info('[MOVE_STORAGE] Video %s is already published, skipping state transition after object storage move', videoUUID)
-    return
-  }
-
-  if (
-    videoForStateCheck.state !== VideoState.TO_MOVE_TO_EXTERNAL_STORAGE &&
-    videoForStateCheck.state !== VideoState.TO_MOVE_TO_EXTERNAL_STORAGE_FAILED
-  ) {
-    logger.warn(
-      '[MOVE_STORAGE] Skipping state transition after object storage move for video %s in state %s (%s)',
-      videoUUID,
-      videoForStateCheck.state,
-      reason
-    )
-    return
-  }
-
-  await moveToNextState({ video: { uuid: videoUUID }, ...moveVideoState })
 }
 
 async function waitBeforeObjectStorageCutover () {
