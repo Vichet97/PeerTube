@@ -31,10 +31,10 @@ export async function moveVideoToStorage (options: {
   moveHLSFiles: (video: MVideoWithAllFiles, options?: {
     onInitialCutoverReady?: (options: { playlistId: number, fileIds: number[] }) => Promise<void>
   }) => Promise<boolean> // Returns true if initial HLS cutover was deferred to a follow-up job
-  moveVideoSourceFile: (source: MVideoSource) => Promise<void>
-  moveCaptionFiles: (captions: MVideoCaption[], hls: MStreamingPlaylistVideoUUID) => Promise<void>
-  moveThumbnailFiles?: (thumbnails: MThumbnail[]) => Promise<void>
-  moveStoryboardFiles?: (storyboards: MStoryboard[]) => Promise<void>
+  moveVideoSourceFile: (source: MVideoSource, video: MVideoWithAllFiles) => Promise<void>
+  moveCaptionFiles: (captions: MVideoCaption[], hls: MStreamingPlaylistVideoUUID, video?: MVideoWithAllFiles) => Promise<void>
+  moveThumbnailFiles?: (thumbnails: MThumbnail[], video: MVideoWithAllFiles) => Promise<void>
+  moveStoryboardFiles?: (storyboards: MStoryboard[], video: MVideoWithAllFiles) => Promise<void>
   moveTorrentFiles?: (video: MVideoWithAllFiles) => Promise<void>
   onInitialHLSCutoverReady?: (options: { playlistId: number, fileIds: number[] }) => Promise<void>
   onProgress?: (percent: number) => void
@@ -65,6 +65,7 @@ export async function moveVideoToStorage (options: {
   }
 
   const lTags = lTagsBase(video.uuid, video.url)
+  let hlsCutoverDeferred = false
 
   try {
     // Early exit if nothing to move - avoid expensive operations when files are already on target storage
@@ -75,7 +76,6 @@ export async function moveVideoToStorage (options: {
       const pendingMove = await VideoJobInfoModel.decrease(video.uuid, 'pendingMove')
       logger.info(`Decreased pendingMove counter for ${video.uuid}. Remaining: ${pendingMove}.`, lTags)
 
-      fileMutexReleaser()
       return false
     }
 
@@ -112,7 +112,7 @@ export async function moveVideoToStorage (options: {
       logger.debug(`Moving ${captions.length} captions of ${video.uuid}.`, lTags)
 
       const hls = video.getHLSPlaylist()
-      await moveCaptionFiles(captions, hls)
+      await moveCaptionFiles(captions, hls, video)
       completedStages++
       updateStageProgress()
     }
@@ -120,7 +120,7 @@ export async function moveVideoToStorage (options: {
     if (source) {
       logger.debug(`Moving video source ${source.keptOriginalFilename} file of video ${video.uuid}`, lTags)
 
-      await moveVideoSourceFile(source)
+      await moveVideoSourceFile(source, video)
       completedStages++
       updateStageProgress()
     }
@@ -133,7 +133,6 @@ export async function moveVideoToStorage (options: {
       updateStageProgress()
     }
 
-    let hlsCutoverDeferred = false
     if (hls) {
       logger.debug(`Moving HLS playlist of ${video.uuid}.`, lTags)
 
@@ -147,7 +146,7 @@ export async function moveVideoToStorage (options: {
     if (thumbnails.length !== 0 && moveThumbnailFiles) {
       logger.debug(`Moving ${thumbnails.length} thumbnails of ${video.uuid}.`, lTags)
 
-      await moveThumbnailFiles(thumbnails)
+      await moveThumbnailFiles(thumbnails, video)
       completedStages++
       updateStageProgress()
     }
@@ -155,7 +154,7 @@ export async function moveVideoToStorage (options: {
     if (storyboards.length !== 0 && moveStoryboardFiles) {
       logger.debug(`Moving ${storyboards.length} storyboards of ${video.uuid}.`, lTags)
 
-      await moveStoryboardFiles(storyboards)
+      await moveStoryboardFiles(storyboards, video)
       completedStages++
       updateStageProgress()
     }
@@ -180,7 +179,7 @@ export async function moveVideoToStorage (options: {
     fileMutexReleaser()
   }
 
-  return false
+  return hlsCutoverDeferred
 }
 
 export async function onMoveVideoToStorageFailure (options: {

@@ -391,19 +391,30 @@ export class YoutubeDLCLI {
   }) {
     const { url, args, timeout, processOptions } = options
 
-    let completeArgs = this.wrapWithJSRuntimeOptions(args)
-    completeArgs = this.wrapWithProxyOptions(completeArgs)
-    completeArgs = this.wrapWithIPOptions(completeArgs)
-    completeArgs = this.wrapWithFFmpegOptions(completeArgs)
-    completeArgs = await this.wrapWithAria2cOptions(completeArgs)
-    completeArgs = this.wrapWithPerformanceOptions(completeArgs)
+    const completeArgs = await this.buildYoutubeDLArgs({ args, withAria2c: true })
 
-    const youtubeDLBinaryPath = getYoutubeDLBinaryPath()
-    const subProcessBinary = this.getSubProcessBinary(youtubeDLBinaryPath)
-    const subProcessArgs = [ ...completeArgs, url ]
-    if (subProcessBinary !== youtubeDLBinaryPath) subProcessArgs.unshift(youtubeDLBinaryPath)
+    try {
+      return await this.runCommand({ url, completeArgs, processOptions, timeout })
+    } catch (err) {
+      if (!this.shouldRetryWithoutAria2c({ err, completeArgs })) throw err
 
-    const subProcess = execa(subProcessBinary, subProcessArgs, processOptions)
+      return this.retryWithoutAria2c({
+        url,
+        args,
+        runner: completeArgs => this.runCommand({ url, completeArgs, processOptions, timeout })
+      })
+    }
+  }
+
+  private async runCommand (options: {
+    url: string
+    completeArgs: string[]
+    timeout?: number
+    processOptions: ProcessOptions
+  }) {
+    const { url, completeArgs, timeout, processOptions } = options
+
+    const subProcess = this.spawnYoutubeDLProcess({ url, completeArgs, processOptions })
 
     if (timeout) {
       setTimeout(() => subProcess.kill(), timeout)
@@ -427,19 +438,31 @@ export class YoutubeDLCLI {
   }) {
     const { url, args, timeout, processOptions, onProgress } = options
 
-    let completeArgs = this.wrapWithJSRuntimeOptions(args)
-    completeArgs = this.wrapWithProxyOptions(completeArgs)
-    completeArgs = this.wrapWithIPOptions(completeArgs)
-    completeArgs = this.wrapWithFFmpegOptions(completeArgs)
-    completeArgs = await this.wrapWithAria2cOptions(completeArgs)
-    completeArgs = this.wrapWithPerformanceOptions(completeArgs)
+    const completeArgs = await this.buildYoutubeDLArgs({ args, withAria2c: true })
 
-    const youtubeDLBinaryPath = getYoutubeDLBinaryPath()
-    const subProcessBinary = this.getSubProcessBinary(youtubeDLBinaryPath)
-    const subProcessArgs = [ ...completeArgs, url ]
-    if (subProcessBinary !== youtubeDLBinaryPath) subProcessArgs.unshift(youtubeDLBinaryPath)
+    try {
+      return await this.runCommandWithProgress({ url, completeArgs, processOptions, timeout, onProgress })
+    } catch (err) {
+      if (!this.shouldRetryWithoutAria2c({ err, completeArgs })) throw err
 
-    const subProcess = execa(subProcessBinary, subProcessArgs, processOptions)
+      return this.retryWithoutAria2c({
+        url,
+        args,
+        runner: completeArgs => this.runCommandWithProgress({ url, completeArgs, processOptions, timeout, onProgress })
+      })
+    }
+  }
+
+  private async runCommandWithProgress (options: {
+    url: string
+    completeArgs: string[]
+    timeout?: number
+    processOptions: ProcessOptions
+    onProgress: (percent: number) => void
+  }) {
+    const { url, completeArgs, timeout, processOptions, onProgress } = options
+
+    const subProcess = this.spawnYoutubeDLProcess({ url, completeArgs, processOptions })
 
     if (timeout) {
       setTimeout(() => subProcess.kill(), timeout)
@@ -487,6 +510,127 @@ export class YoutubeDLCLI {
     return output.stdout
       ? output.stdout.trim().split(/\r?\n/)
       : undefined
+  }
+
+  private async buildYoutubeDLArgs (options: {
+    args: string[]
+    withAria2c: boolean
+  }) {
+    const { args, withAria2c } = options
+
+    let completeArgs = this.wrapWithJSRuntimeOptions(args)
+    completeArgs = this.wrapWithProxyOptions(completeArgs)
+    completeArgs = this.wrapWithIPOptions(completeArgs)
+    completeArgs = this.wrapWithFFmpegOptions(completeArgs)
+    if (withAria2c) completeArgs = await this.wrapWithAria2cOptions(completeArgs)
+    completeArgs = this.wrapWithPerformanceOptions(completeArgs)
+
+    return completeArgs
+  }
+
+  private spawnYoutubeDLProcess (options: {
+    url: string
+    completeArgs: string[]
+    processOptions: ProcessOptions
+  }) {
+    const { url, completeArgs, processOptions } = options
+
+    const youtubeDLBinaryPath = getYoutubeDLBinaryPath()
+    const subProcessBinary = this.getSubProcessBinary(youtubeDLBinaryPath)
+    const subProcessArgs = [ ...completeArgs, url ]
+    if (subProcessBinary !== youtubeDLBinaryPath) subProcessArgs.unshift(youtubeDLBinaryPath)
+
+    return execa(subProcessBinary, subProcessArgs, processOptions)
+  }
+
+  private async retryWithoutAria2c (options: {
+    url: string
+    args: string[]
+    runner: (completeArgs: string[]) => Promise<string[] | undefined>
+  }) {
+    const { url, args, runner } = options
+
+    logger.warn(
+      'aria2c failed on protocol-relative HLS fragment URLs for %s. ' +
+        'Retrying yt-dlp without aria2c so fragments can be normalized by yt-dlp.',
+      url,
+      lTags()
+    )
+
+    const fallbackArgs = await this.buildYoutubeDLArgs({
+      args: this.stripDownloaderOptions(args),
+      withAria2c: false
+    })
+
+    return runner(fallbackArgs)
+  }
+
+  private stripDownloaderOptions (args: string[]) {
+    const result: string[] = []
+
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i]
+
+      if (arg === '--downloader' || arg === '--downloader-args') {
+        i++
+        continue
+      }
+
+      if (arg.startsWith('--downloader=') || arg.startsWith('--downloader-args=')) continue
+
+      result.push(arg)
+    }
+
+    return result
+  }
+
+  private shouldRetryWithoutAria2c (options: {
+    err: unknown
+    completeArgs: string[]
+  }) {
+    const { err, completeArgs } = options
+
+    if (!this.hasAria2cDownloader(completeArgs)) return false
+
+    return this.isAria2cProtocolRelativeUrlError(err)
+  }
+
+  private hasAria2cDownloader (args: string[]) {
+    const downloaderIndex = args.indexOf('--downloader')
+    if (downloaderIndex !== -1) {
+      return args[downloaderIndex + 1]?.includes('aria2c') === true
+    }
+
+    return args.some(arg => arg.startsWith('--downloader=') && arg.includes('aria2c'))
+  }
+
+  private isAria2cProtocolRelativeUrlError (err: unknown) {
+    const errorString = this.stringifyError(err)
+
+    return errorString.includes('Unrecognized URI or unsupported protocol: //') &&
+      (
+        errorString.includes('Unable to open fragment') ||
+        errorString.includes('aria2c exited with code')
+      )
+  }
+
+  private stringifyError (err: unknown) {
+    if (!err) return ''
+
+    const stringValues: string[] = []
+
+    if (typeof err === 'string') {
+      stringValues.push(err)
+    } else if (typeof err === 'object') {
+      const errorObject = err as Record<string, unknown>
+
+      for (const key of [ 'message', 'shortMessage', 'originalMessage', 'stdout', 'stderr', 'stack' ]) {
+        const value = errorObject[key]
+        if (typeof value === 'string') stringValues.push(value)
+      }
+    }
+
+    return stringValues.join('\n')
   }
 
   private wrapWithJSRuntimeOptions (args: string[]) {

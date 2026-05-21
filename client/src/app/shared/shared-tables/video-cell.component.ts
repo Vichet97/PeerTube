@@ -11,6 +11,8 @@ import { VideoState } from '@peertube/peertube-models'
 import { interval, Subscription } from 'rxjs'
 import { switchMap } from 'rxjs/operators'
 
+const LIST_PROCESSING_PROGRESS_POLL_INTERVAL_MS = 10000
+
 @Component({
   selector: 'my-video-cell',
   styleUrls: [ 'video-cell.component.scss' ],
@@ -63,15 +65,28 @@ export class VideoCellComponent implements OnInit, OnDestroy {
     const video = this.video()
     if (!video) return
 
-    this.processingProgressSubscription = interval(2000).pipe(
+    this.processingProgressSubscription = interval(LIST_PROCESSING_PROGRESS_POLL_INTERVAL_MS).pipe(
       switchMap(() => this.videoService.getProcessingProgress({ videoId: video.uuid }))
     ).subscribe({
       next: result => {
-        if (result) {
-          this.processingProgress.set(result.progress)
+        if (!result) {
+          this.processingProgress.set(null)
+          this.stopProcessingProgressPolling()
+          return
         }
+
+        if (result.active === false) {
+          this.processingProgress.set(null)
+          this.stopProcessingProgressPolling()
+          return
+        }
+
+        this.processingProgress.set(result.progress)
       },
-      error: () => this.stopProcessingProgressPolling()
+      error: () => {
+        this.processingProgress.set(null)
+        this.stopProcessingProgressPolling()
+      }
     })
   }
 

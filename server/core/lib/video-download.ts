@@ -166,6 +166,13 @@ export class VideoDownload {
       return this.buildMuxLocalFSInput(videoFile)
     }
 
+    const retainedLocalPath = VideoPathManager.Instance.getFSVideoFileOutputPath(this.video, videoFile)
+    if (await pathExists(retainedLocalPath)) {
+      logger.debug('Using retained local file %s for mux input instead of object storage.', retainedLocalPath)
+
+      return { input: retainedLocalPath, isTmpDestination: false as const }
+    }
+
     // Local on object storage
     return this.buildMuxLocalObjectStorageInput(videoFile)
   }

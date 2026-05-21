@@ -1,4 +1,15 @@
-import { FileStorage, HttpStatusCode, Job, JobState, JobType, ResultList, UserRight, VideoFileStream, VideoState, VideoStateType } from '@peertube/peertube-models'
+import {
+  FileStorage,
+  HttpStatusCode,
+  Job,
+  JobState,
+  JobType,
+  ResultList,
+  UserRight,
+  VideoFileStream,
+  VideoState,
+  VideoStateType
+} from '@peertube/peertube-models'
 import { Job as BullJob } from 'bullmq'
 import express from 'express'
 import { isArray } from '../../helpers/custom-validators/misc.js'
@@ -7,7 +18,11 @@ import { CONFIG } from '../../initializers/config.js'
 import { sequelizeTypescript } from '../../initializers/database.js'
 import { JobQueue } from '../../lib/job-queue/index.js'
 import { hasVideoResourcesToBeMoved } from '../../lib/move-storage/shared/move-video.js'
-import { buildMoveVideoJob, buildLocalStoryboardJobIfNeeded } from '../../lib/video-jobs.js'
+import {
+  buildMoveVideoJob,
+  buildLocalStoryboardJobIfNeeded,
+  createMoveJobWithPendingMoveRollback
+} from '../../lib/video-jobs.js'
 import { moveToNextState } from '../../lib/video-state.js'
 import { VideoCaptionModel } from '../../models/video/video-caption.js'
 import { VideoJobInfoModel } from '../../models/video/video-job-info.js'
@@ -24,7 +39,11 @@ import {
   setDefaultPagination,
   setDefaultSort
 } from '../../middlewares/index.js'
-import { createMoveStorageJobsValidator, createRetryTranscodingJobsValidator, listJobsValidator } from '../../middlewares/validators/jobs.js'
+import {
+  createMoveStorageJobsValidator,
+  createRetryTranscodingJobsValidator,
+  listJobsValidator
+} from '../../middlewares/validators/jobs.js'
 
 const jobsRouter = express.Router()
 
@@ -151,7 +170,7 @@ async function createMoveStorageJobs (req: express.Request, res: express.Respons
           video: videoFull
         })
         if (job) {
-          await JobQueue.Instance.createJob(job)
+          await createMoveJobWithPendingMoveRollback(job)
           jobsCreated++
         }
       } catch (err) {
@@ -366,12 +385,7 @@ async function cancelJobs (req: express.Request, res: express.Response) {
           const jobs = await queue.getJobs([ state ], 0, 10000, true)
 
           for (const job of jobs) {
-            try {
-              await job.remove()
-              cancelledCount++
-            } catch {
-              // Job might have been processed already, continue
-            }
+            cancelledCount += await removeQueuedJob(job)
           }
         }
       }
@@ -387,12 +401,23 @@ async function cancelJobs (req: express.Request, res: express.Response) {
   return res.json({ cancelledCount })
 }
 
+async function removeQueuedJob (job: BullJob) {
+  try {
+    await job.remove()
+    return 1
+  } catch {
+    // Job might have been processed already, continue
+    return 0
+  }
+}
+
 async function recheckVideosStatus (req: express.Request, res: express.Response) {
   const jobType = req.body.jobType as string | undefined
 
   const ids = await VideoModel.listLocalIds()
 
   const videoUUIDsWithPendingJobs = await JobQueue.Instance.listVideoUUIDsWithPendingTranscodingJobs()
+  const videoUUIDsWithPendingTranscriptionJobs = await JobQueue.Instance.listVideoUUIDsWithPendingTranscriptionJobs()
 
   let videosChecked = 0
   let videosUpdated = 0
@@ -422,9 +447,11 @@ async function recheckVideosStatus (req: express.Request, res: express.Response)
     if (info?.pendingTranscode > 0) {
       const hasActiveTranscodingJob = videoUUIDsWithPendingJobs.has(video.uuid)
       if (!hasActiveTranscodingJob) {
-        // No active job, but counter is positive - decrement the counter
-        await VideoJobInfoModel.decrease(video.uuid, 'pendingTranscode')
-        logger.info(`Fixed pendingTranscode counter for video ${video.uuid}, was ${info.pendingTranscode}, now ${info.pendingTranscode - 1}`)
+        // No active job, but counter is positive - clear the stale counter
+        await VideoJobInfoModel.decrease(video.uuid, 'pendingTranscode', info.pendingTranscode)
+        logger.info(
+          `Fixed pendingTranscode counter for video ${video.uuid}, was ${info.pendingTranscode}, now 0`
+        )
         videosUpdated++
       }
     }
@@ -442,20 +469,17 @@ async function recheckVideosStatus (req: express.Request, res: express.Response)
     }
 
     // === MOVE TO STORAGE SYNC ===
-    // Check if all files are on object storage (load video with files)
-    const videoWithFiles = await VideoModel.loadWithFiles(video.id)
-    const videoFiles = videoWithFiles?.VideoFiles || []
-    const hasLocalFiles = videoFiles.some(f => f.storage === 0) // 0 = local
-    const hasObjectStorageFiles = videoFiles.some(f => f.storage === 1) // 1 = object storage
+    const hasResourcesToMoveToObjectStorage = await hasVideoResourcesToBeMoved(video, FileStorage.OBJECT_STORAGE)
+    const hasResourcesToMoveToFileSystem = await hasVideoResourcesToBeMoved(video, FileStorage.FILE_SYSTEM)
 
-    if (info?.pendingMove > 0 && !hasLocalFiles) {
-      // All files moved to object storage, but counter still positive - decrement
-      await VideoJobInfoModel.decrease(video.uuid, 'pendingMove')
-      logger.info(`Fixed pendingMove counter for video ${video.uuid}, files now on object storage`)
+    if (info?.pendingMove > 0 && !hasResourcesToMoveToObjectStorage) {
+      // All resources moved to object storage, but counter still positive - clear the stale counter
+      await VideoJobInfoModel.decrease(video.uuid, 'pendingMove', info.pendingMove)
+      logger.info(`Fixed pendingMove counter for video ${video.uuid}, resources now on object storage`)
       videosUpdated++
     }
 
-    if (hasObjectStorageFiles && !hasLocalFiles) {
+    if (hasResourcesToMoveToFileSystem && !hasResourcesToMoveToObjectStorage) {
       // Fully moved to object storage - update state if still in pending state
       if (video.state === VideoState.TO_MOVE_TO_EXTERNAL_STORAGE) {
         // Move to next state (should be PUBLISHED)
@@ -463,7 +487,7 @@ async function recheckVideosStatus (req: express.Request, res: express.Response)
         logger.info(`Video ${video.uuid} moved to next state after all files on object storage`)
         videosUpdated++
       }
-    } else if (hasLocalFiles && !hasObjectStorageFiles) {
+    } else if (hasResourcesToMoveToObjectStorage && !hasResourcesToMoveToFileSystem) {
       // Fully on local storage - if in failed state, reset
       if (video.state === VideoState.TO_MOVE_TO_EXTERNAL_STORAGE_FAILED) {
         video.state = VideoState.TO_MOVE_TO_EXTERNAL_STORAGE
@@ -479,8 +503,15 @@ async function recheckVideosStatus (req: express.Request, res: express.Response)
     // and doesn't block video state - no action needed here
 
     // === TRANSCRIPTION SYNC ===
-    // Note: Transcription status is tracked via pendingTranscription counter
-    // and VideoCaptionModel - no action needed here since captions don't block video state
+    // If pendingTranscription > 0 but no jobs in queue, clear the stale counter so retained local files can be released.
+    if (info?.pendingTranscription > 0) {
+      const hasActiveTranscriptionJob = videoUUIDsWithPendingTranscriptionJobs.has(video.uuid)
+      if (!hasActiveTranscriptionJob) {
+        await VideoJobInfoModel.decrease(video.uuid, 'pendingTranscription', info.pendingTranscription)
+        logger.info(`Fixed pendingTranscription counter for video ${video.uuid}, was ${info.pendingTranscription}, now 0`)
+        videosUpdated++
+      }
+    }
   }
 
   logger.info(`Recheck videos status completed: checked ${videosChecked}, updated ${videosUpdated}`)
@@ -529,8 +560,8 @@ async function retryJob (req: express.Request, res: express.Response) {
 }
 
 async function removeJob (req: express.Request, res: express.Response) {
-  const jobType = req.params.jobType as string
-  const jobId = req.params.jobId as string
+  const jobType = req.params.jobType
+  const jobId = req.params.jobId
 
   if (!jobType || !jobId) {
     return res.fail({

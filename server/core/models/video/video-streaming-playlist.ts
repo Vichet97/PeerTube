@@ -89,7 +89,7 @@ export class VideoStreamingPlaylistModel extends SequelizeModel<VideoStreamingPl
 
   @AllowNull(true)
   @Column
-  declare segmentsSha256Filename: string
+  declare segmentsSha256Filename: string | null
 
   @AllowNull(true)
   @Column
@@ -269,7 +269,9 @@ export class VideoStreamingPlaylistModel extends SequelizeModel<VideoStreamingPl
         storage: FileStorage.FILE_SYSTEM,
         p2pMediaLoaderInfohashes: [],
         playlistFilename: generateHLSMasterPlaylistFilename(video.isLive),
-        segmentsSha256Filename: generateHlsSha256SegmentsFilename(video.isLive),
+        segmentsSha256Filename: CONFIG.OBJECT_STORAGE.GENERATE_SHA256_SEGMENTS
+          ? generateHlsSha256SegmentsFilename(video.isLive)
+          : null,
         videoId: video.id
       })
 

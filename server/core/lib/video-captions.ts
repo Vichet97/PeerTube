@@ -23,7 +23,7 @@ import { JobQueue } from './job-queue/job-queue.js'
 import { hasVideoResourcesToBeMoved } from './move-storage/shared/move-video.js'
 import { Notifier } from './notifier/notifier.js'
 import { cleanupStagedTranscriptionAudio, prepareStagedTranscriptionAudio } from './transcription-audio-staging.js'
-import { buildCaptionMoveJob, buildMoveVideoJob } from './video-jobs.js'
+import { buildCaptionMoveJob, buildMoveVideoJob, createMoveJobWithPendingMoveRollback } from './video-jobs.js'
 import { TranscriptionJobHandler } from './runners/index.js'
 import { VideoPathManager } from './video-path-manager.js'
 
@@ -338,7 +338,7 @@ export async function onTranscriptionEnded (options: {
   if (CONFIG.OBJECT_STORAGE.ENABLED && await hasVideoResourcesToBeMoved(video, FileStorage.OBJECT_STORAGE)) {
     const job = await buildMoveVideoJob({ type: 'move-to-object-storage', video })
     if (job) {
-      await JobQueue.Instance.createJob(job)
+      await createMoveJobWithPendingMoveRollback(job)
     } else {
       logger.info(`Move job skipped (already pending/active) for video ${video.uuid}`, lTags(video.uuid))
     }

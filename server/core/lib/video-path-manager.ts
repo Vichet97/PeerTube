@@ -1,4 +1,4 @@
-import { FileStorage } from '@peertube/peertube-models'
+import { FileStorage, FileStorageType } from '@peertube/peertube-models'
 import { buildUUID } from '@peertube/peertube-node-utils'
 import { Awaitable } from '@peertube/peertube-typescript-utils'
 import { logger, loggerTagsFactory } from '@server/helpers/logger.js'
@@ -67,9 +67,11 @@ class VideoPathManager {
     const createMethods: MakeAvailableCreateMethod[] = []
 
     for (const videoFile of videoFiles) {
-      if (videoFile.storage === FileStorage.FILE_SYSTEM) {
+      const localPath = this.getFSVideoFileOutputPath(videoFile.getVideoOrStreamingPlaylist(), videoFile)
+
+      if (await this.shouldUseLocalPath(localPath, videoFile.storage)) {
         createMethods.push({
-          method: () => this.getFSVideoFileOutputPath(videoFile.getVideoOrStreamingPlaylist(), videoFile),
+          method: () => localPath,
           clean: false
         })
 
@@ -101,11 +103,13 @@ class VideoPathManager {
   }
 
   async makeAvailableVideoSource<T> (videoSource: MVideoSource, cb: MakeAvailableCB<T>) {
-    if (videoSource.storage === FileStorage.FILE_SYSTEM) {
+    const localPath = this.getFSOriginalVideoFilePath(videoSource.keptOriginalFilename)
+
+    if (await this.shouldUseLocalPath(localPath, videoSource.storage)) {
       return this.makeAvailableFactory({
         createMethods: [
           {
-            method: () => this.getFSOriginalVideoFilePath(videoSource.keptOriginalFilename),
+            method: () => localPath,
             clean: false
           }
         ],
@@ -116,7 +120,10 @@ class VideoPathManager {
     return this.makeAvailableFactory({
       createMethods: [
         {
-          method: () => makeOriginalFileAvailable(videoSource.keptOriginalFilename, this.buildTMPDestination(videoSource.keptOriginalFilename)),
+          method: () => makeOriginalFileAvailable(
+            videoSource.keptOriginalFilename,
+            this.buildTMPDestination(videoSource.keptOriginalFilename)
+          ),
           clean: true
         }
       ],
@@ -142,12 +149,13 @@ class VideoPathManager {
 
   async makeAvailableResolutionPlaylistFile<T> (videoFile: MVideoFileStreamingPlaylistVideo, cb: MakeAvailableCB<T>) {
     const filename = getHLSResolutionPlaylistFilename(videoFile.filename)
+    const localPath = join(getHLSDirectory(videoFile.getVideo()), filename)
 
-    if (videoFile.storage === FileStorage.FILE_SYSTEM) {
+    if (await this.shouldUseLocalPath(localPath, videoFile.storage)) {
       return this.makeAvailableFactory({
         createMethods: [
           {
-            method: () => join(getHLSDirectory(videoFile.getVideo()), filename),
+            method: () => localPath,
             clean: false
           }
         ],
@@ -167,11 +175,13 @@ class VideoPathManager {
   }
 
   async makeAvailablePlaylistFile<T> (playlist: MStreamingPlaylistVideo, filename: string, cb: MakeAvailableCB<T>) {
-    if (playlist.storage === FileStorage.FILE_SYSTEM) {
+    const localPath = join(getHLSDirectory(playlist.Video), filename)
+
+    if (await this.shouldUseLocalPath(localPath, playlist.storage)) {
       return this.makeAvailableFactory({
         createMethods: [
           {
-            method: () => join(getHLSDirectory(playlist.Video), filename),
+            method: () => localPath,
             clean: false
           }
         ],
@@ -263,6 +273,16 @@ class VideoPathManager {
 
   buildTMPDestination (filename: string) {
     return join(CONFIG.STORAGE.TMP_DIR, buildUUID() + extname(filename))
+  }
+
+  private async shouldUseLocalPath (path: string, storage: FileStorageType) {
+    if (storage === FileStorage.FILE_SYSTEM) return true
+
+    if (!await pathExists(path)) return false
+
+    logger.debug('Using retained local file %s even though model storage is object storage.', path, lTags())
+
+    return true
   }
 
   static get Instance () {

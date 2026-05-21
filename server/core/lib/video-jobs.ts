@@ -1,4 +1,12 @@
-import { FileStorage, ManageVideoTorrentPayload, VideoFileStream, VideoPrivacy, VideoPrivacyType, VideoState, VideoStateType } from '@peertube/peertube-models'
+import {
+  FileStorage,
+  ManageVideoTorrentPayload,
+  VideoFileStream,
+  VideoPrivacy,
+  VideoPrivacyType,
+  VideoState,
+  VideoStateType
+} from '@peertube/peertube-models'
 import { logger, loggerTagsFactory } from '@server/helpers/logger.js'
 import { CONFIG } from '@server/initializers/config.js'
 import { VideoJobInfoModel } from '@server/models/video/video-job-info.js'
@@ -32,14 +40,23 @@ export async function buildMoveVideoJob (options: {
 
   // Check if there's already a pending/active move job for this video
   // Only create new job if no existing job or if existing job failed
-  const existingJob = await JobQueue.Instance.getExistingMoveJob(type, video.uuid)
+  const existingJob = await JobQueue.Instance.getExistingMoveJob(
+    type,
+    video.uuid,
+    { isFollowUp: isFollowUp === true }
+  )
   if (existingJob) {
     // Check if job failed by looking at failedReason
     const hasFailed = existingJob.failedReason !== undefined && existingJob.failedReason !== null
     if (hasFailed) {
       logger.info(`[MOVE_JOB] Previous job %s failed for video %s, will create new job`, existingJob.id, video.uuid, lTags(video.uuid))
     } else {
-      logger.info(`[MOVE_JOB] Skipping duplicate move job for video %s - job %s already pending/active`, video.uuid, existingJob.id, lTags(video.uuid))
+      logger.info(
+        `[MOVE_JOB] Skipping duplicate move job for video %s - job %s already pending/active`,
+        video.uuid,
+        existingJob.id,
+        lTags(video.uuid)
+      )
       return undefined
     }
   }
@@ -76,9 +93,67 @@ export async function buildCaptionMoveJob (captionId: number) {
   }
 
   return {
-    type: 'move-to-object-storage' as const,
+    type: 'move-caption-to-object-storage' as const,
     payload: { captionId }
   }
+}
+
+export async function createMoveJobWithPendingMoveRollback (job: (CreateJobArgument & CreateJobOptions) | undefined) {
+  if (!job) return undefined
+
+  try {
+    const createdJob = await JobQueue.Instance.createJob(job)
+    if (!createdJob) throw new Error(`Cannot create ${job.type} job for video ${(job.payload as { videoUUID?: string })?.videoUUID}`)
+
+    return createdJob
+  } catch (err) {
+    await rollbackPendingMoveForMoveJob(job)
+    throw err
+  }
+}
+
+export async function createPendingMoveJobs (options: {
+  videoUUID: string
+  jobs: (CreateJobArgument & CreateJobOptions)[]
+}) {
+  const { videoUUID, jobs } = options
+  if (jobs.length === 0) return 0
+
+  await VideoJobInfoModel.increaseOrCreate(videoUUID, 'pendingMove', jobs.length)
+
+  let createdJobs = 0
+  try {
+    for (const job of jobs) {
+      const createdJob = await JobQueue.Instance.createJob(job)
+      if (!createdJob) throw new Error(`Cannot create ${job.type} job for video ${videoUUID}`)
+
+      createdJobs++
+    }
+
+    return createdJobs
+  } catch (err) {
+    const unqueuedJobs = jobs.length - createdJobs
+    if (unqueuedJobs > 0) {
+      await VideoJobInfoModel.decrease(videoUUID, 'pendingMove', unqueuedJobs)
+    }
+
+    throw err
+  }
+}
+
+export async function rollbackPendingMoveForMoveJob (job: (CreateJobArgument & CreateJobOptions) | undefined) {
+  if (!job) return
+  if (!hasPendingMoveIncrement(job)) return
+
+  await VideoJobInfoModel.decrease((job.payload as { videoUUID: string }).videoUUID, 'pendingMove')
+}
+
+function hasPendingMoveIncrement (job: CreateJobArgument & CreateJobOptions) {
+  if (job.type !== 'move-to-object-storage' && job.type !== 'move-to-file-system') return false
+
+  const payload = job.payload as { videoUUID?: string, isFollowUp?: boolean }
+
+  return !!payload.videoUUID && payload.isFollowUp !== true
 }
 
 // ---------------------------------------------------------------------------
@@ -164,7 +239,11 @@ export async function buildGranularVideoFileMoveJob (options: {
 }) {
   const { videoUUID, fileId, isNewVideo, previousVideoState } = options
 
-  const existingJob = await JobQueue.Instance.getExistingMoveJob('move-video-file-to-object-storage', videoUUID)
+  const existingJob = await JobQueue.Instance.getExistingMoveJob(
+    'move-video-file-to-object-storage',
+    videoUUID,
+    { fileId }
+  )
   if (existingJob) {
     const hasFailed = existingJob.failedReason !== undefined && existingJob.failedReason !== null
     if (!hasFailed) {
@@ -193,18 +272,39 @@ export async function buildGranularHLSPlaylistMoveJob (options: {
   previousVideoState?: VideoStateType
 }) {
   const { videoUUID, playlistId, fileIds, isNewVideo, previousVideoState } = options
+  let fileIdsToSchedule = fileIds
 
   // Dedupe by exact video+playlist+fileIds payload.
   // Regular flow now queues one playlist-scoped job containing all fileIds;
   // subset fileIds are mainly used by delayed retry jobs spawned by the handler.
-  const existingJobs = await JobQueue.Instance.getExistingHLSPlaylistMoveJobs(videoUUID, playlistId, fileIds)
+  const existingJobs = await JobQueue.Instance.getExistingHLSPlaylistMoveJobs(videoUUID, playlistId, fileIds, { match: 'overlap' })
   if (existingJobs.length > 0) {
-    const hasFailed = existingJobs.some((j: any) => j.failedReason !== undefined && j.failedReason !== null)
-    if (!hasFailed) {
-      logger.info(`[GRANULAR_MOVE] Skipping duplicate HLS playlist move job for playlist ${playlistId} files ${fileIds.join(',')} - job(s) ${existingJobs.map((j: any) => j.id).join(', ')} already pending/active`)
+    const pendingOrActiveJobs = existingJobs.filter((j: any) => j.failedReason === undefined || j.failedReason === null)
+    const hasFailedJobs = existingJobs.some((j: any) => j.failedReason !== undefined && j.failedReason !== null)
+    const pendingFileIds = new Set<number>(
+      pendingOrActiveJobs.flatMap((j: any) => Array.isArray(j.data?.fileIds) ? j.data.fileIds : [])
+    )
+    const uncoveredFileIds = fileIds.filter(id => !pendingFileIds.has(id))
+
+    if (pendingOrActiveJobs.length !== 0 && uncoveredFileIds.length === 0) {
+      logger.info(
+        `[GRANULAR_MOVE] Skipping duplicate HLS playlist move job for playlist ${playlistId} files ${fileIds.join(',')} - ` +
+          `job(s) ${pendingOrActiveJobs.map((j: any) => j.id).join(', ')} already pending/active`
+      )
       return undefined
     }
-    logger.info(`[GRANULAR_MOVE] Previous HLS playlist move job(s) failed, will create new job for playlist ${playlistId}`)
+
+    if (pendingOrActiveJobs.length !== 0) {
+      logger.info(
+        `[GRANULAR_MOVE] Existing HLS playlist move job(s) ${pendingOrActiveJobs.map((j: any) => j.id).join(', ')} ` +
+          `already cover file(s) ${Array.from(pendingFileIds).join(',')}; scheduling uncovered file(s) ${uncoveredFileIds.join(',')}`
+      )
+      fileIdsToSchedule = uncoveredFileIds
+    }
+
+    if (hasFailedJobs) {
+      logger.info(`[GRANULAR_MOVE] Previous HLS playlist move job(s) failed, will create new job for playlist ${playlistId}`)
+    }
   }
 
   return {
@@ -212,7 +312,7 @@ export async function buildGranularHLSPlaylistMoveJob (options: {
     payload: {
       videoUUID,
       playlistId,
-      fileIds,
+      fileIds: fileIdsToSchedule,
       isNewVideo,
       previousVideoState
     }
@@ -227,7 +327,11 @@ export async function buildGranularThumbnailMoveJob (options: {
 }) {
   const { videoUUID, thumbnailId, isNewVideo, previousVideoState } = options
 
-  const existingJob = await JobQueue.Instance.getExistingMoveJob('move-thumbnail-to-object-storage', videoUUID)
+  const existingJob = await JobQueue.Instance.getExistingMoveJob(
+    'move-thumbnail-to-object-storage',
+    videoUUID,
+    { thumbnailId }
+  )
   if (existingJob) {
     const hasFailed = existingJob.failedReason !== undefined && existingJob.failedReason !== null
     if (!hasFailed) {
@@ -359,13 +463,8 @@ export async function addVideoJobsAfterCreation (options: {
     })
 
     if (moveJobs.length > 0) {
-      // Increment pendingMove once per job
-      await VideoJobInfoModel.increaseOrCreate(video.uuid, 'pendingMove', moveJobs.length)
-
       logger.info('[VIDEO_JOBS] Creating %d granular move jobs for %s (no transcoding)', moveJobs.length, video.uuid)
-      criticalJobs.push(
-        ...moveJobs.map(job => JobQueue.Instance.createJob(job))
-      )
+      criticalJobs.push(createPendingMoveJobs({ videoUUID: video.uuid, jobs: moveJobs }))
     } else {
       logger.info('[VIDEO_JOBS] No files to move for %s, skipping move jobs', video.uuid)
     }

@@ -3,15 +3,18 @@ import { retryTransactionWrapper } from '@server/helpers/database-utils.js'
 import { logger, loggerTagsFactory } from '@server/helpers/logger.js'
 import { CONFIG } from '@server/initializers/config.js'
 import { sequelizeTypescript } from '@server/initializers/database.js'
-import { VideoJobInfoModel } from '@server/models/video/video-job-info.js'
 import { VideoModel } from '@server/models/video/video.js'
 import { MVideo, MVideoFullLight, MVideoUUID } from '@server/types/models/index.js'
 import { Transaction } from 'sequelize'
 import { federateVideoIfNeeded } from './activitypub/videos/index.js'
-import { JobQueue } from './job-queue/index.js'
 import { hasVideoResourcesToBeMoved } from './move-storage/shared/move-video.js'
 import { Notifier } from './notifier/index.js'
-import { buildGranularMoveJobs, buildMoveVideoJob } from './video-jobs.js'
+import {
+  buildGranularMoveJobs,
+  buildMoveVideoJob,
+  createMoveJobWithPendingMoveRollback,
+  createPendingMoveJobs
+} from './video-jobs.js'
 
 const lTags = loggerTagsFactory('video-state')
 
@@ -136,14 +139,12 @@ export async function moveToExternalStorageState (options: {
     })
 
     if (jobs.length > 0) {
-      // Increment pendingMove once per job that was actually created
-      // (duplicate jobs were already filtered out by the builders)
-      await VideoJobInfoModel.increaseOrCreate(video.uuid, 'pendingMove', jobs.length)
-
-      logger.info('[MOVE_JOB] Created %d granular move jobs for %s (pendingMove now reflects job count)', jobs.length, video.uuid)
-      for (const job of jobs) {
-        await JobQueue.Instance.createJob(job)
-      }
+      const createdJobs = await createPendingMoveJobs({ videoUUID: video.uuid, jobs })
+      logger.info(
+        '[MOVE_JOB] Created %d granular move jobs for %s (pendingMove now reflects queued job count)',
+        createdJobs,
+        video.uuid
+      )
     } else {
       // No granular jobs. We can still have leftover resources like local torrents,
       // so fallback to the legacy move job when needed.
@@ -161,7 +162,7 @@ export async function moveToExternalStorageState (options: {
 
         if (fallbackJob) {
           logger.info('[MOVE_JOB] No granular jobs for %s, created fallback move-to-object-storage job.', video.uuid)
-          await JobQueue.Instance.createJob(fallbackJob)
+          await createMoveJobWithPendingMoveRollback(fallbackJob)
         } else {
           logger.info('[MOVE_JOB] Fallback move job already pending/active for %s, skipping duplicate.', video.uuid)
         }
@@ -206,17 +207,11 @@ async function enqueueMissingObjectStorageMoveJobsForPublishedVideo (options: {
 
     if (!fallbackJob) return 0
 
-    await JobQueue.Instance.createJob(fallbackJob)
+    await createMoveJobWithPendingMoveRollback(fallbackJob)
     return 1
   }
 
-  await VideoJobInfoModel.increaseOrCreate(video.uuid, 'pendingMove', jobs.length)
-
-  for (const job of jobs) {
-    await JobQueue.Instance.createJob(job)
-  }
-
-  return jobs.length
+  return createPendingMoveJobs({ videoUUID: video.uuid, jobs })
 }
 
 export async function moveToFileSystemState (options: {
@@ -249,7 +244,7 @@ export async function moveToFileSystemState (options: {
       return true
     }
 
-    await JobQueue.Instance.createJob(job)
+    await createMoveJobWithPendingMoveRollback(job)
 
     return true
   } catch (err) {

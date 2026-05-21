@@ -9,8 +9,7 @@ import { VideoModel } from '@server/models/video/video.js'
 import { MVideoFullLight } from '@server/types/models/index.js'
 import { getVideoStreamDimensionsInfo } from '@peertube/peertube-ffmpeg'
 import { logger } from '../../../helpers/logger.js'
-import { JobQueue } from '../job-queue.js'
-import { buildMoveVideoJob } from '@server/lib/video-jobs.js'
+import { buildMoveVideoJob, createMoveJobWithPendingMoveRollback } from '@server/lib/video-jobs.js'
 import { buildNewFile } from '@server/lib/video-file.js'
 
 async function processVideoFileImport (job: Job) {
@@ -36,7 +35,7 @@ async function processVideoFileImport (job: Job) {
       }
     })
     if (job) {
-      await JobQueue.Instance.createJob(job)
+      await createMoveJobWithPendingMoveRollback(job)
     } else {
       logger.info(`[VIDEO_IMPORT] Move job skipped (already pending/active) for video ${video.uuid}`)
     }

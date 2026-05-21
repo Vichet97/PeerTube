@@ -24,7 +24,7 @@ import { isUserQuotaValid } from '@server/lib/user.js'
 import { createTranscriptionTaskIfNeeded } from '@server/lib/video-captions.js'
 import { replaceChaptersIfNotExist } from '@server/lib/video-chapters.js'
 import { buildNewFile } from '@server/lib/video-file.js'
-import { addLocalOrRemoteStoryboardJobIfNeeded, buildMoveVideoJob } from '@server/lib/video-jobs.js'
+import { addLocalOrRemoteStoryboardJobIfNeeded, buildMoveVideoJob, createMoveJobWithPendingMoveRollback } from '@server/lib/video-jobs.js'
 import { VideoPathManager } from '@server/lib/video-path-manager.js'
 import { buildNextVideoState } from '@server/lib/video-state.js'
 import { createTorrentAndSetInfoHash, downloadWebTorrentVideo } from '@server/lib/webtorrent.js'
@@ -47,7 +47,6 @@ import { VideoModel } from '../../../models/video/video.js'
 import { federateVideoIfNeeded } from '../../activitypub/videos/index.js'
 import { Notifier } from '../../notifier/index.js'
 import { createLocalVideoThumbnailsFromVideo } from '../../thumbnail.js'
-import { JobQueue } from '../job-queue.js'
 import { UserModel } from '@server/models/user/user.js'
 
 async function processVideoImport (job: Job): Promise<VideoImportPreventExceptionResult> {
@@ -386,7 +385,7 @@ async function afterImportSuccess (options: {
           }
         })
         if (job) {
-          await JobQueue.Instance.createJob(job)
+          await createMoveJobWithPendingMoveRollback(job)
         } else {
           logger.info(`[VIDEO_IMPORT] Move job skipped (already pending/active) for video ${video.uuid}`)
         }

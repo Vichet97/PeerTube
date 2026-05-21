@@ -104,15 +104,16 @@ export class VideoJobInfoModel extends SequelizeModel<VideoJobInfoModel> {
     return result[column]
   }
 
-  static async decrease (videoUUID: string, column: VideoJobInfoColumnType): Promise<number> {
+  static async decrease (videoUUID: string, column: VideoJobInfoColumnType, amountArg = 1): Promise<number> {
     const options = { type: QueryTypes.SELECT as QueryTypes.SELECT, bind: { videoUUID } }
+    const amount = Math.max(1, forceNumber(amountArg) || 1)
 
     const result = await VideoJobInfoModel.sequelize.query(
       `
     UPDATE
       "videoJobInfo"
     SET
-      "${column}" = GREATEST("videoJobInfo"."${column}" - 1, 0),
+      "${column}" = GREATEST("videoJobInfo"."${column}" - ${amount}, 0),
       "updatedAt" = NOW()
     FROM "video"
     WHERE
@@ -123,7 +124,7 @@ export class VideoJobInfoModel extends SequelizeModel<VideoJobInfoModel> {
       options
     )
 
-    if (result.length === 0) return undefined
+    if (result.length === 0) return 0
 
     return result[0][column]
   }

@@ -1,6 +1,10 @@
 import { isMoveCaptionPayload, isMoveVideoStoragePayload, MoveStoragePayload } from '@peertube/peertube-models'
 import { logger, loggerTagsFactory } from '@server/helpers/logger.js'
-import { moveCaptionToFS, moveVideoToFS, onMoveVideoToFSFailure } from '@server/lib/move-storage/move-to-file-system.js'
+import {
+  moveCaptionToFS,
+  moveVideoToFS,
+  onMoveVideoToFSFailure
+} from '@server/lib/move-storage/move-to-file-system.js'
 import { VideoModel } from '@server/models/video/video.js'
 import { Job } from 'bullmq'
 
@@ -12,7 +16,12 @@ export async function processMoveToFileSystem (job: Job) {
   if (isMoveVideoStoragePayload(payload)) { // Move all video related files
     const video = await VideoModel.loadWithFiles(payload.videoUUID)
     if (!video) {
-      logger.info('Move-to-file-system job %s cancelled: video %s does not exist (video was deleted).', job.id, payload.videoUUID, lTagsBase(payload.videoUUID))
+      logger.info(
+        'Move-to-file-system job %s cancelled: video %s does not exist (video was deleted).',
+        job.id,
+        payload.videoUUID,
+        lTagsBase(payload.videoUUID)
+      )
       throw new Error('Video was deleted - transcoding job cancelled')
     }
 
@@ -43,6 +52,9 @@ export async function onMoveToFileSystemFailure (job: Job, err: any) {
   const payload = job.data as MoveStoragePayload
 
   if (!isMoveVideoStoragePayload(payload)) return
+
+  const maxAttempts = job.opts?.attempts ?? 1
+  if (job.attemptsMade < maxAttempts) return
 
   await onMoveVideoToFSFailure({
     videoUUID: payload.videoUUID,

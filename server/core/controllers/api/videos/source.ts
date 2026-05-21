@@ -8,7 +8,12 @@ import { setupUploadResumableRoutes } from '@server/lib/uploadx.js'
 import { autoBlacklistVideoIfNeeded } from '@server/lib/video-blacklist.js'
 import { regenerateTranscriptionTaskIfNeeded } from '@server/lib/video-captions.js'
 import { buildNewFile, createVideoSource } from '@server/lib/video-file.js'
-import { addRemoteStoryboardJobIfNeeded, buildLocalStoryboardJobIfNeeded, buildMoveVideoJob } from '@server/lib/video-jobs.js'
+import {
+  addRemoteStoryboardJobIfNeeded,
+  buildLocalStoryboardJobIfNeeded,
+  buildMoveVideoJob,
+  rollbackPendingMoveForMoveJob
+} from '@server/lib/video-jobs.js'
 import { VideoPathManager } from '@server/lib/video-path-manager.js'
 import { buildNextVideoState } from '@server/lib/video-state.js'
 import { openapiOperationDoc } from '@server/middlewares/doc.js'
@@ -199,8 +204,10 @@ async function addVideoJobsAfterUpload (video: MVideoFullLight, videoFile: MVide
     }
   ]
 
+  let pendingMoveJob: Awaited<ReturnType<typeof buildMoveVideoJob>> = undefined
+
   if (video.state === VideoState.TO_MOVE_TO_EXTERNAL_STORAGE) {
-    const job = await buildMoveVideoJob({
+    pendingMoveJob = await buildMoveVideoJob({
       type: 'move-to-object-storage',
       video,
       moveVideoState: {
@@ -208,8 +215,8 @@ async function addVideoJobsAfterUpload (video: MVideoFullLight, videoFile: MVide
         previousVideoState: undefined
       }
     })
-    if (job) {
-      jobs.push(job)
+    if (pendingMoveJob) {
+      jobs.push(pendingMoveJob)
     }
   }
 
@@ -225,7 +232,12 @@ async function addVideoJobsAfterUpload (video: MVideoFullLight, videoFile: MVide
     })
   }
 
-  await JobQueue.Instance.createSequentialJobFlow(...jobs)
+  try {
+    await JobQueue.Instance.createSequentialJobFlow(...jobs)
+  } catch (err) {
+    await rollbackPendingMoveForMoveJob(pendingMoveJob)
+    throw err
+  }
 
   await addRemoteStoryboardJobIfNeeded(video)
   await regenerateTranscriptionTaskIfNeeded(video)

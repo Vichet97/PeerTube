@@ -6,7 +6,7 @@ import { ApplicationModel } from '@server/models/application/application.js'
 import { VideoCaptionModel } from '@server/models/video/video-caption.js'
 import { MStreamingPlaylist, MStreamingPlaylistFilesVideo, MVideo, MVideoCaption } from '@server/types/models/index.js'
 import { MVideoFileStreamingPlaylist } from '@server/types/models/video/video-file.js'
-import { ensureDir, move, outputJSON, remove } from 'fs-extra/esm'
+import { ensureDir, move, outputJSON, pathExists, remove } from 'fs-extra/esm'
 import { open, readFile, stat, writeFile } from 'fs/promises'
 import flatten from 'lodash-es/flatten.js'
 import PQueue from 'p-queue'
@@ -74,17 +74,23 @@ export async function updateStreamingPlaylistsInfohashesIfNeeded () {
   }
 }
 
-export async function updateM3U8AndShaPlaylist (video: MVideo, playlist: MStreamingPlaylist) {
+export async function updateM3U8AndShaPlaylist (
+  video: MVideo,
+  playlist: MStreamingPlaylist,
+  options: {
+    throwOnError?: boolean
+  } = {}
+) {
   try {
     let playlistWithFiles = await updateMasterHLSPlaylist(video, playlist)
-    if (!playlistWithFiles) return
+    if (!playlistWithFiles) return false
 
     playlistWithFiles = await updateSha256VODSegments(video, playlist)
-    if (!playlistWithFiles) return
+    if (!playlistWithFiles) return false
 
     // Refresh playlist, operations can take some time
     playlistWithFiles = await VideoStreamingPlaylistModel.loadWithVideoAndFiles(playlist.id)
-    if (!playlistWithFiles) return
+    if (!playlistWithFiles) return false
 
     const videoFiles = await VideoFileModel.listByStreamingPlaylist(playlist.id)
     const publishedVideoFiles = getPublishedVideoFiles(playlistWithFiles.storage, videoFiles)
@@ -92,18 +98,41 @@ export async function updateM3U8AndShaPlaylist (video: MVideo, playlist: MStream
     await playlistWithFiles.save()
 
     video.setHLSPlaylist(playlistWithFiles)
+    return true
   } catch (err) {
     logger.warn('Cannot update playlist after file change. Maybe due to concurrent transcoding', { err })
+    if (options.throwOnError) throw err
+
+    return false
   }
 }
 
 // ---------------------------------------------------------------------------
 
-// Avoid concurrency issues when updating streaming playlist files
-const playlistFilesQueue = new PQueue({ concurrency: 1 })
+// Avoid concurrency issues when updating a single streaming playlist files.
+// Do not use a global queue here: a slow/hung object-storage operation for one
+// playlist would block HLS post-processing for every other video.
+const playlistFilesQueues = new Map<number, PQueue>()
+
+async function addPlaylistFilesTask <T> (playlistId: number, task: () => Promise<T>): Promise<T> {
+  let queue = playlistFilesQueues.get(playlistId)
+
+  if (!queue) {
+    queue = new PQueue({ concurrency: 1 })
+    playlistFilesQueues.set(playlistId, queue)
+  }
+
+  try {
+    return await queue.add(task)
+  } finally {
+    if (queue.pending === 0 && queue.size === 0) {
+      playlistFilesQueues.delete(playlistId)
+    }
+  }
+}
 
 function updateMasterHLSPlaylist (video: MVideo, playlistArg: MStreamingPlaylist): Promise<MStreamingPlaylistFilesVideo | null> {
-  return playlistFilesQueue.add(async () => {
+  return addPlaylistFilesTask(playlistArg.id, async () => {
     const playlist = await VideoStreamingPlaylistModel.loadWithVideoAndFiles(playlistArg.id)
     if (!playlist) return null
 
@@ -183,6 +212,10 @@ function updateMasterHLSPlaylist (video: MVideo, playlistArg: MStreamingPlaylist
 
     const masterPlaylistContent = masterPlaylists.join('\n') + '\n'
 
+    const masterPlaylistPath = VideoPathManager.Instance.getFSHLSOutputPath(video, playlist.playlistFilename)
+    await ensureDir(dirname(masterPlaylistPath))
+    await writeFile(masterPlaylistPath, masterPlaylistContent)
+
     if (playlist.storage === FileStorage.OBJECT_STORAGE) {
       await storeHLSFileFromContent({
         video,
@@ -190,11 +223,12 @@ function updateMasterHLSPlaylist (video: MVideo, playlistArg: MStreamingPlaylist
         content: masterPlaylistContent
       })
 
-      logger.info(`Updated master playlist file of video ${video.uuid} to object storage ${playlist.playlistUrl}`, lTags(video.uuid))
+      logger.info(
+        `Updated master playlist file of video ${video.uuid} to object storage ${playlist.playlistUrl} ` +
+          `and retained local copy ${masterPlaylistPath}`,
+        lTags(video.uuid)
+      )
     } else {
-      const masterPlaylistPath = VideoPathManager.Instance.getFSHLSOutputPath(video, playlist.playlistFilename)
-      await writeFile(masterPlaylistPath, masterPlaylistContent)
-
       logger.info(`Updated master playlist file ${masterPlaylistPath} of video ${video.uuid}`, lTags(video.uuid))
     }
 
@@ -218,9 +252,14 @@ async function hashVideoRangesFromObjectStorage (
 ): Promise<{ [rangeKey: string]: string }> {
   const resolutionPlaylistFilename = getHLSResolutionPlaylistFilename(file.filename)
   const result: { [rangeKey: string]: string } = {}
+  const requestTimeoutMs = CONFIG.OBJECT_STORAGE.PROXY.REQUEST_TIMEOUT_MS || 10000
 
   // Read resolution playlist from S3
-  const { stream: playlistStream } = await getHLSFileReadStream({ video, filename: resolutionPlaylistFilename })
+  const { stream: playlistStream } = await getHLSFileReadStream({
+    video,
+    filename: resolutionPlaylistFilename,
+    requestTimeoutMs
+  })
   const playlistBuffer = await streamToBuffer(playlistStream)
   const ranges = getRangesFromPlaylist(playlistBuffer.toString('utf8'))
 
@@ -229,7 +268,8 @@ async function hashVideoRangesFromObjectStorage (
     const { stream: rangeStream } = await getHLSFileReadStream({
       video,
       filename: file.filename,
-      rangeHeader: `bytes=${range.offset}-${range.offset + range.length - 1}`
+      rangeHeader: `bytes=${range.offset}-${range.offset + range.length - 1}`,
+      requestTimeoutMs
     })
 
     const rangeBuffer = await streamToBuffer(rangeStream)
@@ -264,8 +304,15 @@ async function hashVideoRangesFromFileSystem (
   return result
 }
 
+async function canHashVideoRangesFromFileSystem (video: MVideo, file: MVideoFileStreamingPlaylist) {
+  const resolutionPlaylistPath = join(getHLSDirectory(video), getHLSResolutionPlaylistFilename(file.filename))
+  const videoPath = join(getHLSDirectory(video), file.filename)
+
+  return (await pathExists(resolutionPlaylistPath)) && (await pathExists(videoPath))
+}
+
 function updateSha256VODSegments (video: MVideo, playlistArg: MStreamingPlaylist): Promise<MStreamingPlaylistFilesVideo | null> {
-  return playlistFilesQueue.add(async () => {
+  return addPlaylistFilesTask(playlistArg.id, async () => {
     const playlist = await VideoStreamingPlaylistModel.loadWithVideoAndFiles(playlistArg.id)
     if (!playlist) return null
 
@@ -286,7 +333,8 @@ function updateSha256VODSegments (video: MVideo, playlistArg: MStreamingPlaylist
 
     for (const file of publishedVideoFiles) {
       const fileWithPlaylist = file.withVideoOrPlaylist(playlist)
-      const rangeHashes = isObjectStorage
+      const useObjectStorage = isObjectStorage && !await canHashVideoRangesFromFileSystem(video, fileWithPlaylist)
+      const rangeHashes = useObjectStorage
         ? await hashVideoRangesFromObjectStorage(video, fileWithPlaylist)
         : await hashVideoRangesFromFileSystem(video, fileWithPlaylist)
 
@@ -298,6 +346,10 @@ function updateSha256VODSegments (video: MVideo, playlistArg: MStreamingPlaylist
     }
     playlist.segmentsSha256Filename = generateHlsSha256SegmentsFilename(video.isLive)
 
+    const outputPath = VideoPathManager.Instance.getFSHLSOutputPath(video, playlist.segmentsSha256Filename)
+    await ensureDir(dirname(outputPath))
+    await outputJSON(outputPath, json)
+
     if (playlist.storage === FileStorage.OBJECT_STORAGE) {
       await storeHLSFileFromContent({
         video,
@@ -305,8 +357,7 @@ function updateSha256VODSegments (video: MVideo, playlistArg: MStreamingPlaylist
         content: JSON.stringify(json)
       })
     } else {
-      const outputPath = VideoPathManager.Instance.getFSHLSOutputPath(video, playlist.segmentsSha256Filename)
-      await outputJSON(outputPath, json)
+      logger.debug(`Updated SHA256 segments file ${outputPath} of video ${video.uuid}`, lTags(video.uuid))
     }
 
     return playlist.save()

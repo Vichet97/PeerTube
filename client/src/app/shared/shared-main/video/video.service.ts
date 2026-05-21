@@ -45,7 +45,7 @@ import {
 } from '@peertube/peertube-models'
 import { SortMeta } from 'primeng/api'
 import { from, Observable, of, throwError } from 'rxjs'
-import { catchError, concatMap, map, switchMap, toArray } from 'rxjs/operators'
+import { catchError, concatMap, finalize, map, shareReplay, switchMap, tap, toArray } from 'rxjs/operators'
 import { environment } from '../../../../environments/environment'
 import { Account } from '../account/account.model'
 import { AccountService } from '../account/account.service'
@@ -58,6 +58,7 @@ import { Video } from './video.model'
 export type VideoProcessingProgress = {
   progress: number
   type: 'transcoding' | 'import'
+  active?: boolean
 }
 
 export type VideoListParams = Omit<VideosCommonQuery, 'start' | 'count' | 'sort'> & {
@@ -74,11 +75,14 @@ export class VideoService {
   private serverService = inject(ServerService)
   private confirmService = inject(ConfirmService)
   private userService = inject(UserService)
+  private processingProgressCache = new Map<string, { expiresAt: number, result: VideoProcessingProgress | null }>()
+  private processingProgressInflight = new Map<string, Observable<VideoProcessingProgress | null>>()
 
   static BASE_VIDEO_URL = environment.apiUrl + '/api/v1/videos'
   static BASE_FEEDS_URL = environment.apiUrl + '/feeds/videos.'
   static PODCAST_FEEDS_URL = environment.apiUrl + '/feeds/podcast/videos.xml'
   static BASE_SUBSCRIPTION_FEEDS_URL = environment.apiUrl + '/feeds/subscriptions.'
+  static PROCESSING_PROGRESS_CACHE_TTL_MS = 1500
 
   getVideoViewUrl (uuid: string) {
     return `${VideoService.BASE_VIDEO_URL}/${uuid}/views`
@@ -98,16 +102,35 @@ export class VideoService {
   }
 
   getProcessingProgress (options: { videoId: string, videoPassword?: string }): Observable<VideoProcessingProgress | null> {
+    const cacheKey = `${options.videoId}:${options.videoPassword ?? ''}`
+    const cached = this.processingProgressCache.get(cacheKey)
+    if (cached && cached.expiresAt > Date.now()) return of(cached.result)
+
+    const inflight = this.processingProgressInflight.get(cacheKey)
+    if (inflight) return inflight
+
     const headers = VideoPasswordService.buildVideoPasswordHeader(options.videoPassword)
 
-    return this.authHttp
+    const request = this.authHttp
       .get<VideoProcessingProgress>(`${VideoService.BASE_VIDEO_URL}/${options.videoId}/processing-progress`, { headers })
       .pipe(
         catchError(err => {
           if (err?.status === 404) return of(null)
           return this.restExtractor.handleError(err)
-        })
+        }),
+        tap(result => {
+          this.processingProgressCache.set(cacheKey, {
+            expiresAt: Date.now() + VideoService.PROCESSING_PROGRESS_CACHE_TTL_MS,
+            result
+          })
+        }),
+        finalize(() => this.processingProgressInflight.delete(cacheKey)),
+        shareReplay({ bufferSize: 1, refCount: false })
       )
+
+    this.processingProgressInflight.set(cacheKey, request)
+
+    return request
   }
 
   updateVideo (id: number | string, video: VideoUpdate) {

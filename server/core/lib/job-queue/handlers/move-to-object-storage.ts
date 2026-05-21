@@ -12,9 +12,12 @@ import {
   moveVideoToObjectStorage,
   onMoveVideoToObjectStorageFailure
 } from '@server/lib/move-storage/move-to-object-storage.js'
-import { storeHLSFileFromFilename } from '@server/lib/object-storage/index.js'
+import { moveToNextState } from '@server/lib/video-state.js'
+import { VideoJobInfoModel } from '@server/models/video/video-job-info.js'
 import { VideoPathManager } from '@server/lib/video-path-manager.js'
 import { VideoModel } from '@server/models/video/video.js'
+import { checkObjectStorageReadiness, generateHLSObjectStorageKey } from '@server/lib/object-storage/index.js'
+import { getHLSResolutionPlaylistFilename } from '@server/lib/paths.js'
 import { pathExists } from 'fs-extra/esm'
 import { Job } from 'bullmq'
 import { join } from 'path'
@@ -85,6 +88,9 @@ export async function processMoveToObjectStorage (job: Job) {
 
   if (CONFIG.OBJECT_STORAGE.ENABLED !== true) {
     logger.info('[MOVE_JOB] Skipping move-to-object-storage job %s because object storage is disabled', job.id)
+    if (isMoveVideoStoragePayload(payload)) {
+      await releaseSkippedMoveVideoStorageJob(payload)
+    }
     return
   }
 
@@ -179,8 +185,11 @@ export async function processMoveToObjectStorage (job: Job) {
     ]
 
     if (filesToMove.length === 0) {
-      logger.info('[MOVE_JOB] All files for video %s are already on object storage, skipping job %s', payload.videoUUID, job.id)
-      return
+      logger.info(
+        '[MOVE_JOB] All visible local files for video %s are already on object storage; running centralized move finalization for job %s',
+        payload.videoUUID,
+        job.id
+      )
     }
 
     // Verify source files exist before starting the move
@@ -188,41 +197,121 @@ export async function processMoveToObjectStorage (job: Job) {
     for (const f of webVideoFiles) {
       const path = VideoPathManager.Instance.getFSVideoFileOutputPath(video, f)
       if (!(await pathExists(path))) {
-        missingFiles.push(`web-video: ${f.filename} at ${path}`)
+        const objectStorageReady = await checkObjectStorageReadiness({
+          key: f.filename,
+          bucketInfo: CONFIG.OBJECT_STORAGE.WEB_VIDEOS,
+          maxRetries: 1,
+          retryIntervalMs: 0,
+          logNotReadyAsDebug: true
+        })
+
+        if (objectStorageReady) {
+          logger.warn(
+            '[MOVE_JOB] Web video source %s is missing but object storage copy is ready; marking %s as moved',
+            path,
+            f.filename
+          )
+          f.storage = FileStorage.OBJECT_STORAGE
+          await f.save()
+        } else {
+          missingFiles.push(`web-video: ${f.filename} at ${path}`)
+        }
       }
     }
     for (const f of hlsFiles) {
-      const path = VideoPathManager.Instance.getFSHLSOutputPath(video, f.filename)
-      if (!(await pathExists(path))) {
-        missingFiles.push(`hls: ${f.filename} at ${path}`)
+      const fragmentPath = VideoPathManager.Instance.getFSHLSOutputPath(video, f.filename)
+      const playlistFilename = getHLSResolutionPlaylistFilename(f.filename)
+      const playlistPath = VideoPathManager.Instance.getFSHLSOutputPath(video, playlistFilename)
+
+      const fragmentExists = await pathExists(fragmentPath)
+      const playlistExists = await pathExists(playlistPath)
+      if (!fragmentExists || !playlistExists) {
+        const missingHLSFiles: string[] = []
+
+        if (!fragmentExists && !await checkObjectStorageReadiness({
+          key: generateHLSObjectStorageKey(video, f.filename),
+          bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS,
+          maxRetries: 1,
+          retryIntervalMs: 0,
+          logNotReadyAsDebug: true
+        })) {
+          missingHLSFiles.push(`fragment ${f.filename} at ${fragmentPath}`)
+        }
+
+        if (!playlistExists && !await checkObjectStorageReadiness({
+          key: generateHLSObjectStorageKey(video, playlistFilename),
+          bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS,
+          maxRetries: 1,
+          retryIntervalMs: 0,
+          logNotReadyAsDebug: true
+        })) {
+          missingHLSFiles.push(`playlist ${playlistFilename} at ${playlistPath}`)
+        }
+
+        if (missingHLSFiles.length === 0) {
+          logger.warn(
+            '[MOVE_JOB] HLS files for %s are missing locally but object storage copies are ready; marking as moved',
+            f.filename
+          )
+          f.storage = FileStorage.OBJECT_STORAGE
+          await f.save()
+        } else {
+          missingFiles.push(`hls: ${missingHLSFiles.join(', ')}`)
+        }
       }
     }
     for (const t of thumbnails) {
       const path = t.getFSPath()
       if (!(await pathExists(path))) {
-        missingFiles.push(`thumbnail: ${t.filename} at ${path}`)
+        const objectStorageReady = await checkObjectStorageReadiness({
+          key: t.filename,
+          bucketInfo: CONFIG.OBJECT_STORAGE.THUMBNAILS,
+          maxRetries: 1,
+          retryIntervalMs: 0,
+          logNotReadyAsDebug: true
+        })
+
+        if (objectStorageReady) {
+          logger.warn(
+            '[MOVE_JOB] Thumbnail source %s is missing but object storage copy is ready; marking %s as moved',
+            path,
+            t.filename
+          )
+          t.storage = FileStorage.OBJECT_STORAGE
+          await t.save()
+        } else {
+          missingFiles.push(`thumbnail: ${t.filename} at ${path}`)
+        }
       }
     }
     for (const c of captionsOnFileSystem) {
       const path = c.getFSFilePath()
       if (!(await pathExists(path))) {
-        missingFiles.push(`caption: ${c.filename} at ${path}`)
+        const objectStorageReady = await checkObjectStorageReadiness({
+          key: c.filename,
+          bucketInfo: CONFIG.OBJECT_STORAGE.CAPTIONS,
+          maxRetries: 1,
+          retryIntervalMs: 0,
+          logNotReadyAsDebug: true
+        })
+
+        if (objectStorageReady) {
+          logger.warn(
+            '[MOVE_JOB] Caption source %s is missing but object storage copy is ready; marking %s as moved',
+            path,
+            c.filename
+          )
+          c.storage = FileStorage.OBJECT_STORAGE
+          await c.save()
+        } else {
+          missingFiles.push(`caption: ${c.filename} at ${path}`)
+        }
       }
     }
 
     if (missingFiles.length > 0) {
       logger.error('[MOVE_JOB] Source files missing for video %s, job %s: %s', payload.videoUUID, job.id, missingFiles.join(', '))
-      // Update the database to mark files as on object storage since source is gone
-      for (const f of webVideoFiles) {
-        if (missingFiles.some(m => m.includes(f.filename))) {
-          f.storage = FileStorage.OBJECT_STORAGE
-          await f.save()
-        }
-      }
-      // For HLS files, we need to be more careful - just fail the job
-      if (hlsFiles.some(f => missingFiles.some(m => m.includes(f.filename)))) {
-        throw new Error('HLS source files are missing, cannot complete move operation')
-      }
+      throw new Error('Source files are missing and object storage copies are not ready, cannot complete move operation')
     }
 
     // Update initial progress
@@ -291,7 +380,12 @@ export async function processMoveToObjectStorage (job: Job) {
 
     // Skip if caption is already on object storage
     if (caption.storage === FileStorage.OBJECT_STORAGE) {
-      logger.info('[MOVE_JOB] Caption %s is already on object storage, skipping job %s', payload.captionId, job.id)
+      logger.info('[MOVE_JOB] Caption %s is already on object storage, refreshing related playlists for job %s', payload.captionId, job.id)
+      await moveCaptionToObjectStorage({
+        captionId: payload.captionId,
+        loggerTags: lTagsBase().tags
+      })
+      updateProgress(100)
       return
     }
 
@@ -300,11 +394,37 @@ export async function processMoveToObjectStorage (job: Job) {
     const fileExists = await pathExists(captionPath)
 
     if (!fileExists) {
-      // File doesn't exist on filesystem, mark as already moved or skip
-      logger.warn('[MOVE_JOB] Caption file %s does not exist at %s, skipping job %s', caption.filename, captionPath, job.id)
-      // Update storage status since file is gone
+      const objectStorageReady = await checkObjectStorageReadiness({
+        key: caption.filename,
+        bucketInfo: CONFIG.OBJECT_STORAGE.CAPTIONS,
+        maxRetries: 1,
+        retryIntervalMs: 0,
+        logNotReadyAsDebug: true
+      })
+
+      if (!objectStorageReady) {
+        throw new Error(
+          `Caption file ${caption.filename} does not exist at ${captionPath} and object storage copy is not ready`
+        )
+      }
+
+      logger.warn(
+        '[MOVE_JOB] Caption file %s does not exist at %s, but object storage copy is ready; marking as moved for job %s',
+        caption.filename,
+        captionPath,
+        job.id
+      )
       caption.storage = FileStorage.OBJECT_STORAGE
       await caption.save()
+
+      updateProgress(50)
+      await moveCaptionToObjectStorage({
+        captionId: payload.captionId,
+        loggerTags: lTagsBase().tags
+      })
+
+      updateProgress(100)
+      logger.info('[MOVE_JOB] Caption playlist refresh completed for caption %s already present in object storage', payload.captionId)
       return
     }
 
@@ -317,39 +437,35 @@ export async function processMoveToObjectStorage (job: Job) {
       loggerTags: lTagsBase().tags
     })
 
-    // After moving the caption, regenerate and upload the master playlist
-    // to include the caption reference (so players can load caption tracks)
-    if (CONFIG.OBJECT_STORAGE.ENABLED) {
-      try {
-        const { VideoStreamingPlaylistModel } = await import('@server/models/video/video-streaming-playlist.js')
-        const hls = await VideoStreamingPlaylistModel.loadHLSByVideo(caption.videoId)
-
-        if (hls?.storage === FileStorage.OBJECT_STORAGE) {
-          const video = await VideoModel.loadFull(caption.videoId)
-          if (video) {
-            logger.info('[MOVE_JOB] Regenerating master playlist after caption move for video %s', video.uuid)
-            const { updateM3U8AndShaPlaylist } = await import('@server/lib/hls.js')
-            await updateM3U8AndShaPlaylist(video, hls)
-
-            // Upload the updated master playlist
-            await storeHLSFileFromFilename(video, hls.playlistFilename)
-            if (hls.segmentsSha256Filename) {
-              await storeHLSFileFromFilename(video, hls.segmentsSha256Filename)
-            }
-            logger.info('[MOVE_JOB] Master playlist updated and uploaded after caption move')
-          }
-        }
-      } catch (err) {
-        logger.warn('[MOVE_JOB] Failed to update master playlist after caption move: %s', err.message || err)
-        // Don't fail the job if master playlist update fails
-      }
-    }
-
     updateProgress(100)
     logger.info('[MOVE_JOB] Caption move completed for caption %s', payload.captionId)
   } else {
     throw new Error('Unknown payload type')
   }
+}
+
+async function releaseSkippedMoveVideoStorageJob (payload: MoveStoragePayload) {
+  if (!isMoveVideoStoragePayload(payload)) return
+
+  const pendingMove = await VideoJobInfoModel.decrease(payload.videoUUID, 'pendingMove')
+  logger.info('[MOVE_JOB] Object storage disabled; decremented pendingMove for %s, remaining: %d', payload.videoUUID, pendingMove)
+
+  if (pendingMove !== 0) return
+
+  const moveVideoState = payload.moveVideoState ?? (
+    payload.isNewVideo !== undefined
+      ? {
+          isNewVideo: payload.isNewVideo,
+          previousVideoState: payload.previousVideoState
+        }
+      : undefined
+  )
+
+  await moveToNextState({
+    video: { uuid: payload.videoUUID },
+    isNewVideo: moveVideoState?.isNewVideo ?? false,
+    previousVideoState: moveVideoState?.previousVideoState
+  })
 }
 
 function normalizeProgressPercent (percent: number) {
@@ -366,6 +482,9 @@ export async function onMoveToObjectStorageFailure (job: Job, err: any) {
   const payload = job.data as MoveStoragePayload
 
   if (!isMoveVideoStoragePayload(payload)) return
+
+  const maxAttempts = job.opts?.attempts ?? 1
+  if (job.attemptsMade < maxAttempts) return
 
   // [LOGGER] Move job failed
   logger.error('[MOVE_JOB] Move-to-object-storage job %s FAILED for video %s: %s', 

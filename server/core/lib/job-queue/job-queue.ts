@@ -36,6 +36,7 @@ import { jobStates } from '@server/helpers/custom-validators/jobs.js'
 import { toCompleteUUID } from '@server/helpers/custom-validators/misc.js'
 import { CONFIG, registerConfigChangedHandler } from '@server/initializers/config.js'
 import { processVideoRedundancy } from '@server/lib/job-queue/handlers/video-redundancy.js'
+import { scheduleRetainedLocalFilesCleanup } from '@server/lib/move-storage/move-to-object-storage.js'
 import {
   FlowJob,
   FlowProducer,
@@ -51,6 +52,7 @@ import {
 import { logger } from '../../helpers/logger.js'
 import { JOB_ATTEMPTS, JOB_CONCURRENCY, JOB_REMOVAL_OPTIONS, JOB_TTL, REPEAT_JOBS, WEBSERVER } from '../../initializers/constants.js'
 import { VideoModel } from '../../models/video/video.js'
+import { VideoJobInfoModel } from '../../models/video/video-job-info.js'
 import { Hooks } from '../plugins/hooks.js'
 import { Redis } from '../redis.js'
 import { processActivityPubCleaner } from './handlers/activitypub-cleaner.js'
@@ -85,6 +87,8 @@ import { processVideoTranscoding } from './handlers/video-transcoding.js'
 import { processVideoTranscription } from './handlers/video-transcription.js'
 import { processVideosViewsStats } from './handlers/video-views-stats.js'
 import { Op } from 'sequelize'
+
+const TRANSCODING_PROGRESS_CACHE_TTL_MS = 1000
 
 export type CreateJobArgument =
   | { type: 'activitypub-http-broadcast', payload: ActivitypubHttpBroadcastPayload }
@@ -147,7 +151,7 @@ const handlers: { [id in JobType]: (job: Job) => Promise<any> } = {
   'move-video-file-to-object-storage': processGranularMoveToObjectStorage,
   'move-hls-playlist-to-object-storage': processGranularMoveToObjectStorage,
   'move-thumbnail-to-object-storage': processGranularMoveToObjectStorage,
-  'move-caption-to-object-storage': processGranularMoveToObjectStorage,
+  'move-caption-to-object-storage': processMoveToObjectStorage,
   'notify': processNotify,
   'video-channel-import': processVideoChannelImport,
   'video-channel-reset': processVideoChannelReset,
@@ -170,7 +174,7 @@ const errorHandlers: { [id in JobType]?: (job: Job, err: any) => Promise<any> } 
   'move-video-file-to-object-storage': onGranularMoveToObjectStorageFailure,
   'move-hls-playlist-to-object-storage': onGranularMoveToObjectStorageFailure,
   'move-thumbnail-to-object-storage': onGranularMoveToObjectStorageFailure,
-  'move-caption-to-object-storage': onGranularMoveToObjectStorageFailure
+  'move-caption-to-object-storage': onMoveToObjectStorageFailure
 }
 
 const jobTypes: JobType[] = [
@@ -224,6 +228,10 @@ class JobQueue {
 
   private initialized = false
   private jobRedisPrefix: string
+  private transcodingProgressCache?: {
+    expiresAt: number
+    values: Map<string, number>
+  }
 
   private constructor () {
   }
@@ -265,7 +273,11 @@ class JobQueue {
       'video-transcoding',
       'video-transcription',
       'move-to-object-storage',
-      'move-to-file-system'
+      'move-to-file-system',
+      'move-video-file-to-object-storage',
+      'move-hls-playlist-to-object-storage',
+      'move-thumbnail-to-object-storage',
+      'move-caption-to-object-storage'
     ]
     const lockDuration = longRunningHandlers.includes(handlerName)
       ? 1000 * 60 * 10 // 10 minutes for long-running operations
@@ -377,6 +389,8 @@ class JobQueue {
   }
 
   start () {
+    scheduleRetainedLocalFilesCleanup()
+
     const promises = Object.keys(this.workers)
       .map(handlerName => {
         const worker: Worker = this.workers[handlerName]
@@ -457,17 +471,61 @@ class JobQueue {
     const state = await job.getState()
     if (state !== 'failed') return { status: 'not_failed' }
 
-    const newJob = await queue.add('job', job.data, this.buildJobOptions(jobType, { priority: job.opts.priority }))
+    const retry = await this.buildRetryJobData(jobType, job.data)
+
+    let newJob: Job
+    try {
+      newJob = await queue.add('job', retry.data, this.buildJobOptions(jobType, { priority: job.opts.priority }))
+    } catch (err) {
+      if (retry.increasedPendingMove) {
+        await VideoJobInfoModel.decrease(retry.data.videoUUID, 'pendingMove')
+      }
+
+      throw err
+    }
 
     return { status: 'retried', newJobId: newJob.id }
+  }
+
+  private async buildRetryJobData (jobType: JobType, jobData: any) {
+    if (!this.isObjectStorageMoveJobType(jobType) || !jobData?.videoUUID) {
+      return { data: jobData, increasedPendingMove: false }
+    }
+
+    if (jobType === 'move-hls-playlist-to-object-storage' && jobData?.cleanupMode === 'cleanup') {
+      return { data: jobData, increasedPendingMove: false }
+    }
+
+    await VideoJobInfoModel.increaseOrCreate(jobData.videoUUID, 'pendingMove')
+
+    return {
+      data: {
+        ...jobData,
+        retryOfFailedJob: true
+      },
+      increasedPendingMove: true
+    }
+  }
+
+  private isObjectStorageMoveJobType (jobType: JobType) {
+    return jobType === 'move-to-object-storage' ||
+      jobType === 'move-video-file-to-object-storage' ||
+      jobType === 'move-hls-playlist-to-object-storage' ||
+      jobType === 'move-thumbnail-to-object-storage'
   }
 
   async hasPendingOrActiveJob (jobType: JobType, videoUUID: string, captionId?: number): Promise<boolean> {
     const queue = this.queues[jobType]
     if (!queue) return false
 
-    // Check waiting, delayed, and active jobs
-    const states: ('waiting' | 'delayed' | 'active')[] = [ 'waiting', 'delayed', 'active' ]
+    // Check all not-finished states that may still need local files
+    const states: ('waiting' | 'delayed' | 'prioritized' | 'waiting-children' | 'active')[] = [
+      'waiting',
+      'delayed',
+      'prioritized',
+      'waiting-children',
+      'active'
+    ]
     const jobs = await queue.getJobs(states, 0, 1000, true)
 
     if (captionId !== undefined) {
@@ -491,7 +549,13 @@ class JobQueue {
     const queue = this.queues['move-hls-playlist-to-object-storage']
     if (!queue) return false
 
-    const states: ('waiting' | 'delayed' | 'active')[] = [ 'waiting', 'delayed', 'active' ]
+    const states: ('waiting' | 'delayed' | 'prioritized' | 'waiting-children' | 'active')[] = [
+      'waiting',
+      'delayed',
+      'prioritized',
+      'waiting-children',
+      'active'
+    ]
     const jobs = await queue.getJobs(states, 0, 1000, true)
 
     const { videoUUID, excludeCleanupJobs = false } = options
@@ -506,43 +570,94 @@ class JobQueue {
     })
   }
 
-  async getExistingMoveJob (jobType: JobType, videoUUID: string) {
+  async hasPendingOrActiveLocalFileConsumerJob (videoUUID: string): Promise<boolean> {
+    const jobTypes: JobType[] = [
+      'transcoding-job-builder',
+      'video-transcoding',
+      'video-transcription',
+      'generate-video-storyboard',
+      'video-studio-edition',
+      'move-to-object-storage',
+      'move-video-file-to-object-storage',
+      'move-hls-playlist-to-object-storage',
+      'move-thumbnail-to-object-storage'
+    ]
+
+    for (const jobType of jobTypes) {
+      if (await this.hasPendingOrActiveJob(jobType, videoUUID)) return true
+    }
+
+    return false
+  }
+
+  async getExistingMoveJob (jobType: JobType, videoUUID: string, options?: {
+    isFollowUp?: boolean
+    fileId?: number
+    thumbnailId?: number
+    captionId?: number
+  }) {
     const queue = this.queues[jobType]
     if (!queue) return null
 
     // Check all states: waiting, delayed, active, failed
     const states: ('waiting' | 'delayed' | 'active' | 'failed')[] = [ 'waiting', 'delayed', 'active', 'failed' ]
-    const jobs = await queue.getJobs(states, 0, 100, true)
+    const jobs = await queue.getJobs(states, 0, 10000, true)
 
-    return jobs.find((job: Job) => job.data?.videoUUID === videoUUID) || null
+    const matchingJobs = jobs.filter((job: Job) => {
+      if (job.data?.videoUUID !== videoUUID) return false
+      if (options?.isFollowUp !== undefined && (job.data?.isFollowUp === true) !== options.isFollowUp) return false
+      if (options?.fileId !== undefined && job.data?.fileId !== options.fileId) return false
+      if (options?.thumbnailId !== undefined && job.data?.thumbnailId !== options.thumbnailId) return false
+      if (options?.captionId !== undefined && job.data?.captionId !== options.captionId) return false
+
+      return true
+    })
+
+    return matchingJobs.find(job => job.failedReason === undefined || job.failedReason === null) || matchingJobs[0] || null
   }
 
   async getExistingCaptionMoveJob (captionId: number) {
-    const queue = this.queues['move-to-object-storage']
-    if (!queue) return null
+    const queues = [
+      this.queues['move-to-object-storage'],
+      this.queues['move-caption-to-object-storage']
+    ].filter(Boolean)
+    if (queues.length === 0) return null
 
     const states: ('waiting' | 'delayed' | 'active' | 'failed')[] = [ 'waiting', 'delayed', 'active', 'failed' ]
-    const jobs = await queue.getJobs(states, 0, 100, true)
+    const jobs = (await Promise.all(queues.map(queue => queue.getJobs(states, 0, 10000, true)))).flat()
 
-    return jobs.find((job: Job) => job.data?.captionId === captionId) || null
+    const matchingJobs = jobs.filter((job: Job) => job.data?.captionId === captionId)
+
+    return matchingJobs.find(job => job.failedReason === undefined || job.failedReason === null) || matchingJobs[0] || null
   }
 
-  async getExistingHLSPlaylistMoveJobs (videoUUID: string, playlistId: number, fileIds: number[]) {
+  async getExistingHLSPlaylistMoveJobs (videoUUID: string, playlistId: number, fileIds: number[], options?: {
+    match?: 'exact' | 'overlap'
+  }) {
     const queue = this.queues['move-hls-playlist-to-object-storage']
     if (!queue) return []
 
     const states: ('waiting' | 'delayed' | 'active' | 'failed')[] = [ 'waiting', 'delayed', 'active', 'failed' ]
-    const jobs = await queue.getJobs(states, 0, 100, true)
+    const jobs = await queue.getJobs(states, 0, 10000, true)
 
-    // Match jobs for the same video+playlist with the SAME fileIds
+    const { match = 'exact' } = options ?? {}
+
     return jobs.filter((job: Job) => {
-      const data = job.data as { videoUUID?: string; playlistId?: number; fileIds?: number[] }
+      const data = job.data as {
+        videoUUID?: string
+        playlistId?: number
+        fileIds?: number[]
+        cleanupMode?: 'move' | 'cleanup'
+      }
       const jobFileIds = data?.fileIds
+      if (data?.cleanupMode === 'cleanup') return false
+      if (data?.videoUUID !== videoUUID || data?.playlistId !== playlistId || !jobFileIds) return false
 
-      return data?.videoUUID === videoUUID &&
-             data?.playlistId === playlistId &&
-             !!jobFileIds &&
-             fileIds.length === jobFileIds.length &&
+      if (match === 'overlap') {
+        return fileIds.some(id => jobFileIds.includes(id))
+      }
+
+      return fileIds.length === jobFileIds.length &&
              fileIds.every(id => jobFileIds.includes(id))
     })
   }
@@ -837,23 +952,78 @@ class JobQueue {
   }
 
   async getTranscodingProgressForVideo (videoUUID: string): Promise<number | null> {
+    const progressByVideoUUID = await this.getTranscodingProgressSnapshot()
+
+    return progressByVideoUUID.get(videoUUID) ?? null
+  }
+
+  private async getTranscodingProgressSnapshot () {
+    const now = Date.now()
+    if (this.transcodingProgressCache && this.transcodingProgressCache.expiresAt > now) {
+      return this.transcodingProgressCache.values
+    }
+
+    const states: ('waiting' | 'delayed' | 'prioritized' | 'waiting-children' | 'active')[] = [
+      'waiting',
+      'delayed',
+      'prioritized',
+      'waiting-children',
+      'active'
+    ]
+    const values = new Map<string, number>()
+
     const queue = this.queues['video-transcoding']
-    if (!queue) return null
+    if (queue) {
+      const jobs = await queue.getJobs(states, 0, 10000, true)
 
-    const jobs = await queue.getJobs([ 'active' ], 0, 100, true)
-    const matchingJobs = jobs.filter((j: Job) => (j.data as { videoUUID?: string }).videoUUID === videoUUID)
-    if (matchingJobs.length === 0) return null
+      const progressesByUUID = new Map<string, number[]>()
+      for (const job of jobs) {
+        const uuid = (job.data as { videoUUID?: string }).videoUUID
+        if (!uuid) continue
 
-    const progresses = matchingJobs
-      .map((j: Job) => j.progress)
-      .filter((p: unknown): p is number => typeof p === 'number')
+        if (!progressesByUUID.has(uuid)) progressesByUUID.set(uuid, [])
 
-    if (progresses.length === 0) return 0
-    return Math.round(progresses.reduce((a, b) => a + b, 0) / progresses.length)
+        if (typeof job.progress === 'number') {
+          progressesByUUID.get(uuid).push(job.progress)
+        }
+      }
+
+      for (const [ uuid, progresses ] of progressesByUUID) {
+        values.set(
+          uuid,
+          progresses.length === 0
+            ? 0
+            : Math.round(progresses.reduce((a, b) => a + b, 0) / progresses.length)
+        )
+      }
+    }
+
+    const builderQueue = this.queues['transcoding-job-builder']
+    if (builderQueue) {
+      const builderJobs = await builderQueue.getJobs(states, 0, 10000, true)
+      for (const job of builderJobs) {
+        const uuid = (job.data as { videoUUID?: string }).videoUUID
+        if (uuid && !values.has(uuid)) values.set(uuid, 0)
+      }
+    }
+
+    this.transcodingProgressCache = {
+      expiresAt: Date.now() + TRANSCODING_PROGRESS_CACHE_TTL_MS,
+      values
+    }
+
+    return values
   }
 
   async listVideoUUIDsWithPendingTranscodingJobs (): Promise<Set<string>> {
-    const queueNames: JobType[] = [ 'transcoding-job-builder', 'video-transcoding' ]
+    return this.listVideoUUIDsWithPendingVideoJobs([ 'transcoding-job-builder', 'video-transcoding' ])
+  }
+
+  async listVideoUUIDsWithPendingTranscriptionJobs (): Promise<Set<string>> {
+    return this.listVideoUUIDsWithPendingVideoJobs([ 'video-transcription' ])
+  }
+
+  private async listVideoUUIDsWithPendingVideoJobs (queueNames: JobType[]): Promise<Set<string>> {
     const states = [ 'waiting', 'delayed', 'prioritized', 'waiting-children', 'active' ] as const
     const uuids = new Set<string>()
 

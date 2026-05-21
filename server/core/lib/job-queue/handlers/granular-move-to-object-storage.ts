@@ -8,20 +8,25 @@ import {
 } from '@peertube/peertube-models'
 import { logger } from '@server/helpers/logger.js'
 import { CONFIG } from '@server/initializers/config.js'
+import { JOB_TTL } from '@server/initializers/constants.js'
 import { getHLSResolutionPlaylistFilename } from '@server/lib/paths.js'
+import { moveToFailedMoveToObjectStorageState } from '@server/lib/video-state.js'
 import { VideoJobInfoModel } from '@server/models/video/video-job-info.js'
 import { VideoModel } from '@server/models/video/video.js'
 import { VideoPathManager } from '@server/lib/video-path-manager.js'
-import { move, pathExists, remove } from 'fs-extra/esm'
+import { move, pathExists } from 'fs-extra/esm'
 import { Job } from 'bullmq'
 import {
   getHLSSegmentFilesToMoveCount,
   isThumbnailMoveNeeded,
+  maybeTransitionAfterObjectStorageMove,
   moveHLSSegmentFilesToObjectStorage,
   moveMasterPlaylistToObjectStorage,
   moveThumbnailToObjectStorage,
+  removeLocalFileAfterMove,
   moveVideoFileToObjectStorage
 } from '@server/lib/move-storage/move-to-object-storage.js'
+import { checkObjectStorageReadiness, generateHLSObjectStorageKey } from '@server/lib/object-storage/index.js'
 import { MStreamingPlaylistFiles, MVideoWithAllFiles } from '@server/types/models/index.js'
 import { makeHLSFileAvailable } from '@server/lib/object-storage/videos.js'
 import { createAllCaptionPlaylistsOnFSIfNeeded } from '@server/lib/video-captions.js'
@@ -31,15 +36,16 @@ type MoveHLSPlaylistPayloadWithCleanup = MoveHLSPlaylistPayload & {
   isFollowUp?: boolean
   cleanupMode?: 'move' | 'cleanup'
   cleanupPaths?: string[]
+  retryAttempt?: number
+  retryOfFailedJob?: boolean
+}
+
+type RetryableGranularMovePayload = {
+  retryOfFailedJob?: boolean
 }
 
 export async function processGranularMoveToObjectStorage (job: Job) {
   const payload = job.data
-
-  if (CONFIG.OBJECT_STORAGE.ENABLED !== true) {
-    logger.info('[GRANULAR_MOVE] Skipping %s job %s because object storage is disabled', job.name, job.id)
-    return
-  }
 
   const updateProgress = (percent: number) => {
     const normalized = normalizeProgressPercent(percent)
@@ -50,23 +56,69 @@ export async function processGranularMoveToObjectStorage (job: Job) {
     job.updateProgress(normalized).catch(err => logger.error('Cannot update granular move progress', { err }))
   }
 
+  if (CONFIG.OBJECT_STORAGE.ENABLED !== true) {
+    logger.info('[GRANULAR_MOVE] Skipping %s job %s because object storage is disabled', job.name, job.id)
+    await releaseSkippedGranularMoveJob(payload)
+    return
+  }
+
   try {
     if (isMoveVideoFilePayload(payload)) {
-      return await processMoveVideoFile(job, payload, updateProgress)
+      return await runWithVideoFileLock(payload.videoUUID, () => processMoveVideoFile(job, payload, updateProgress))
     }
 
     if (isMoveHLSPlaylistPayload(payload)) {
-      return await processMoveHLSPlaylist(job, payload, updateProgress)
+      if ((payload as MoveHLSPlaylistPayloadWithCleanup).cleanupMode === 'cleanup') {
+        return await processMoveHLSPlaylist(job, payload, updateProgress)
+      }
+
+      return await runWithVideoFileLock(payload.videoUUID, () => processMoveHLSPlaylist(job, payload, updateProgress))
     }
 
     if (isMoveThumbnailPayload(payload)) {
-      return await processMoveThumbnail(job, payload, updateProgress)
+      return await runWithVideoFileLock(payload.videoUUID, () => processMoveThumbnail(job, payload, updateProgress))
     }
 
     throw new Error('Unknown granular move payload type: ' + JSON.stringify(payload))
   } catch (err) {
     logger.error('[GRANULAR_MOVE] Job %s failed: %s', job.id, err.message || err)
     throw err
+  }
+}
+
+async function releaseSkippedGranularMoveJob (payload: unknown) {
+  if (isMoveVideoFilePayload(payload) || isMoveThumbnailPayload(payload)) {
+    await checkAndTransitionVideoState(
+      payload.videoUUID,
+      payload.isNewVideo,
+      payload.previousVideoState,
+      false,
+      isRetryOfFailedJob(payload)
+    )
+    return
+  }
+
+  if (isMoveHLSPlaylistPayload(payload)) {
+    const cleanupMode = (payload as MoveHLSPlaylistPayloadWithCleanup).cleanupMode
+    if (cleanupMode === 'cleanup') return
+
+    await checkAndTransitionVideoState(
+      payload.videoUUID,
+      payload.isNewVideo,
+      payload.previousVideoState,
+      false,
+      isRetryOfFailedJob(payload)
+    )
+  }
+}
+
+async function runWithVideoFileLock <T> (videoUUID: string, run: () => Promise<T>) {
+  const releaser = await VideoPathManager.Instance.lockFiles(videoUUID)
+
+  try {
+    return await run()
+  } finally {
+    releaser()
   }
 }
 
@@ -86,14 +138,14 @@ async function processMoveVideoFile (
   const video = await VideoModel.loadWithFiles(videoUUID)
   if (!video) {
     logger.warn('[GRANULAR_MOVE] Video %s not found, skipping file move', videoUUID)
-    await checkAndTransitionVideoState(videoUUID, isNewVideo, previousVideoState, false)
+    await checkAndTransitionVideoState(videoUUID, isNewVideo, previousVideoState, false, isRetryOfFailedJob(payload))
     return
   }
 
   const videoFile = video.VideoFiles.find(f => f.id === fileId)
   if (!videoFile) {
     logger.warn('[GRANULAR_MOVE] Video file %s not found for video %s', fileId, videoUUID)
-    await checkAndTransitionVideoState(videoUUID, isNewVideo, previousVideoState, false)
+    await checkAndTransitionVideoState(videoUUID, isNewVideo, previousVideoState, false, isRetryOfFailedJob(payload))
     return
   }
 
@@ -102,7 +154,7 @@ async function processMoveVideoFile (
     logger.info('[GRANULAR_MOVE] File %s already on object storage, skipping', fileId)
     updateProgress(100)
     // Decrement pendingMove for this job even though we skip processing
-    await checkAndTransitionVideoState(videoUUID, isNewVideo, previousVideoState, false)
+    await checkAndTransitionVideoState(videoUUID, isNewVideo, previousVideoState, false, isRetryOfFailedJob(payload))
     return
   }
 
@@ -111,12 +163,26 @@ async function processMoveVideoFile (
   const fileExists = await pathExists(sourcePath)
 
   if (!fileExists) {
-    logger.warn('[GRANULAR_MOVE] Source file %s does not exist, marking as moved', sourcePath)
+    const objectStorageReady = await checkObjectStorageReadiness({
+      key: videoFile.filename,
+      bucketInfo: CONFIG.OBJECT_STORAGE.WEB_VIDEOS,
+      maxRetries: 1,
+      retryIntervalMs: 0,
+      logNotReadyAsDebug: true
+    })
+
+    if (!objectStorageReady) {
+      throw new Error(
+        `Source file ${sourcePath} does not exist and object storage copy ${videoFile.filename} is not ready`
+      )
+    }
+
+    logger.warn('[GRANULAR_MOVE] Source file %s does not exist but object storage copy is ready, marking as moved', sourcePath)
     videoFile.storage = FileStorage.OBJECT_STORAGE
     await videoFile.save()
     updateProgress(100)
 
-    await checkAndTransitionVideoState(videoUUID, isNewVideo, previousVideoState, false)
+    await checkAndTransitionVideoState(videoUUID, isNewVideo, previousVideoState, false, isRetryOfFailedJob(payload))
     return
   }
 
@@ -128,7 +194,7 @@ async function processMoveVideoFile (
     await moveVideoFileToObjectStorage(videoUUID, fileId)
 
     updateProgress(95)
-    await checkAndTransitionVideoState(videoUUID, isNewVideo, previousVideoState, false)
+    await checkAndTransitionVideoState(videoUUID, isNewVideo, previousVideoState, false, isRetryOfFailedJob(payload))
     updateProgress(100)
     logger.info('[GRANULAR_MOVE] Video file %s move completed', fileId)
 
@@ -157,14 +223,14 @@ async function processMoveHLSPlaylist (
   const video = await VideoModel.loadWithFiles(videoUUID)
   if (!video) {
     logger.warn('[GRANULAR_MOVE] Video %s not found, skipping HLS playlist move', videoUUID)
-    await checkAndTransitionVideoState(videoUUID, isNewVideo, previousVideoState, false)
+    await checkAndTransitionVideoState(videoUUID, isNewVideo, previousVideoState, false, isRetryOfFailedJob(payload))
     return
   }
 
   const playlist = video.VideoStreamingPlaylists?.find(p => p.id === playlistId)
   if (!playlist) {
     logger.warn('[GRANULAR_MOVE] HLS playlist %s not found for video %s', playlistId, videoUUID)
-    await checkAndTransitionVideoState(videoUUID, isNewVideo, previousVideoState, false)
+    await checkAndTransitionVideoState(videoUUID, isNewVideo, previousVideoState, false, isRetryOfFailedJob(payload))
     return
   }
 
@@ -194,17 +260,19 @@ async function processMoveHLSPlaylist (
       continue
     }
 
+    const playlistFilename = getHLSResolutionPlaylistFilename(videoFile.filename)
     const fragmentPath = VideoPathManager.Instance.getFSHLSOutputPath(video, videoFile.filename)
-    const playlistPath = VideoPathManager.Instance.getFSHLSOutputPath(
-      video,
-      videoFile.filename.replace(/\.m4s$/, '.m3u8')
-    )
+    const playlistPath = VideoPathManager.Instance.getFSHLSOutputPath(video, playlistFilename)
 
     const fragmentExists = await pathExists(fragmentPath)
     const playlistExists = await pathExists(playlistPath)
 
-    if (!fragmentExists) missingFiles.push(fragmentPath)
-    if (!playlistExists) missingFiles.push(playlistPath)
+    if (!fragmentExists && !await isHLSFileAlreadyReadyOnObjectStorage(video, videoFile.filename)) {
+      missingFiles.push(fragmentPath)
+    }
+    if (!playlistExists && !await isHLSFileAlreadyReadyOnObjectStorage(video, playlistFilename)) {
+      missingFiles.push(playlistPath)
+    }
 
     filesToMove.push(fileId)
   }
@@ -213,7 +281,7 @@ async function processMoveHLSPlaylist (
   if (filesToMove.length === 0 && skippedFileIds.length === fileIds.length) {
     logger.info('[GRANULAR_MOVE] All files for playlist %s are already in object storage, skipping job %s', playlistId, job.id)
     // Decrement pendingMove for this job even though we skip processing
-    await checkAndTransitionVideoState(videoUUID, isNewVideo, previousVideoState, false)
+    await checkAndTransitionVideoState(videoUUID, isNewVideo, previousVideoState, false, isRetryOfFailedJob(payload))
     return
   }
 
@@ -236,6 +304,22 @@ async function processMoveHLSPlaylist (
       return !isCurrentJob && !isFailed
     })
 
+    const retryAttempt = Math.max(
+      payload.retryAttempt ?? 0,
+      ...existingJobs.map(existing => (existing.data as MoveHLSPlaylistPayloadWithCleanup)?.retryAttempt ?? 0)
+    ) + 1
+    const maxRetryAttempts = Math.max(
+      1,
+      Math.ceil(JOB_TTL['move-hls-playlist-to-object-storage'] / delayMs)
+    )
+
+    if (retryAttempt > maxRetryAttempts) {
+      throw new Error(
+        `HLS files for playlist ${playlistId} of video ${videoUUID} were still missing after ` +
+          `${maxRetryAttempts} delayed retries: ${missingFiles.join(', ')}`
+      )
+    }
+
     if (hasOtherPendingRetry) {
       logger.info(
         '[GRANULAR_MOVE] Delayed retry already queued for playlist %s files %s. Skipping duplicate schedule from job %s.',
@@ -250,7 +334,8 @@ async function processMoveHLSPlaylist (
       videoUUID,
       playlistId,
       fileIds: filesToMove,
-      mode: 'move'
+      mode: 'move',
+      retryAttempt
     })
 
     try {
@@ -259,7 +344,8 @@ async function processMoveHLSPlaylist (
         payload: {
           ...payload,
           fileIds: filesToMove,
-          cleanupMode: 'move'
+          cleanupMode: 'move',
+          retryAttempt
         } as MoveHLSPlaylistPayload,
         delay: delayMs,
         customJobId: retryJobId
@@ -331,10 +417,13 @@ async function processMoveHLSPlaylist (
 
     // Step 3: Regenerate master playlist + SHA
     // When playlist.storage = OBJECT_STORAGE and file.storage = OBJECT_STORAGE,
-    // this generates OS segment URLs and SHA256 by downloading from object storage
+    // this generates OS segment URLs while preferring retained local files for probing/hashing.
     logger.info('[GRANULAR_MOVE] Regenerating master playlist and SHA for playlist %s', playlistId)
     const { updateM3U8AndShaPlaylist } = await import('@server/lib/hls.js')
-    await updateM3U8AndShaPlaylist(workingVideo, workingPlaylist)
+    const playlistUpdated = await updateM3U8AndShaPlaylist(workingVideo, workingPlaylist, { throwOnError: true })
+    if (!playlistUpdated) {
+      throw new Error(`HLS playlist ${playlistId} was not regenerated before object-storage upload`)
+    }
 
     // Step 4: Reload video and playlist to get the updated filenames from DB
     // updateM3U8AndShaPlaylist saves new playlistFilename to the database
@@ -364,28 +453,18 @@ async function processMoveHLSPlaylist (
     // Step 6: Transition video state
     // This is done immediately after first resolution move to publish the video
     // Subsequent resolution moves will not trigger state transition
-    await checkAndTransitionVideoState(videoUUID, isNewVideo, previousVideoState, isFirstResolutionMove)
+    await checkAndTransitionVideoState(videoUUID, isNewVideo, previousVideoState, isFirstResolutionMove, isRetryOfFailedJob(payload))
 
     updateProgress(95)
 
     const localCleanupPaths = buildHLSCleanupPaths(workingVideo, workingPlaylist, effectiveFileIds)
 
-    const keepLocalAfterMoveMs = CONFIG.OBJECT_STORAGE.KEEP_LOCAL_FILE_AFTER_MOVE
-    if (keepLocalAfterMoveMs > 0) {
-      await scheduleHLSCleanupJob({
-        payload,
-        cleanupPaths: localCleanupPaths,
-        delayMs: keepLocalAfterMoveMs
+    for (const path of localCleanupPaths) {
+      await removeLocalFileAfterMove({
+        path,
+        videoUUID,
+        skipReadinessCheck: true
       })
-    } else {
-      const failedPaths = await cleanupLocalPaths(localCleanupPaths)
-      if (failedPaths.length !== 0) {
-        await scheduleHLSCleanupJob({
-          payload,
-          cleanupPaths: failedPaths,
-          delayMs: CONFIG.OBJECT_STORAGE.MOVE_FILE_DELAY || 30000
-        })
-      }
     }
 
     updateProgress(100)
@@ -408,14 +487,14 @@ async function processMoveThumbnail (
   const video = await VideoModel.loadWithFiles(videoUUID)
   if (!video) {
     logger.warn('[GRANULAR_MOVE] Video %s not found, skipping thumbnail move', videoUUID)
-    await checkAndTransitionVideoState(videoUUID, isNewVideo, previousVideoState, false)
+    await checkAndTransitionVideoState(videoUUID, isNewVideo, previousVideoState, false, isRetryOfFailedJob(payload))
     return
   }
 
   const thumbnail = video.Thumbnails?.find(t => t.id === thumbnailId)
   if (!thumbnail) {
     logger.warn('[GRANULAR_MOVE] Thumbnail %s not found for video %s', thumbnailId, videoUUID)
-    await checkAndTransitionVideoState(videoUUID, isNewVideo, previousVideoState, false)
+    await checkAndTransitionVideoState(videoUUID, isNewVideo, previousVideoState, false, isRetryOfFailedJob(payload))
     return
   }
 
@@ -424,7 +503,7 @@ async function processMoveThumbnail (
     logger.info('[GRANULAR_MOVE] Thumbnail %s already on object storage, skipping', thumbnailId)
     updateProgress(100)
     // Decrement pendingMove for this job even though we skip processing
-    await checkAndTransitionVideoState(videoUUID, isNewVideo, previousVideoState, false)
+    await checkAndTransitionVideoState(videoUUID, isNewVideo, previousVideoState, false, isRetryOfFailedJob(payload))
     return
   }
 
@@ -433,12 +512,26 @@ async function processMoveThumbnail (
   const fileExists = await pathExists(sourcePath)
 
   if (!fileExists) {
-    logger.warn('[GRANULAR_MOVE] Source thumbnail %s does not exist, marking as moved', sourcePath)
+    const objectStorageReady = await checkObjectStorageReadiness({
+      key: thumbnail.filename,
+      bucketInfo: CONFIG.OBJECT_STORAGE.THUMBNAILS,
+      maxRetries: 1,
+      retryIntervalMs: 0,
+      logNotReadyAsDebug: true
+    })
+
+    if (!objectStorageReady) {
+      throw new Error(
+        `Source thumbnail ${sourcePath} does not exist and object storage copy ${thumbnail.filename} is not ready`
+      )
+    }
+
+    logger.warn('[GRANULAR_MOVE] Source thumbnail %s does not exist but object storage copy is ready, marking as moved', sourcePath)
     thumbnail.storage = FileStorage.OBJECT_STORAGE
     await thumbnail.save()
     updateProgress(100)
     // Thumbnails don't affect video state, but still decrement pendingMove
-    await checkAndTransitionVideoState(videoUUID, isNewVideo, previousVideoState, false)
+    await checkAndTransitionVideoState(videoUUID, isNewVideo, previousVideoState, false, isRetryOfFailedJob(payload))
     return
   }
 
@@ -453,7 +546,7 @@ async function processMoveThumbnail (
     await moveThumbnailToObjectStorage(videoUUID, thumbnailId)
 
     updateProgress(95)
-    await checkAndTransitionVideoState(videoUUID, isNewVideo, previousVideoState, false)
+    await checkAndTransitionVideoState(videoUUID, isNewVideo, previousVideoState, false, isRetryOfFailedJob(payload))
     updateProgress(100)
     logger.info('[GRANULAR_MOVE] Thumbnail %s move completed', thumbnailId)
 
@@ -475,18 +568,17 @@ async function processCleanupHLSPaths (job: Job, payload: MoveHLSPlaylistPayload
     return
   }
 
-  logger.info('[GRANULAR_MOVE] Cleanup-only HLS job %s deleting %d local path(s)', job.id, cleanupPaths.length, {
+  logger.info('[GRANULAR_MOVE] Cleanup-only HLS job %s scheduling cleanup of %d local path(s)', job.id, cleanupPaths.length, {
     videoUUID: payload.videoUUID
   })
 
-  const failedPaths = await cleanupLocalPaths(cleanupPaths)
-  if (failedPaths.length === 0) return
-
-  await scheduleHLSCleanupJob({
-    payload,
-    cleanupPaths: failedPaths,
-    delayMs: CONFIG.OBJECT_STORAGE.MOVE_FILE_DELAY || 30000
-  })
+  for (const path of cleanupPaths) {
+    await removeLocalFileAfterMove({
+      path,
+      videoUUID: payload.videoUUID,
+      skipReadinessCheck: true
+    })
+  }
 }
 
 function buildHLSCleanupPaths (
@@ -512,85 +604,25 @@ function buildHLSCleanupPaths (
   return [ ...new Set(paths) ]
 }
 
-async function cleanupLocalPaths (paths: string[]) {
-  const failedPaths: string[] = []
+async function isHLSFileAlreadyReadyOnObjectStorage (video: MVideoWithAllFiles, filename: string) {
+  const objectStorageKey = generateHLSObjectStorageKey(video, filename)
 
-  for (const path of paths) {
-    try {
-      await removeLocalPathNow(path)
-      logger.debug('[GRANULAR_MOVE] Removed local file %s', path)
-    } catch (err: any) {
-      if (err?.code === 'ENOENT') continue
-
-      if (process.platform === 'win32' && err?.code === 'EBUSY') {
-        failedPaths.push(path)
-        logger.warn(
-          '[GRANULAR_MOVE] EBUSY while deleting %s. Will retry with delayed cleanup job.',
-          path,
-          { path }
-        )
-        continue
-      }
-
-      throw err
-    }
-  }
-
-  return failedPaths
-}
-
-async function scheduleHLSCleanupJob (options: {
-  payload: MoveHLSPlaylistPayloadWithCleanup
-  cleanupPaths: string[]
-  delayMs: number
-}) {
-  const { payload, cleanupPaths, delayMs } = options
-  if (cleanupPaths.length === 0) return
-
-  const { JobQueue } = await import('@server/lib/job-queue/index.js')
-  const retryJobId = buildHLSMoveRetryJobId({
-    videoUUID: payload.videoUUID,
-    playlistId: payload.playlistId,
-    fileIds: payload.fileIds,
-    mode: 'cleanup',
-    cleanupPaths
+  const ready = await checkObjectStorageReadiness({
+    key: objectStorageKey,
+    bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS,
+    maxRetries: 1,
+    retryIntervalMs: 0,
+    logNotReadyAsDebug: true
   })
 
-  try {
-    await JobQueue.Instance.createJob({
-      type: 'move-hls-playlist-to-object-storage',
-      payload: {
-        videoUUID: payload.videoUUID,
-        playlistId: payload.playlistId,
-        fileIds: payload.fileIds,
-        isNewVideo: payload.isNewVideo,
-        previousVideoState: payload.previousVideoState,
-        isFollowUp: true,
-        cleanupMode: 'cleanup',
-        cleanupPaths
-      } as MoveHLSPlaylistPayload,
-      delay: delayMs,
-      customJobId: retryJobId
+  if (ready) {
+    logger.info('[GRANULAR_MOVE] Local HLS file %s is missing but already ready on object storage.', filename, {
+      videoUUID: video.uuid,
+      objectStorageKey
     })
-  } catch (err) {
-    if (isDuplicateRetryJobError(err)) {
-      logger.info(
-        '[GRANULAR_MOVE] Cleanup retry %s already exists, skipping duplicate creation for playlist %s.',
-        retryJobId,
-        payload.playlistId
-      )
-      return
-    }
-
-    throw err
   }
 
-  logger.info(
-    '[GRANULAR_MOVE] Scheduled HLS cleanup-only job for %d path(s) in %dms',
-    cleanupPaths.length,
-    delayMs,
-    { videoUUID: payload.videoUUID, retryCount: cleanupPaths.length }
-  )
+  return ready
 }
 
 function buildHLSMoveRetryJobId (options: {
@@ -598,9 +630,10 @@ function buildHLSMoveRetryJobId (options: {
   playlistId: number
   fileIds: number[]
   mode: 'move' | 'cleanup'
+  retryAttempt?: number
   cleanupPaths?: string[]
 }) {
-  const { videoUUID, playlistId, fileIds, mode, cleanupPaths = [] } = options
+  const { videoUUID, playlistId, fileIds, mode, retryAttempt = 0, cleanupPaths = [] } = options
 
   const descriptor = JSON.stringify({
     scope: 'move-hls-playlist-to-object-storage',
@@ -608,6 +641,7 @@ function buildHLSMoveRetryJobId (options: {
     videoUUID,
     playlistId,
     fileIds: [ ...fileIds ].sort((a, b) => a - b),
+    retryAttempt,
     cleanupKey: mode === 'cleanup' ? buildCleanupPathsKey(cleanupPaths) : ''
   })
 
@@ -658,7 +692,7 @@ async function ensureLocalMasterPlaylistExists (
   playlist: MStreamingPlaylistFiles
 ) {
   const masterPath = VideoPathManager.Instance.getFSHLSOutputPath(video, playlist.playlistFilename)
-  const requiresSha = !!playlist.segmentsSha256Filename
+  const requiresSha = CONFIG.OBJECT_STORAGE.GENERATE_SHA256_SEGMENTS !== false && !!playlist.segmentsSha256Filename
   const shaPath = requiresSha
     ? VideoPathManager.Instance.getFSHLSOutputPath(video, playlist.segmentsSha256Filename)
     : null
@@ -724,7 +758,10 @@ async function ensureLocalMasterPlaylistExists (
   // If download failed or not on object storage, regenerate
   logger.info('[GRANULAR_MOVE] Regenerating master playlist and SHA locally')
   const { updateM3U8AndShaPlaylist } = await import('@server/lib/hls.js')
-  await updateM3U8AndShaPlaylist(video, playlist)
+  const playlistUpdated = await updateM3U8AndShaPlaylist(video, playlist, { throwOnError: true })
+  if (!playlistUpdated) {
+    throw new Error(`HLS playlist ${playlist.id} was not regenerated locally`)
+  }
 
   const reloadedVideo = await VideoModel.loadWithFiles(video.uuid)
   if (!reloadedVideo) {
@@ -737,7 +774,7 @@ async function ensureLocalMasterPlaylistExists (
   }
 
   const reloadedMasterPath = VideoPathManager.Instance.getFSHLSOutputPath(reloadedVideo, reloadedPlaylist.playlistFilename)
-  const reloadedRequiresSha = !!reloadedPlaylist.segmentsSha256Filename
+  const reloadedRequiresSha = CONFIG.OBJECT_STORAGE.GENERATE_SHA256_SEGMENTS !== false && !!reloadedPlaylist.segmentsSha256Filename
   const reloadedShaPath = reloadedRequiresSha
     ? VideoPathManager.Instance.getFSHLSOutputPath(reloadedVideo, reloadedPlaylist.segmentsSha256Filename)
     : null
@@ -801,12 +838,9 @@ async function checkAndTransitionVideoState (
   videoUUID: string,
   isNewVideo: boolean,
   previousVideoState: any,
-  isFirstResolutionMove: boolean
+  isFirstResolutionMove: boolean,
+  allowFailedStateTransition: boolean
 ) {
-  // Decrement pendingMove counter
-  const pendingMove = await VideoJobInfoModel.decrease(videoUUID, 'pendingMove')
-  logger.info('[GRANULAR_MOVE] Decremented pendingMove for %s, remaining: %d', videoUUID, pendingMove)
-
   // For first resolution move, publish immediately so playback can start while
   // the next resolutions are still transcoding/moving.
   if (isFirstResolutionMove) {
@@ -816,7 +850,14 @@ async function checkAndTransitionVideoState (
     )
 
     await publishVideoAfterFirstResolutionMove({ videoUUID, isNewVideo })
+  }
 
+  // Decrement pendingMove counter after critical state transition work, so
+  // final failure handling can safely decrement if the transition throws.
+  const pendingMove = await VideoJobInfoModel.decrease(videoUUID, 'pendingMove')
+  logger.info('[GRANULAR_MOVE] Decremented pendingMove for %s, remaining: %d', videoUUID, pendingMove)
+
+  if (isFirstResolutionMove) {
     // If pendingMove is still > 0, there are more moves pending so don't delete local files yet
     if (pendingMove > 0) {
       logger.info(
@@ -826,6 +867,16 @@ async function checkAndTransitionVideoState (
       )
       return
     }
+  }
+
+  if (pendingMove === 0) {
+    logger.info('[GRANULAR_MOVE] All granular move work complete for %s, advancing video state if needed.', videoUUID)
+    await maybeTransitionAfterObjectStorageMove({
+      videoUUID,
+      moveVideoState: { isNewVideo, previousVideoState },
+      reason: 'granular move completion',
+      allowFailedState: allowFailedStateTransition
+    })
   }
 
   logger.info('[GRANULAR_MOVE] Move state check complete for %s. pendingMove=%d', videoUUID, pendingMove)
@@ -850,10 +901,6 @@ async function publishVideoAfterFirstResolutionMove (options: {
   logger.info('[GRANULAR_MOVE] Published video %s after first HLS batch move', videoUUID)
 }
 
-async function removeLocalPathNow (path: string) {
-  await remove(path)
-}
-
 function normalizeProgressPercent (percent: number) {
   if (!Number.isFinite(percent)) return 0
 
@@ -864,8 +911,38 @@ function normalizeProgressPercent (percent: number) {
   return rounded
 }
 
-export function onGranularMoveToObjectStorageFailure (job: Job, err: any) {
+export async function onGranularMoveToObjectStorageFailure (job: Job, err: any) {
   logger.error('[GRANULAR_MOVE] Granular move job %s failed: %s', job.id, err.message || err)
 
-  return Promise.resolve()
+  const maxAttempts = job.opts?.attempts ?? 1
+  if (job.attemptsMade < maxAttempts) return
+
+  const payload = job.data as MoveHLSPlaylistPayloadWithCleanup & { videoUUID?: string }
+  if (!payload.videoUUID || payload.cleanupMode === 'cleanup') return
+
+  const pendingMove = await VideoJobInfoModel.decrease(payload.videoUUID, 'pendingMove')
+  logger.info(
+    '[GRANULAR_MOVE] Final failure for job %s decremented pendingMove for %s, remaining: %d',
+    job.id,
+    payload.videoUUID,
+    pendingMove
+  )
+
+  const video = await VideoModel.loadWithFiles(payload.videoUUID)
+  if (!video) return
+
+  if (video.state === VideoState.PUBLISHED) {
+    logger.warn(
+      '[GRANULAR_MOVE] Final failure for published video %s leaves the video published; failed object-storage job can be retried.',
+      payload.videoUUID,
+      { err }
+    )
+    return
+  }
+
+  await moveToFailedMoveToObjectStorageState(video)
+}
+
+function isRetryOfFailedJob (payload: unknown) {
+  return (payload as RetryableGranularMovePayload)?.retryOfFailedJob === true
 }

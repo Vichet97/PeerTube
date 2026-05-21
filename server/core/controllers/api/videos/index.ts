@@ -159,11 +159,12 @@ async function getVideoProcessingProgress (req: express.Request, res: express.Re
   if (state === VideoState.TO_IMPORT) {
     const videoImport = await VideoImportModel.loadByVideoId(video.id)
     if (!videoImport) {
-      return res.json({ progress: 0, type: 'import' })
+      return res.json({ progress: 0, type: 'import', active: false })
     }
     return res.json({
       progress: videoImport.progress ?? 0,
-      type: 'import'
+      type: 'import',
+      active: true
     })
   }
 
@@ -171,7 +172,8 @@ async function getVideoProcessingProgress (req: express.Request, res: express.Re
     const progress = await JobQueue.Instance.getTranscodingProgressForVideo(video.uuid)
     return res.json({
       progress: progress ?? 0,
-      type: 'transcoding'
+      type: 'transcoding',
+      active: progress !== null
     })
   }
 

@@ -1,4 +1,4 @@
-import { pick } from '@peertube/peertube-core-utils'
+import { pick, timeoutPromise } from '@peertube/peertube-core-utils'
 import { canCopyForHLS, getVideoStreamDuration, HLSFromTSTranscodeOptions, HLSTranscodeOptions } from '@peertube/peertube-ffmpeg'
 import { retryTransactionWrapper } from '@server/helpers/database-utils.js'
 import { logger } from '@server/helpers/logger.js'
@@ -17,9 +17,9 @@ import { createAllCaptionPlaylistsOnFSIfNeeded } from '../video-captions.js'
 import { buildNewFile } from '../video-file.js'
 import { VideoPathManager } from '../video-path-manager.js'
 import { buildFFmpegVOD } from './shared/index.js'
-import { JobQueue } from '../job-queue/index.js'
-import { buildGranularHLSPlaylistMoveJob } from '../video-jobs.js'
-import { VideoJobInfoModel } from '@server/models/video/video-job-info.js'
+import { buildGranularHLSPlaylistMoveJob, createPendingMoveJobs } from '../video-jobs.js'
+
+const HLS_POST_TRANSCODING_STEP_TIMEOUT_MS = 10 * 60 * 1000
 
 // Concat TS segments from a live video to a fragmented mp4 HLS playlist
 export async function generateHlsPlaylistResolutionFromTS (options: {
@@ -83,9 +83,13 @@ export async function onHLSVideoFileTranscoding (options: {
   })
 
   // Create or update the playlist
-  const { playlist, generated: playlistGenerated } = await retryTransactionWrapper(() => {
-    return sequelizeTypescript.transaction(async transaction => {
-      return VideoStreamingPlaylistModel.loadOrGenerate(video, transaction)
+  const { playlist, generated: playlistGenerated } = await runHLSPostTranscodingStep({
+    videoUUID: video.uuid,
+    step: 'load-or-generate-playlist',
+    run: () => retryTransactionWrapper(() => {
+      return sequelizeTypescript.transaction(async transaction => {
+        return VideoStreamingPlaylistModel.loadOrGenerate(video, transaction)
+      })
     })
   })
 
@@ -97,7 +101,11 @@ export async function onHLSVideoFileTranscoding (options: {
   })
 
   logger.info('[TRANSCODE_HLS] About to build new file for %s', video.uuid)
-  const newVideoFile = await buildNewFile({ mode: 'hls', path: videoOutputPath })
+  const newVideoFile = await runHLSPostTranscodingStep({
+    videoUUID: video.uuid,
+    step: 'build-new-file-metadata',
+    run: () => buildNewFile({ mode: 'hls', path: videoOutputPath })
+  })
   logger.info('[TRANSCODE_HLS] Built new video file: %s', newVideoFile.filename)
   newVideoFile.videoStreamingPlaylistId = playlist.id
 
@@ -108,7 +116,11 @@ export async function onHLSVideoFileTranscoding (options: {
   logger.info('[TRANSCODE_HLS] File lock acquired for %s', video.uuid)
 
   try {
-    await video.reload()
+    await runHLSPostTranscodingStep({
+      videoUUID: video.uuid,
+      step: 'reload-video',
+      run: () => video.reload()
+    })
 
     const videoFilePath = VideoPathManager.Instance.getFSVideoFileOutputPath(playlist, newVideoFile)
     const hlsOutputPath = VideoPathManager.Instance.getFSHLSOutputPath(video)
@@ -200,32 +212,63 @@ export async function onHLSVideoFileTranscoding (options: {
       await video.save()
     }
 
-    await createTorrentAndSetInfoHash(playlist, newVideoFile)
+    await runHLSPostTranscodingStep({
+      videoUUID: video.uuid,
+      step: 'create-torrent-and-infohash',
+      run: () => createTorrentAndSetInfoHash(playlist, newVideoFile)
+    })
     // [LOGGER] Torrent created
     logger.info('[TRANSCODE_HLS] Torrent created for video %s', video.uuid)
 
-    const oldFile = await VideoFileModel.loadHLSFile({
-      playlistId: playlist.id,
-      fps: newVideoFile.fps,
-      resolution: newVideoFile.resolution
+    const oldFile = await runHLSPostTranscodingStep({
+      videoUUID: video.uuid,
+      step: 'load-existing-hls-file',
+      run: () => VideoFileModel.loadHLSFile({
+        playlistId: playlist.id,
+        fps: newVideoFile.fps,
+        resolution: newVideoFile.resolution
+      })
     })
 
     if (oldFile) {
-      await video.removeStreamingPlaylistVideoFile(playlist, oldFile)
-      await oldFile.destroy()
+      await runHLSPostTranscodingStep({
+        videoUUID: video.uuid,
+        step: 'remove-old-hls-file-from-playlist',
+        run: () => video.removeStreamingPlaylistVideoFile(playlist, oldFile)
+      })
+      await runHLSPostTranscodingStep({
+        videoUUID: video.uuid,
+        step: 'destroy-old-hls-file',
+        run: () => oldFile.destroy()
+      })
       // [LOGGER] Old file removed
       logger.info('[TRANSCODE_HLS] Old HLS file removed for resolution %s', newVideoFile.resolution)
     }
 
-    const savedVideoFile = await VideoFileModel.customUpsert(newVideoFile, 'streaming-playlist', undefined)
+    const savedVideoFile = await runHLSPostTranscodingStep({
+      videoUUID: video.uuid,
+      step: 'save-hls-video-file',
+      run: () => VideoFileModel.customUpsert(newVideoFile, 'streaming-playlist', undefined)
+    })
     // [LOGGER] Video file saved
     logger.info('[TRANSCODE_HLS] Video file saved with id %d', savedVideoFile.id)
 
     if (playlistGenerated) {
-      await createAllCaptionPlaylistsOnFSIfNeeded(video)
+      await runHLSPostTranscodingStep({
+        videoUUID: video.uuid,
+        step: 'create-caption-playlists',
+        run: () => createAllCaptionPlaylistsOnFSIfNeeded(video)
+      })
     }
 
-    await updateM3U8AndShaPlaylist(video, playlist)
+    await runHLSPostTranscodingStep({
+      videoUUID: video.uuid,
+      step: 'update-m3u8-and-sha-playlist',
+      run: async () => {
+        const updated = await updateM3U8AndShaPlaylist(video, playlist, { throwOnError: true })
+        if (!updated) throw new Error(`HLS playlist ${playlist.id} was not updated for video ${video.uuid}`)
+      }
+    })
     // [LOGGER] M3U8 and SHA playlist updated
     logger.info('[TRANSCODE_HLS] M3U8 and SHA playlist updated for video %s', video.uuid)
 
@@ -234,17 +277,28 @@ export async function onHLSVideoFileTranscoding (options: {
       logger.info('[TRANSCODE_HLS] Object storage enabled, creating granular move jobs for %s', video.uuid)
 
       // Create HLS segment files move job
-      const hlsMoveJob = await buildGranularHLSPlaylistMoveJob({
+      const hlsMoveJob = await runHLSPostTranscodingStep({
         videoUUID: video.uuid,
-        playlistId: playlist.id,
-        fileIds: [ savedVideoFile.id ],
-        isNewVideo: false,
-        previousVideoState: video.state
+        step: 'build-hls-object-storage-move-job',
+        run: () => buildGranularHLSPlaylistMoveJob({
+          videoUUID: video.uuid,
+          playlistId: playlist.id,
+          fileIds: [ savedVideoFile.id ],
+          isNewVideo: false,
+          previousVideoState: video.state
+        })
       })
 
       if (hlsMoveJob) {
-        await JobQueue.Instance.createJob(hlsMoveJob)
-        await VideoJobInfoModel.increaseOrCreate(video.uuid, 'pendingMove')
+        await runHLSPostTranscodingStep({
+          videoUUID: video.uuid,
+          step: 'enqueue-hls-object-storage-move-job',
+          run: () => createPendingMoveJobs({
+            videoUUID: video.uuid,
+            jobs: [ hlsMoveJob ]
+          })
+        })
+
         logger.info('[TRANSCODE_HLS] Created HLS segment move job for file %d of video %s', savedVideoFile.id, video.uuid)
       } else {
         logger.info('[TRANSCODE_HLS] Skipped HLS segment move job (already pending) for file %d of video %s', savedVideoFile.id, video.uuid)
@@ -272,6 +326,11 @@ export async function onHLSVideoFileTranscoding (options: {
         finalDestPlaylistExists,
         finalDestVideoExists
       )
+
+      throw new Error(
+        `HLS output files missing after move for video ${video.uuid}: ` +
+          `playlist=${finalDestPlaylistExists}, video=${finalDestVideoExists}`
+      )
     }
 
     return { resolutionPlaylistPath, videoFile: savedVideoFile }
@@ -283,6 +342,44 @@ export async function onHLSVideoFileTranscoding (options: {
 // ---------------------------------------------------------------------------
 // Private
 // ---------------------------------------------------------------------------
+
+async function runHLSPostTranscodingStep <T> (options: {
+  videoUUID: string
+  step: string
+  run: () => Promise<T>
+  timeoutMs?: number
+}): Promise<T> {
+  const { videoUUID, step, run, timeoutMs = HLS_POST_TRANSCODING_STEP_TIMEOUT_MS } = options
+  const startedAt = Date.now()
+
+  logger.info('[TRANSCODE_HLS] Starting post-processing step %s for video %s', step, videoUUID)
+
+  try {
+    const promise = Promise.resolve().then(run)
+    const result = await timeoutPromise(promise, timeoutMs) as T
+
+    logger.info('[TRANSCODE_HLS] Finished post-processing step %s for video %s in %dms', step, videoUUID, Date.now() - startedAt)
+
+    return result
+  } catch (err) {
+    const elapsedMs = Date.now() - startedAt
+    const stepError = err instanceof Error
+      ? err.message === 'Timeout'
+        ? new Error(`HLS post-processing step ${step} timed out after ${timeoutMs}ms for video ${videoUUID}`, { cause: err })
+        : err
+      : new Error(`HLS post-processing step ${step} failed for video ${videoUUID}`, { cause: err })
+
+    logger.error(
+      '[TRANSCODE_HLS] Post-processing step %s failed for video %s after %dms',
+      step,
+      videoUUID,
+      elapsedMs,
+      { err: stepError, timeoutMs }
+    )
+
+    throw stepError
+  }
+}
 
 async function generateHlsPlaylistCommon (options: {
   type: 'hls' | 'hls-from-ts'

@@ -23,7 +23,8 @@ async function listKeysOfPrefix (prefix: string, bucketInfo: BucketInfo, continu
 
   const { ListObjectsV2Command } = await import('@aws-sdk/client-s3')
 
-  const commandPrefix = prefix.includes(bucketInfo.PREFIX) ? prefix : bucketInfo.PREFIX +  prefix
+  const bucketPrefix = bucketInfo.PREFIX ?? ''
+  const commandPrefix = prefix.startsWith(bucketPrefix) ? prefix : bucketPrefix + prefix
   const listCommand = new ListObjectsV2Command({
     Bucket: bucketInfo.BUCKET_NAME,
     Prefix: commandPrefix,
@@ -205,8 +206,20 @@ async function makeAvailable (options: {
   bucketInfo: BucketInfo
 }) {
   const { key, destination, bucketInfo } = options
+  const requestTimeoutMs = CONFIG.OBJECT_STORAGE.PROXY.REQUEST_TIMEOUT_MS
 
   for (let attempt = 1; attempt <= 2; attempt++) {
+    let timeoutId: ReturnType<typeof setTimeout> | undefined
+    let responseBody: Readable | undefined
+    let cleanupStreamTimeout: (() => void) | undefined
+    const abortController = requestTimeoutMs
+      ? new AbortController()
+      : undefined
+    const timeoutError = requestTimeoutMs
+      ? new Error(`Object storage fetch ${bucketInfo.PREFIX ?? ''}${key} timed out after ${requestTimeoutMs}ms`)
+      : undefined
+    if (timeoutError) timeoutError.name = 'TimeoutError'
+
     try {
       await ensureDir(dirname(options.destination))
 
@@ -218,13 +231,34 @@ async function makeAvailable (options: {
       })
 
       const client = await getClient()
-      const response = await client.send(command)
+      if (abortController && requestTimeoutMs) {
+        timeoutId = setTimeout(() => {
+          abortController.abort()
+          responseBody?.destroy(timeoutError)
+        }, requestTimeoutMs)
+        timeoutId.unref?.()
+      }
+
+      const response = await client.send(command, abortController ? { abortSignal: abortController.signal } : {})
         .catch(err => {
           throw parseS3Error(err)
         })
+      if (timeoutId) clearTimeout(timeoutId)
 
       const file = createWriteStream(destination)
-      await pipelinePromise(response.Body as Readable, file)
+      responseBody = response.Body as Readable
+      if (requestTimeoutMs && timeoutError) {
+        cleanupStreamTimeout = watchReadableInactivity({
+          stream: responseBody,
+          timeoutMs: requestTimeoutMs,
+          timeoutError,
+          onTimeout: err => {
+            abortController?.abort()
+            responseBody?.destroy(err)
+          }
+        })
+      }
+      await pipelinePromise(responseBody, file)
 
       file.close()
       return
@@ -243,12 +277,17 @@ async function makeAvailable (options: {
       }
 
       throw err
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId)
+      cleanupStreamTimeout?.()
     }
   }
 }
 
 function buildKey (key: string, bucketInfo: BucketInfo) {
-  return key.includes(bucketInfo.PREFIX) ? key : bucketInfo.PREFIX + key
+  const prefix = bucketInfo.PREFIX ?? ''
+
+  return key.startsWith(prefix) ? key : prefix + key
 }
 
 // ---------------------------------------------------------------------------
@@ -276,6 +315,7 @@ function isTransientObjectStorageError (err: unknown) {
     'SlowDown',
     'RequestTimeout',
     'TimeoutError',
+    'AbortError',
     'ECONNRESET',
     'ETIMEDOUT',
     'EPIPE',
@@ -314,6 +354,7 @@ async function createObjectReadStream (options: {
   if (timeoutController && requestTimeoutMs) {
     const controller = timeoutController
     timeoutId = setTimeout(() => controller.abort(), requestTimeoutMs)
+    timeoutId.unref?.()
   }
 
   const command = new GetObjectCommand({
@@ -332,10 +373,58 @@ async function createObjectReadStream (options: {
       if (timeoutId) clearTimeout(timeoutId)
     })
 
+  const stream = response.Body as Readable
+  if (stream && requestTimeoutMs) {
+    const streamTimeoutError = new Error(`Object storage stream ${bucketInfo.PREFIX ?? ''}${key} timed out after ${requestTimeoutMs}ms`)
+    streamTimeoutError.name = 'TimeoutError'
+
+    watchReadableInactivity({
+      stream,
+      timeoutMs: requestTimeoutMs,
+      timeoutError: streamTimeoutError,
+      onTimeout: err => stream.destroy(err)
+    })
+  }
+
   return {
     response,
-    stream: response.Body as Readable
+    stream
   }
+}
+
+// ---------------------------------------------------------------------------
+
+function watchReadableInactivity (options: {
+  stream: Readable
+  timeoutMs: number
+  timeoutError: Error
+  onTimeout: (err: Error) => void
+}) {
+  const { stream, timeoutMs, timeoutError, onTimeout } = options
+  let timeoutId: ReturnType<typeof setTimeout> | undefined
+
+  const arm = () => {
+    if (timeoutId) clearTimeout(timeoutId)
+    timeoutId = setTimeout(() => onTimeout(timeoutError), timeoutMs)
+    timeoutId.unref?.()
+  }
+
+  const cleanup = () => {
+    if (timeoutId) clearTimeout(timeoutId)
+    stream.off('data', arm)
+    stream.off('end', cleanup)
+    stream.off('close', cleanup)
+    stream.off('error', cleanup)
+  }
+
+  stream.on('data', arm)
+  stream.once('end', cleanup)
+  stream.once('close', cleanup)
+  stream.once('error', cleanup)
+
+  arm()
+
+  return cleanup
 }
 
 // ---------------------------------------------------------------------------
@@ -367,8 +456,9 @@ async function checkObjectStorageReadiness (options: {
   bucketInfo: BucketInfo
   maxRetries?: number
   retryIntervalMs?: number
+  logNotReadyAsDebug?: boolean
 }): Promise<boolean> {
-  const { key, bucketInfo, maxRetries = 30, retryIntervalMs = 10000 } = options
+  const { key, bucketInfo, maxRetries = 30, retryIntervalMs = 10000, logNotReadyAsDebug = false } = options
   const requestTimeoutMs = 10000
   const progressTags = {
     objectStorageKey: key,
@@ -399,10 +489,12 @@ async function checkObjectStorageReadiness (options: {
 
       const timeoutController = new AbortController()
       const timeoutId = setTimeout(() => timeoutController.abort(), requestTimeoutMs)
+      timeoutId.unref?.()
 
       try {
         const response = await client.send(command, { abortSignal: timeoutController.signal })
         clearTimeout(timeoutId)
+        ;(response.Body as Readable | undefined)?.destroy()
 
         if (response.$metadata.httpStatusCode === 200 || response.$metadata.httpStatusCode === 206) {
           logger.debug('Object storage file %s is ready (attempt %d)', key, attempt, { ...progressTags, attempt })
@@ -433,7 +525,7 @@ async function checkObjectStorageReadiness (options: {
         )
         await new Promise(resolve => setTimeout(resolve, retryIntervalMs))
       } else {
-        logger.warn(
+        logger[logNotReadyAsDebug ? 'debug' : 'warn'](
           'Object storage file %s did not become ready after %d attempts',
           key,
           maxRetries,

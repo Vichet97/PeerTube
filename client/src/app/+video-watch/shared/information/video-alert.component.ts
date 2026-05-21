@@ -62,11 +62,24 @@ export class VideoAlertComponent implements OnDestroy {
       }))
     ).subscribe({
       next: (result: VideoProcessingProgress | null) => {
-        if (result) {
-          this.processingProgress.set(result.progress)
+        if (!result) {
+          this.processingProgress.set(null)
+          this.stopProcessingProgressPolling()
+          return
         }
+
+        if (result.active === false) {
+          this.processingProgress.set(null)
+          this.stopProcessingProgressPolling()
+          return
+        }
+
+        this.processingProgress.set(result.progress)
       },
-      error: () => this.stopProcessingProgressPolling()
+      error: () => {
+        this.processingProgress.set(null)
+        this.stopProcessingProgressPolling()
+      }
     })
   }
 
