@@ -1,14 +1,38 @@
 /* eslint-disable @typescript-eslint/no-unused-expressions */
 import { expect } from 'chai'
+import { existsSync } from 'fs'
+import { remove } from 'fs-extra/esm'
+import { mkdtemp, writeFile } from 'fs/promises'
+import { tmpdir } from 'os'
+import { join } from 'path'
 import { VideoState } from '@peertube/peertube-models'
 import {
   buildRetainedLocalFileCleanupDelay,
-  maybeTransitionAfterObjectStorageMove
+  maybeTransitionAfterObjectStorageMove,
+  removeLocalFileAfterMove
 } from '@peertube/peertube-server/core/lib/move-storage/move-to-object-storage.js'
+import { CONFIG } from '@peertube/peertube-server/core/initializers/config.js'
+import { VideoPathManager } from '@peertube/peertube-server/core/lib/video-path-manager.js'
 import { VideoModel } from '@peertube/peertube-server/core/models/video/video.js'
 import { buildCaptionMoveJob, createPendingMoveJobs } from '@peertube/peertube-server/core/lib/video-jobs.js'
 import { JobQueue } from '@peertube/peertube-server/core/lib/job-queue/index.js'
 import { VideoJobInfoModel } from '@peertube/peertube-server/core/models/video/video-job-info.js'
+
+async function waitUntil (condition: () => boolean, options: {
+  timeoutMs?: number
+  intervalMs?: number
+} = {}) {
+  const { timeoutMs = 2_000, intervalMs = 25 } = options
+  const deadline = Date.now() + timeoutMs
+
+  while (Date.now() < deadline) {
+    if (condition()) return
+
+    await new Promise(resolve => setTimeout(resolve, intervalMs))
+  }
+
+  throw new Error(`Condition not met within ${timeoutMs} ms`)
+}
 
 describe('move-to-object-storage', function () {
   it('should skip stale move completion when the video is back in TO_TRANSCODE', async function () {
@@ -138,5 +162,49 @@ describe('move-to-object-storage', function () {
       mtimeMs: 1_000,
       nowMs: 90_000
     })).to.equal(0)
+  })
+
+  it('should delete retained local files after active work unlocks even if future counters remain pending', async function () {
+    this.timeout(5_000)
+
+    const originalKeepLocalFileAfterMove = CONFIG.OBJECT_STORAGE.KEEP_LOCAL_FILE_AFTER_MOVE
+    const originalLoadByUUID = VideoJobInfoModel.loadByUUID
+
+    const videoUUID = 'video-uuid'
+    const tmpDirectory = await mkdtemp(join(tmpdir(), 'peertube-retained-local-'))
+    const path = join(tmpDirectory, 'playlist.m3u8')
+    const releaser = await VideoPathManager.Instance.lockFiles(videoUUID)
+
+    CONFIG.OBJECT_STORAGE.KEEP_LOCAL_FILE_AFTER_MOVE = 0
+    VideoJobInfoModel.loadByUUID = (() => Promise.resolve({
+      pendingMove: 5,
+      pendingTranscode: 7,
+      pendingTranscription: 3
+    } as any)) as typeof VideoJobInfoModel.loadByUUID
+
+    try {
+      await writeFile(path, '#EXTM3U')
+
+      await removeLocalFileAfterMove({
+        path,
+        videoUUID,
+        skipReadinessCheck: true
+      })
+
+      await new Promise(resolve => setTimeout(resolve, 200))
+      expect(existsSync(path)).to.be.true
+
+      releaser()
+
+      await waitUntil(() => existsSync(path) === false)
+      expect(existsSync(path)).to.be.false
+    } finally {
+      releaser()
+
+      CONFIG.OBJECT_STORAGE.KEEP_LOCAL_FILE_AFTER_MOVE = originalKeepLocalFileAfterMove
+      VideoJobInfoModel.loadByUUID = originalLoadByUUID
+
+      await remove(tmpDirectory).catch(() => {})
+    }
   })
 })

@@ -223,6 +223,10 @@ class VideoPathManager {
     logger.debug('Released lockfiles of %s.', videoUUID, lTags(videoUUID))
   }
 
+  hasLockedFiles (videoUUID: string) {
+    return this.videoFileMutexStore.get(videoUUID)?.isLocked() === true
+  }
+
   private async makeAvailableFactory<T> (options: {
     createMethods: MakeAvailableCreateMethod[]
     cbContext: MakeAvailableMultipleCB<T>
