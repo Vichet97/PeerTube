@@ -28,6 +28,7 @@ import { addLocalOrRemoteStoryboardJobIfNeeded, buildMoveVideoJob, createMoveJob
 import { VideoPathManager } from '@server/lib/video-path-manager.js'
 import { buildNextVideoState } from '@server/lib/video-state.js'
 import { createTorrentAndSetInfoHash, downloadWebTorrentVideo } from '@server/lib/webtorrent.js'
+import { JobQueue } from '@server/lib/job-queue/index.js'
 import { VideoCaptionModel } from '@server/models/video/video-caption.js'
 import { MUserId, MVideoFile, MVideoFullLight } from '@server/types/models/index.js'
 import { MVideoImport, MVideoImportDefault, MVideoImportDefaultFiles, MVideoImportVideo } from '@server/types/models/video/video-import.js'
@@ -49,6 +50,8 @@ import { Notifier } from '../../notifier/index.js'
 import { createLocalVideoThumbnailsFromVideo } from '../../thumbnail.js'
 import { UserModel } from '@server/models/user/user.js'
 
+const VIDEO_IMPORT_LOCAL_PIPELINE_BACKPRESSURE_DELAY_MS = 10 * 60 * 1000
+
 async function processVideoImport (job: Job): Promise<VideoImportPreventExceptionResult> {
   const payload = job.data as VideoImportPayload
 
@@ -62,6 +65,10 @@ async function processVideoImport (job: Job): Promise<VideoImportPreventExceptio
     logger.info('Do not process import since it has reached the maximum number of attempts', { payload, attempts: videoImport.attempts })
 
     return { resultType: 'error' }
+  }
+
+  if (await maybeDeferVideoImportForLocalPipeline(job, videoImport, payload)) {
+    return { resultType: 'success' }
   }
 
   videoImport.attempts += 1
@@ -88,6 +95,105 @@ async function processVideoImport (job: Job): Promise<VideoImportPreventExceptio
 
 export {
   processVideoImport
+}
+
+// ---------------------------------------------------------------------------
+
+async function maybeDeferVideoImportForLocalPipeline (
+  job: Job,
+  videoImport: MVideoImportDefault,
+  payload: VideoImportPayload
+) {
+  // Remote imports materialize the source file in local web-videos before
+  // transcoding/move jobs can delete it. When many imports are accepted faster
+  // than the downstream local pipeline can drain, local storage fills and Redis
+  // can enter MISCONF/stop-writes mode. Keep imports pending instead of
+  // downloading more local files while the downstream queue is already backed up.
+  if (!CONFIG.OBJECT_STORAGE.ENABLED || !CONFIG.TRANSCODING.ENABLED) return false
+
+  const backlog = await JobQueue.Instance.getLocalVideoPipelineBacklog()
+  const maxJobs = buildVideoImportLocalPipelineBackpressureMaxJobs({
+    transcodingConcurrency: CONFIG.TRANSCODING.CONCURRENCY,
+    objectStorageConcurrency: CONFIG.OBJECT_STORAGE.CONCURRENCY
+  })
+
+  if (!isVideoImportLocalPipelineBacklogged({ total: backlog.total, maxJobs })) return false
+
+  const customJobId = buildVideoImportBackpressureJobId(videoImport.id)
+
+  logger.warn(
+    '[VIDEO_IMPORT] Deferring import %d from job %s for %d ms because local video pipeline backlog is %d/%d.',
+    videoImport.id,
+    job.id,
+    VIDEO_IMPORT_LOCAL_PIPELINE_BACKPRESSURE_DELAY_MS,
+    backlog.total,
+    maxJobs,
+    { backlogByType: backlog.byType }
+  )
+
+  videoImport.state = VideoImportState.PENDING
+  videoImport.progress = null
+  await videoImport.save()
+
+  try {
+    const delayedJob = await JobQueue.Instance.createJob({
+      type: 'video-import',
+      payload,
+      delay: VIDEO_IMPORT_LOCAL_PIPELINE_BACKPRESSURE_DELAY_MS,
+      customJobId
+    })
+
+    if (!delayedJob) {
+      throw new Error(`Cannot create delayed video import job for import ${videoImport.id}`)
+    }
+  } catch (err) {
+    if (isDuplicateVideoImportBackpressureJobError(err)) {
+      logger.info(
+        '[VIDEO_IMPORT] Delayed import backpressure job %s already exists for import %d.',
+        customJobId,
+        videoImport.id
+      )
+      return true
+    }
+
+    throw err
+  }
+
+  return true
+}
+
+export function buildVideoImportLocalPipelineBackpressureMaxJobs (options: {
+  transcodingConcurrency: number
+  objectStorageConcurrency: number
+}) {
+  const transcodingConcurrency = Math.max(1, options.transcodingConcurrency || 1)
+  const objectStorageConcurrency = Math.max(1, options.objectStorageConcurrency || 1)
+
+  return Math.max(10, transcodingConcurrency * 2 + objectStorageConcurrency)
+}
+
+export function isVideoImportLocalPipelineBacklogged (options: {
+  total: number
+  maxJobs: number
+}) {
+  return options.maxJobs > 0 && options.total >= options.maxJobs
+}
+
+export function buildVideoImportBackpressureJobId (
+  videoImportId: number,
+  nowMs = Date.now(),
+  delayMs = VIDEO_IMPORT_LOCAL_PIPELINE_BACKPRESSURE_DELAY_MS
+) {
+  const bucket = Math.floor(nowMs / delayMs)
+
+  return `video-import-backpressure-${videoImportId}-${bucket}`
+}
+
+function isDuplicateVideoImportBackpressureJobError (err: unknown) {
+  const message = err instanceof Error ? err.message : String(err)
+
+  return message.includes('Job is already waiting') ||
+    (message.includes('JobId') && message.includes('already exists'))
 }
 
 // ---------------------------------------------------------------------------

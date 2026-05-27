@@ -590,6 +590,34 @@ class JobQueue {
     return false
   }
 
+  async getLocalVideoPipelineBacklog () {
+    const localPipelineJobTypes: JobType[] = [
+      'transcoding-job-builder',
+      'video-transcoding',
+      'move-to-object-storage',
+      'move-video-file-to-object-storage',
+      'move-hls-playlist-to-object-storage',
+      'move-thumbnail-to-object-storage',
+      'move-caption-to-object-storage'
+    ]
+    const states: JobState[] = [ 'waiting', 'delayed', 'prioritized', 'waiting-children', 'active' ]
+    const byType: Partial<Record<JobType, number>> = {}
+    let total = 0
+
+    for (const jobType of localPipelineJobTypes) {
+      const queue = this.queues[jobType]
+      if (!queue) continue
+
+      const counts = await queue.getJobCounts()
+      const count = states.reduce((sum, state) => sum + (counts[state] ?? 0), 0)
+
+      if (count !== 0) byType[jobType] = count
+      total += count
+    }
+
+    return { total, byType }
+  }
+
   async getExistingMoveJob (jobType: JobType, videoUUID: string, options?: {
     isFollowUp?: boolean
     fileId?: number
