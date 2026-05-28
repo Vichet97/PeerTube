@@ -924,14 +924,16 @@ class JobQueue {
     jobType?: JobType
     search?: string
     videoUUID?: string
+    videoId?: number
+    videoImportId?: number
   }): Promise<Job[]> {
-    const { state, start, count, asc, jobType, search, videoUUID } = options
+    const { state, start, count, asc, jobType, search, videoUUID, videoId, videoImportId } = options
 
     const states = this.buildStateFilter(state)
     const filteredJobTypes = this.buildTypeFilter(jobType)
 
     // When filtering failed/cancelled we over-fetch because we filter by failedReason
-    const fetchLimit = search || videoUUID
+    const fetchLimit = search || videoUUID || videoId || videoImportId
       ? 10000
       : (state === 'failed' || state === 'cancelled')
           ? Math.min(10000, start + count + 2000)
@@ -961,7 +963,7 @@ class JobQueue {
       })
     }
 
-    results = await this.filterJobsByVideoOptions(results, { search, videoUUID })
+    results = await this.filterJobsByVideoOptions(results, { search, videoUUID, videoId, videoImportId })
 
     results.sort((j1: any, j2: any) => {
       if (j1.timestamp < j2.timestamp) return -1
@@ -975,9 +977,16 @@ class JobQueue {
     return results.slice(start, start + count)
   }
 
-  async count (state: JobState, jobType?: JobType, search?: string, videoUUID?: string): Promise<number> {
+  async count (
+    state: JobState,
+    jobType?: JobType,
+    search?: string,
+    videoUUID?: string,
+    videoId?: number,
+    videoImportId?: number
+  ): Promise<number> {
     const filteredJobTypes = this.buildTypeFilter(jobType)
-    const hasVideoFilter = !!search || !!videoUUID
+    const hasVideoFilter = !!search || !!videoUUID || !!videoId || !!videoImportId
 
     if (state === 'failed' || state === 'cancelled' || hasVideoFilter) {
       const states = this.buildStateFilter(state)
@@ -993,7 +1002,7 @@ class JobQueue {
           return wantCancelled ? isCancelled : !isCancelled
         })
 
-        const filteredJobs = await this.filterJobsByVideoOptions(count, { search, videoUUID })
+        const filteredJobs = await this.filterJobsByVideoOptions(count, { search, videoUUID, videoId, videoImportId })
         const countTotal = filteredJobs.length
         total += countTotal
       }
@@ -1047,10 +1056,12 @@ class JobQueue {
   private async filterJobsByVideoOptions (jobs: Job[], options: {
     search?: string
     videoUUID?: string
+    videoId?: number
+    videoImportId?: number
   }) {
-    const { search, videoUUID } = options
+    const { search, videoUUID, videoId, videoImportId } = options
 
-    if (!search && !videoUUID) return jobs
+    if (!search && !videoUUID && !videoId && !videoImportId) return jobs
 
     const trimmedSearch = search?.trim()
     const loweredSearch = trimmedSearch?.toLowerCase() ?? ''
@@ -1060,6 +1071,10 @@ class JobQueue {
 
     if (videoUUID) {
       filteredVideoUUIDs.add(videoUUID)
+    }
+
+    if (videoId) {
+      filteredVideoIds.add(videoId)
     }
 
     if (trimmedSearch) {
@@ -1078,10 +1093,11 @@ class JobQueue {
 
       if (!hasVideoMatches) return false
 
-      const data = job.data as { videoUUID?: string, videoId?: number }
+      const data = job.data as { videoUUID?: string, videoId?: number, videoImportId?: number }
 
       if (typeof data?.videoUUID === 'string' && filteredVideoUUIDs.has(data.videoUUID)) return true
       if (typeof data?.videoId === 'number' && filteredVideoIds.has(data.videoId)) return true
+      if (typeof data?.videoImportId === 'number' && videoImportId && data.videoImportId === videoImportId) return true
 
       return false
     })

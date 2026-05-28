@@ -56,7 +56,7 @@
   </ng-template>
 
   <ng-template #expandedRow let-videoImport>
-    <pre>{{ videoImport.error }}</pre>
+    <pre>{{ getExpandedImportDetails(videoImport) }}</pre>
   </ng-template>
 
   <ng-template #noResults>

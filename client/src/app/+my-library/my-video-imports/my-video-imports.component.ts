@@ -122,6 +122,32 @@ export class MyVideoImportsComponent implements OnInit {
     return Video.buildUpdateUrl(video)
   }
 
+  getExpandedImportDetails (videoImport: VideoImport) {
+    const lines = [
+      `Import #${videoImport.id}`,
+      `State: ${videoImport.state?.label || '-'}`,
+      `Progress: ${videoImport.progress != null ? videoImport.progress + '%' : '-'}`,
+      `Attempts: ${videoImport.attempts ?? 0}`,
+      `Target URL: ${videoImport.targetUrl || '-'}`,
+      `Torrent name: ${videoImport.torrentName || '-'}`,
+      `Magnet URI: ${videoImport.magnetUri || '-'}`
+    ]
+
+    if (videoImport.videoChannelSync?.externalChannelUrl) {
+      lines.push(`Channel sync source: ${videoImport.videoChannelSync.externalChannelUrl}`)
+    }
+
+    if (videoImport.video?.name) {
+      lines.push(`Video: ${videoImport.video.name}`)
+    }
+
+    if (videoImport.error) {
+      lines.push('', `Error: ${videoImport.error}`)
+    }
+
+    return lines.join('\n')
+  }
+
   deleteImport (videoImport: VideoImport) {
     this.videoImportService.deleteVideoImport(videoImport)
       .subscribe({

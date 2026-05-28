@@ -1,4 +1,5 @@
 import {
+  FileStorage,
   HttpStatusCode,
   Job as JobModel,
   JobState,
@@ -8,15 +9,16 @@ import {
   VideoStatsOverallQuery,
   VideoStatsTimeserieMetric,
   VideoStatsTimeserieQuery,
-  VideoStatsUserAgentQuery
+  VideoStatsUserAgentQuery,
+  isMoveVideoStoragePayload
 } from '@peertube/peertube-models'
 import { Job } from 'bullmq'
 import { CONFIG } from '../../../initializers/config.js'
 import { LocalVideoViewerModel } from '@server/models/view/local-video-viewer.js'
 import { VideoModel } from '../../../models/video/video.js'
 import { VideoCaptionModel } from '../../../models/video/video-caption.js'
+import { VideoImportModel } from '../../../models/video/video-import.js'
 import { VideoPathManager } from '../../../lib/video-path-manager.js'
-import { FileStorage } from '@peertube/peertube-models'
 import express from 'express'
 import {
   asyncMiddleware,
@@ -28,7 +30,6 @@ import {
   videoTimeseriesStatsValidator
 } from '../../../middlewares/index.js'
 import { JobQueue } from '../../../lib/job-queue/job-queue.js'
-import { isMoveVideoStoragePayload } from '@peertube/peertube-models'
 
 const statsRouter = express.Router()
 
@@ -134,12 +135,18 @@ async function getTimeseriesStats (req: express.Request, res: express.Response) 
 
 async function listRelatedJobs (req: express.Request, res: express.Response) {
   const video = res.locals.videoAll
+  const videoImport = await VideoImportModel.unscoped().findOne({
+    attributes: [ 'id' ],
+    where: { videoId: video.id }
+  })
 
   const jobs = await JobQueue.Instance.listForApi({
     start: 0,
     count: 1000,
     asc: false,
-    videoUUID: video.uuid
+    videoUUID: video.uuid,
+    videoId: video.id,
+    videoImportId: videoImport?.id
   })
 
   const result: ResultList<JobModel> = {

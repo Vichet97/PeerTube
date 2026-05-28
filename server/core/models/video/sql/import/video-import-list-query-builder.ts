@@ -93,7 +93,7 @@ export class VideoImportListQueryBuilder extends AbstractListQuery {
 
       where.push(
         `(` +
-          `lower(immutable_unaccent("Video"."name")) LIKE lower(immutable_unaccent(${escapedLikeSearch})) OR ` +
+          `lower(immutable_unaccent(COALESCE("Video"."name", ''))) LIKE lower(immutable_unaccent(${escapedLikeSearch})) OR ` +
           `lower(immutable_unaccent("VideoImportModel"."targetUrl")) LIKE lower(immutable_unaccent(${escapedLikeSearch})) OR ` +
           `lower(immutable_unaccent("VideoImportModel"."torrentName")) LIKE lower(immutable_unaccent(${escapedLikeSearch})) OR ` +
           `lower(immutable_unaccent("VideoImportModel"."magnetUri")) LIKE lower(immutable_unaccent(${escapedLikeSearch}))` +
