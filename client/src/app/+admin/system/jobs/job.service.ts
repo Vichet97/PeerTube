@@ -31,6 +31,28 @@ export type VideoSystemResetResult = {
   localFilesDeleted: number
 }
 
+export type VideoSystemResetStatus = {
+  state: 'idle' | 'running' | 'completed' | 'failed'
+  startedAt?: string
+  finishedAt?: string
+  error?: string
+  result?: VideoSystemResetResult
+}
+
+export type GlobalQueueCleanupResult = {
+  queuesPaused: number
+  queueJobsDrained: number
+  queueJobsCleaned: number
+}
+
+export type GlobalQueueCleanupStatus = {
+  state: 'idle' | 'running' | 'completed' | 'failed'
+  startedAt?: string
+  finishedAt?: string
+  error?: string
+  result?: GlobalQueueCleanupResult
+}
+
 @Injectable()
 export class JobService {
   private authHttp = inject(HttpClient)
@@ -84,10 +106,35 @@ export class JobService {
     )
   }
 
+  clearGlobalQueueBacklog () {
+    return this.authHttp.post<GlobalQueueCleanupStatus>(
+      JobService.BASE_JOB_URL + '/clear-global-queue-backlog',
+      {}
+    ).pipe(
+      catchError(err => this.restExtractor.handleError(err))
+    )
+  }
+
+  getGlobalQueueBacklogCleanupStatus () {
+    return this.authHttp.get<GlobalQueueCleanupStatus>(
+      JobService.BASE_JOB_URL + '/clear-global-queue-backlog'
+    ).pipe(
+      catchError(err => this.restExtractor.handleError(err))
+    )
+  }
+
   recheckVideosStatus (jobType?: string) {
-    return this.authHttp.post<VideoSystemResetResult>(
+    return this.authHttp.post<VideoSystemResetStatus>(
       JobService.BASE_JOB_URL + '/recheck-videos-status',
       { jobType }
+    ).pipe(
+      catchError(err => this.restExtractor.handleError(err))
+    )
+  }
+
+  getRecheckVideosStatus () {
+    return this.authHttp.get<VideoSystemResetStatus>(
+      JobService.BASE_JOB_URL + '/recheck-videos-status'
     ).pipe(
       catchError(err => this.restExtractor.handleError(err))
     )

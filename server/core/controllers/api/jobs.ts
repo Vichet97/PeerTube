@@ -101,6 +101,14 @@ type SystemVideoResetResult = {
   localFilesDeleted: number
 }
 
+type SystemVideoResetStatus = {
+  state: 'idle' | 'running' | 'completed' | 'failed'
+  startedAt?: string
+  finishedAt?: string
+  error?: string
+  result?: SystemVideoResetResult
+}
+
 type SystemResetPausedQueue = {
   jobType: JobType
   wasPaused: boolean
@@ -122,6 +130,20 @@ type SystemResetLocalFilesResult = {
 type ReferencedLocalFiles = {
   paths: Set<string>
   hlsDirectories: Set<string>
+}
+
+type GlobalQueueCleanupResult = {
+  queuesPaused: number
+  queueJobsDrained: number
+  queueJobsCleaned: number
+}
+
+type GlobalQueueCleanupStatus = {
+  state: 'idle' | 'running' | 'completed' | 'failed'
+  startedAt?: string
+  finishedAt?: string
+  error?: string
+  result?: GlobalQueueCleanupResult
 }
 
 const VIDEO_REPAIR_JOB_STATES = [ 'waiting', 'delayed', 'prioritized', 'waiting-children', 'active', 'failed' ] as const
@@ -229,10 +251,28 @@ jobsRouter.post('/cancel-jobs',
   asyncMiddleware(cancelJobs)
 )
 
+jobsRouter.post('/clear-global-queue-backlog',
+  authenticate,
+  ensureUserHasRight(UserRight.MANAGE_JOBS),
+  asyncMiddleware(clearGlobalQueueBacklog)
+)
+
+jobsRouter.get('/clear-global-queue-backlog',
+  authenticate,
+  ensureUserHasRight(UserRight.MANAGE_JOBS),
+  asyncMiddleware(getClearGlobalQueueBacklogStatus)
+)
+
 jobsRouter.post('/recheck-videos-status',
   authenticate,
   ensureUserHasRight(UserRight.MANAGE_JOBS),
   asyncMiddleware(recheckVideosStatus)
+)
+
+jobsRouter.get('/recheck-videos-status',
+  authenticate,
+  ensureUserHasRight(UserRight.MANAGE_JOBS),
+  asyncMiddleware(getRecheckVideosStatus)
 )
 
 jobsRouter.post('/retry-job',
@@ -548,12 +588,115 @@ async function removeQueuedJob (job: BullJob) {
 }
 
 async function recheckVideosStatus (req: express.Request, res: express.Response) {
-  const jobType = req.body.jobType as string | undefined
-  const pausedQueues = await pauseVideoRepairQueuesForSystemReset()
-  await Redis.Instance.setVideoPipelineSystemResetHold()
+  const currentStatus = await getStoredVideoSystemResetStatus()
+  if (currentStatus.state === 'running') {
+    return res.json(currentStatus)
+  }
 
-  const result = await runVideoSystemReset(jobType, pausedQueues)
-  return res.json(result)
+  const jobType = req.body.jobType as string | undefined
+
+  const startedAt = new Date().toISOString()
+  const runningStatus: SystemVideoResetStatus = {
+    state: 'running',
+    startedAt
+  }
+
+  await Redis.Instance.setVideoPipelineSystemResetStatus(runningStatus)
+
+  void startVideoSystemResetInBackground(jobType)
+
+  return res.json(runningStatus)
+}
+
+async function getRecheckVideosStatus (_req: express.Request, res: express.Response) {
+  return res.json(await getStoredVideoSystemResetStatus())
+}
+
+async function getStoredVideoSystemResetStatus (): Promise<SystemVideoResetStatus> {
+  const status = await Redis.Instance.getVideoPipelineSystemResetStatus() as SystemVideoResetStatus | null
+
+  return status || { state: 'idle' }
+}
+
+async function startVideoSystemResetInBackground (jobType: string | undefined) {
+  try {
+    const pausedQueues = await pauseVideoRepairQueuesForSystemReset()
+    await Redis.Instance.setVideoPipelineSystemResetHold()
+
+    const result = await runVideoSystemReset(jobType, pausedQueues)
+    await Redis.Instance.setVideoPipelineSystemResetStatus({
+      state: 'completed',
+      startedAt: (await getStoredVideoSystemResetStatus()).startedAt,
+      finishedAt: new Date().toISOString(),
+      result
+    })
+  } catch (err) {
+    logger.error('[SYSTEM_RESETTER] Video system reset failed.', { err })
+
+    await Redis.Instance.setVideoPipelineSystemResetStatus({
+      state: 'failed',
+      startedAt: (await getStoredVideoSystemResetStatus()).startedAt,
+      finishedAt: new Date().toISOString(),
+      error: err instanceof Error
+        ? err.message
+        : String(err)
+    })
+  }
+}
+
+async function clearGlobalQueueBacklog (req: express.Request, res: express.Response) {
+  const currentStatus = await getStoredGlobalQueueCleanupStatus()
+  if (currentStatus.state === 'running') {
+    return res.json(currentStatus)
+  }
+
+  const startedAt = new Date().toISOString()
+  const runningStatus: GlobalQueueCleanupStatus = {
+    state: 'running',
+    startedAt
+  }
+
+  await Redis.Instance.setGlobalQueueCleanupStatus(runningStatus)
+
+  void startGlobalQueueCleanupInBackground()
+
+  return res.json(runningStatus)
+}
+
+async function getClearGlobalQueueBacklogStatus (_req: express.Request, res: express.Response) {
+  return res.json(await getStoredGlobalQueueCleanupStatus())
+}
+
+async function getStoredGlobalQueueCleanupStatus (): Promise<GlobalQueueCleanupStatus> {
+  const status = await Redis.Instance.getGlobalQueueCleanupStatus() as GlobalQueueCleanupStatus | null
+
+  return status || { state: 'idle' }
+}
+
+async function startGlobalQueueCleanupInBackground () {
+  try {
+    const result = await clearAllQueuesWaitingAndDelayedBacklog()
+    const currentStatus = await getStoredGlobalQueueCleanupStatus()
+
+    await Redis.Instance.setGlobalQueueCleanupStatus({
+      state: 'completed',
+      startedAt: currentStatus.startedAt,
+      finishedAt: new Date().toISOString(),
+      result
+    })
+  } catch (err) {
+    logger.error('[SYSTEM_RESETTER] Global queue cleanup failed.', { err })
+
+    const currentStatus = await getStoredGlobalQueueCleanupStatus()
+    await Redis.Instance.setGlobalQueueCleanupStatus({
+      state: 'failed',
+      startedAt: currentStatus.startedAt,
+      finishedAt: new Date().toISOString(),
+      error: err instanceof Error
+        ? err.message
+        : String(err)
+    })
+  }
 }
 
 async function runVideoSystemReset (
@@ -741,6 +884,55 @@ async function clearVideoRepairQueuesForSystemReset (): Promise<VideoQueueCleanu
   logger.info('[SYSTEM_RESETTER] Cleared queued video pipeline jobs before database/storage scrub.', { drained, cleaned })
 
   return { drained, cleaned }
+}
+
+async function clearAllQueuesWaitingAndDelayedBacklog (): Promise<GlobalQueueCleanupResult> {
+  const queues = JobQueue.Instance.getQueues()
+  const queueNames = Object.keys(queues)
+
+  await JobQueue.Instance.pause({ doNotWaitActive: true, jobTypes: queueNames })
+
+  let queuesPaused = 0
+  let queueJobsDrained = 0
+  let queueJobsCleaned = 0
+
+  for (const jobType of queueNames) {
+    const queue = queues[jobType]
+    if (!queue) continue
+
+    queuesPaused++
+
+    try {
+      const countsBefore = await queue.getJobCounts('waiting', 'wait', 'delayed', 'prioritized', 'waiting-children')
+      const drainCandidates = Object.values(countsBefore).reduce((acc, value) => acc + (value || 0), 0)
+
+      await queue.drain(true)
+      queueJobsDrained += drainCandidates
+    } catch (err) {
+      logger.warn('[GLOBAL_QUEUE_SCRUB] Cannot drain %s queue.', jobType, { err })
+    }
+
+    for (const state of [ 'delayed', 'waiting', 'wait', 'prioritized' ] as const) {
+      try {
+        const removedIds = await queue.clean(0, VIDEO_QUEUE_CLEAN_LIMIT, state)
+        queueJobsCleaned += removedIds.length
+      } catch (err) {
+        logger.warn('[GLOBAL_QUEUE_SCRUB] Cannot clean %s jobs in state %s.', jobType, state, { err })
+      }
+    }
+  }
+
+  logger.info('[GLOBAL_QUEUE_SCRUB] Cleared global BullMQ waiting/delayed backlog.', {
+    queuesPaused,
+    queueJobsDrained,
+    queueJobsCleaned
+  })
+
+  return {
+    queuesPaused,
+    queueJobsDrained,
+    queueJobsCleaned
+  }
 }
 
 async function cleanupOrphanSystemResetDbRecords (): Promise<SystemResetDbCleanupResult> {

@@ -397,6 +397,34 @@ class Redis {
     return !!value
   }
 
+  setVideoPipelineSystemResetStatus (value: {
+    state: 'idle' | 'running' | 'completed' | 'failed'
+    startedAt?: string
+    finishedAt?: string
+    error?: string
+    result?: unknown
+  }) {
+    return this.setObject('video-pipeline-system-reset-status', value)
+  }
+
+  getVideoPipelineSystemResetStatus () {
+    return this.getObject('video-pipeline-system-reset-status')
+  }
+
+  setGlobalQueueCleanupStatus (value: {
+    state: 'idle' | 'running' | 'completed' | 'failed'
+    startedAt?: string
+    finishedAt?: string
+    error?: string
+    result?: unknown
+  }) {
+    return this.setObject('global-queue-cleanup-status', value)
+  }
+
+  getGlobalQueueCleanupStatus () {
+    return this.getObject('global-queue-cleanup-status')
+  }
+
   /* ************ AP resource unavailability ************ */
 
   async addAPUnavailability (url: string) {
@@ -493,7 +521,7 @@ class Redis {
     return JSON.parse(value)
   }
 
-  private setObject (key: string, value: { [id: string]: number | string }, expirationMilliseconds?: number) {
+  private setObject (key: string, value: Record<string, unknown>, expirationMilliseconds?: number) {
     return this.setValue(key, JSON.stringify(value), expirationMilliseconds)
   }
 

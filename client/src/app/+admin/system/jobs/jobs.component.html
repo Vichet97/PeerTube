@@ -100,6 +100,13 @@
           (click)="recheckVideosStatus()"
           [disabled]="recheckingVideosStatus"
         ></my-button>
+        <my-button
+          i18n-label
+          label="Clear global waiting/delayed jobs"
+          icon="cross"
+          (click)="clearGlobalQueueBacklog()"
+          [disabled]="clearingGlobalQueueBacklog"
+        ></my-button>
         <my-button i18n-label label="Refresh" icon="refresh" (click)="refreshData()"></my-button>
       </div>
 

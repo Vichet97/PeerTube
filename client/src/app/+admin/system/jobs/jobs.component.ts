@@ -7,7 +7,8 @@ import { SelectOptionsComponent } from '@app/shared/shared-forms/select/select-o
 import { Job, JobState, JobType } from '@peertube/peertube-models'
 import { peertubeLocalStorage } from '@root-helpers/peertube-web-storage'
 import { SortMeta } from 'primeng/api'
-import { tap } from 'rxjs/operators'
+import { interval, Subscription } from 'rxjs'
+import { switchMap, tap } from 'rxjs/operators'
 import { SelectOptionsItem } from 'src/types'
 import { JobStateClient } from '../../../../types/job-state-client.type'
 import { JobTypeClient } from '../../../../types/job-type-client.type'
@@ -15,7 +16,7 @@ import { ButtonComponent } from '../../../shared/shared-main/buttons/button.comp
 import { NumberFormatterPipe } from '../../../shared/shared-main/common/number-formatter.pipe'
 import { TableColumnInfo, TableComponent, TableQueryParams } from '../../../shared/shared-tables/table.component'
 import { AdvancedInputFilterComponent } from '../../../shared/shared-forms/advanced-input-filter.component'
-import { JobService, VideoMaintenanceCounts } from './job.service'
+import { GlobalQueueCleanupStatus, JobService, VideoMaintenanceCounts, VideoSystemResetStatus } from './job.service'
 
 type ColumnName = 'select' | 'id' | 'type' | 'priority' | 'state' | 'progress' | 'createdAt' | 'processed'
 
@@ -60,10 +61,13 @@ export class JobsComponent implements OnInit {
   creatingTranscriptionJobs = false
   creatingStoryboardJobs = false
   cancellingAllJobs = false
+  clearingGlobalQueueBacklog = false
 
   selectedJobIds = new Set<number>()
   retryingJobIds = new Set<number>()
   recheckingVideosStatus = false
+  private resetStatusPollingSub?: Subscription
+  private globalQueueCleanupPollingSub?: Subscription
 
   jobsCount = 0
   videoMaintenanceCounts: VideoMaintenanceCounts = {
@@ -144,6 +148,8 @@ export class JobsComponent implements OnInit {
   ngOnInit () {
     this.loadJobStateAndType()
     this.loadVideoMaintenanceCounts()
+    this.resumeResetStatusPollingIfNeeded()
+    this.resumeGlobalQueueCleanupPollingIfNeeded()
   }
 
   getJobStateClasses (state: JobStateClient): string[] {
@@ -412,36 +418,44 @@ export class JobsComponent implements OnInit {
     if (this.recheckingVideosStatus) return
 
     this.recheckingVideosStatus = true
-    this.notifier.info($localize`Running video system resetter...`)
+    this.notifier.info($localize`Starting video system resetter...`)
 
     this.jobsService.recheckVideosStatus().subscribe({
-      next: ({
-        videosChecked,
-        videosUpdated,
-        videosDeleted,
-        jobsRemoved,
-        jobsRemoveFailed,
-        countersReset,
-        queuesPaused,
-        resetHoldEnabled,
-        queueJobsDrained,
-        queueJobsCleaned,
-        orphanDbRecordsDeleted,
-        localFilesDeleted
-      }) => {
-        this.recheckingVideosStatus = false
-        this.notifier.success(
-          $localize`System reset complete: checked ${videosChecked} video(s), updated ${videosUpdated}, deleted ${videosDeleted}, ` +
-          $localize`removed ${jobsRemoved} indexed job(s), failed to remove ${jobsRemoveFailed}, drained ${queueJobsDrained} queued job(s), cleaned ${queueJobsCleaned} queued state record(s), ` +
-          $localize`reset ${countersReset} counter(s), deleted ${orphanDbRecordsDeleted} orphan DB record(s), deleted ${localFilesDeleted} orphan local file(s), ` +
-          $localize`paused ${queuesPaused} queue(s), reset hold ${resetHoldEnabled ? 'enabled' : 'disabled'}.`
-        )
-        this.table().loadData()
-        this.loadVideoMaintenanceCounts()
+      next: status => {
+        if (status.state === 'running') {
+          this.notifier.success($localize`Video system resetter started in background.`)
+          this.startResetStatusPolling()
+          return
+        }
+
+        this.handleResetStatus(status)
       },
       error: () => {
         this.recheckingVideosStatus = false
         this.notifier.error($localize`Failed to run video system resetter.`)
+      }
+    })
+  }
+
+  clearGlobalQueueBacklog () {
+    if (this.clearingGlobalQueueBacklog) return
+
+    this.clearingGlobalQueueBacklog = true
+    this.notifier.info($localize`Clearing global BullMQ waiting/delayed backlog...`)
+
+    this.jobsService.clearGlobalQueueBacklog().subscribe({
+      next: status => {
+        if (status.state === 'running') {
+          this.notifier.success($localize`Global queue scrub started in background.`)
+          this.startGlobalQueueCleanupPolling()
+          return
+        }
+
+        this.handleGlobalQueueCleanupStatus(status)
+      },
+      error: () => {
+        this.clearingGlobalQueueBacklog = false
+        this.notifier.error($localize`Failed to clear global BullMQ waiting/delayed backlog.`)
       }
     })
   }
@@ -497,6 +511,125 @@ export class JobsComponent implements OnInit {
   refreshData () {
     this.table().loadData()
     this.loadVideoMaintenanceCounts()
+  }
+
+  private resumeResetStatusPollingIfNeeded () {
+    this.jobsService.getRecheckVideosStatus().subscribe({
+      next: status => {
+        if (status.state === 'running') {
+          this.recheckingVideosStatus = true
+          this.startResetStatusPolling()
+        }
+      },
+      error: () => {
+        // noop
+      }
+    })
+  }
+
+  private resumeGlobalQueueCleanupPollingIfNeeded () {
+    this.jobsService.getGlobalQueueBacklogCleanupStatus().subscribe({
+      next: status => {
+        if (status.state === 'running') {
+          this.clearingGlobalQueueBacklog = true
+          this.startGlobalQueueCleanupPolling()
+        }
+      },
+      error: () => {
+        // noop
+      }
+    })
+  }
+
+  private startResetStatusPolling () {
+    this.resetStatusPollingSub?.unsubscribe()
+
+    this.resetStatusPollingSub = interval(2000)
+      .pipe(
+        switchMap(() => this.jobsService.getRecheckVideosStatus())
+      )
+      .subscribe({
+        next: status => this.handleResetStatus(status),
+        error: () => {
+          this.resetStatusPollingSub?.unsubscribe()
+          this.resetStatusPollingSub = undefined
+          this.recheckingVideosStatus = false
+          this.notifier.error($localize`Failed to poll video system resetter status.`)
+        }
+      })
+  }
+
+  private startGlobalQueueCleanupPolling () {
+    this.globalQueueCleanupPollingSub?.unsubscribe()
+
+    this.globalQueueCleanupPollingSub = interval(2000)
+      .pipe(
+        switchMap(() => this.jobsService.getGlobalQueueBacklogCleanupStatus())
+      )
+      .subscribe({
+        next: status => this.handleGlobalQueueCleanupStatus(status),
+        error: () => {
+          this.globalQueueCleanupPollingSub?.unsubscribe()
+          this.globalQueueCleanupPollingSub = undefined
+          this.clearingGlobalQueueBacklog = false
+          this.notifier.error($localize`Failed to poll global queue scrub status.`)
+        }
+      })
+  }
+
+  private handleResetStatus (status: VideoSystemResetStatus) {
+    if (status.state === 'running' || status.state === 'idle') return
+
+    this.resetStatusPollingSub?.unsubscribe()
+    this.resetStatusPollingSub = undefined
+    this.recheckingVideosStatus = false
+
+    if (status.state === 'failed') {
+      this.notifier.error($localize`Video system resetter failed: ${status.error || 'unknown error'}.`)
+      return
+    }
+
+    const result = status.result
+    if (!result) {
+      this.notifier.success($localize`Video system resetter finished.`)
+      this.table().loadData()
+      this.loadVideoMaintenanceCounts()
+      return
+    }
+
+    this.notifier.success(
+      $localize`System reset complete: checked ${result.videosChecked} video(s), updated ${result.videosUpdated}, deleted ${result.videosDeleted}, ` +
+      $localize`removed ${result.jobsRemoved} indexed job(s), failed to remove ${result.jobsRemoveFailed}, drained ${result.queueJobsDrained} queued job(s), cleaned ${result.queueJobsCleaned} queued state record(s), ` +
+      $localize`reset ${result.countersReset} counter(s), deleted ${result.orphanDbRecordsDeleted} orphan DB record(s), deleted ${result.localFilesDeleted} orphan local file(s), ` +
+      $localize`paused ${result.queuesPaused} queue(s), reset hold ${result.resetHoldEnabled ? 'enabled' : 'disabled'}.`
+    )
+    this.table().loadData()
+    this.loadVideoMaintenanceCounts()
+  }
+
+  private handleGlobalQueueCleanupStatus (status: GlobalQueueCleanupStatus) {
+    if (status.state === 'running' || status.state === 'idle') return
+
+    this.globalQueueCleanupPollingSub?.unsubscribe()
+    this.globalQueueCleanupPollingSub = undefined
+    this.clearingGlobalQueueBacklog = false
+
+    if (status.state === 'failed') {
+      this.notifier.error($localize`Global queue scrub failed: ${status.error || 'unknown error'}.`)
+      return
+    }
+
+    const result = status.result
+    if (!result) {
+      this.notifier.success($localize`Global queue scrub finished.`)
+      this.table().loadData()
+      return
+    }
+
+    this.notifier.success(
+      $localize`Global queue scrub complete: paused ${result.queuesPaused} queue(s), drained ${result.queueJobsDrained} waiting/delayed job(s), cleaned ${result.queueJobsCleaned} waiting/delayed state record(s).`
+    )
+    this.table().loadData()
   }
 
   private loadVideoMaintenanceCounts () {
