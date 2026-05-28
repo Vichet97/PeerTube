@@ -216,6 +216,21 @@ const jobTypes: JobType[] = [
 const silentFailure = new Set<JobType>([ 'activitypub-http-unicast' ])
 
 const CANCELLED_REASON = 'Video was deleted - transcoding job cancelled'
+const VIDEO_PIPELINE_JOB_TYPES_ON_RESET_HOLD = new Set<JobType>([
+  'video-import',
+  'video-file-import',
+  'transcoding-job-builder',
+  'video-transcoding',
+  'move-to-object-storage',
+  'move-to-file-system',
+  'move-video-file-to-object-storage',
+  'move-hls-playlist-to-object-storage',
+  'move-thumbnail-to-object-storage',
+  'move-caption-to-object-storage',
+  'video-transcription',
+  'generate-video-storyboard',
+  'video-studio-edition'
+])
 
 class JobQueue {
   private static instance: JobQueue
@@ -405,31 +420,55 @@ class JobQueue {
     return Promise.all(promises)
   }
 
-  async pause () {
-    for (const handlerName of Object.keys(this.workers)) {
-      const worker: Worker = this.workers[handlerName]
+  async pause (options: { doNotWaitActive?: boolean, jobTypes?: JobType[] } = {}) {
+    const { doNotWaitActive = false, jobTypes } = options
+    const workerNames = jobTypes ?? Object.keys(this.workers)
 
-      await worker.pause()
+    for (const handlerName of workerNames) {
+      const worker: Worker = this.workers[handlerName]
+      if (!worker) continue
+
+      await worker.pause(doNotWaitActive)
     }
   }
 
-  resume () {
-    for (const handlerName of Object.keys(this.workers)) {
+  async resume (jobTypes?: JobType[]) {
+    const queueNames = jobTypes ?? Object.keys(this.queues)
+    const workerNames = jobTypes ?? Object.keys(this.workers)
+
+    for (const queueName of queueNames) {
+      const queue: Queue = this.queues[queueName]
+      if (!queue) continue
+
+      await queue.resume()
+    }
+
+    for (const handlerName of workerNames) {
       const worker: Worker = this.workers[handlerName]
+      if (!worker) continue
 
       worker.resume()
     }
   }
 
+  async clearVideoPipelineSystemResetHoldAndResume () {
+    await Redis.Instance.removeVideoPipelineSystemResetHold()
+    await this.resume([ ...VIDEO_PIPELINE_JOB_TYPES_ON_RESET_HOLD ])
+  }
+
   // ---------------------------------------------------------------------------
 
   createJobAsync (options: CreateJobArgument & CreateJobOptions): void {
-    this.createJob(options)
+    Promise.resolve(this.createJob(options))
       .catch(err => logger.error('Cannot create job.', { err, options }))
   }
 
   createJob (options: CreateJobArgument & CreateJobOptions | undefined) {
     if (!options) return
+
+    if (VIDEO_PIPELINE_JOB_TYPES_ON_RESET_HOLD.has(options.type)) {
+      return this.createVideoPipelineJobRespectingSystemResetHold(options)
+    }
 
     const queue: Queue = this.queues[options.type]
     if (queue === undefined) {
@@ -440,6 +479,79 @@ class JobQueue {
     const jobOptions = this.buildJobOptions(options.type as JobType, pick(options, [ 'priority', 'delay', 'customJobId' ]))
 
     return queue.add('job', options.payload, jobOptions)
+  }
+
+  private async createVideoPipelineJobRespectingSystemResetHold (options: CreateJobArgument & CreateJobOptions) {
+    const isResetHoldEnabled = await Redis.Instance.isVideoPipelineSystemResetHoldSet()
+    const isNewVideoTrigger = this.isNewVideoPipelineTrigger(options)
+
+    if (isResetHoldEnabled && isNewVideoTrigger) {
+      const payload = options.payload as { videoUUID?: string }
+
+      logger.info('[JOB_QUEUE] Clearing video pipeline reset hold before creating %s job.', options.type, {
+        videoUUID: payload?.videoUUID
+      })
+
+      await this.clearVideoPipelineSystemResetHoldAndResume()
+    }
+
+    if (isResetHoldEnabled && !isNewVideoTrigger) {
+      logger.warn('[JOB_QUEUE] Blocking %s job creation because video pipeline reset hold is enabled.', options.type, {
+        payload: options.payload
+      })
+      return undefined
+    }
+
+    const queue: Queue = this.queues[options.type]
+    if (queue === undefined) {
+      logger.error('Unknown queue %s: cannot create job.', options.type)
+      return
+    }
+
+    const jobOptions = this.buildJobOptions(options.type as JobType, pick(options, [ 'priority', 'delay', 'customJobId' ]))
+
+    return queue.add('job', options.payload, jobOptions)
+  }
+
+  private isNewVideoPipelineTrigger (job: CreateJobArgument & CreateJobOptions) {
+    const payload = job.payload as {
+      isNewVideo?: boolean
+      videoUUID?: string
+      optimizeJob?: { isNewVideo?: boolean }
+      moveVideoState?: { isNewVideo?: boolean }
+    }
+
+    return job.type === 'video-import' ||
+      payload?.isNewVideo === true ||
+      payload?.optimizeJob?.isNewVideo === true ||
+      payload?.moveVideoState?.isNewVideo === true
+  }
+
+  private async shouldAllowProtectedVideoPipelineFlowCreation (
+    jobs: (CreateJobArgument & CreateJobOptions)[],
+    options: {
+      blockedMessage: string
+      blockedContext: Record<string, unknown>
+      resumeMessage: string
+      resumeContext: Record<string, unknown>
+    }
+  ) {
+    const hasProtectedJob = jobs.some(job => VIDEO_PIPELINE_JOB_TYPES_ON_RESET_HOLD.has(job.type))
+    if (!hasProtectedJob) return true
+
+    const isResetHoldEnabled = await Redis.Instance.isVideoPipelineSystemResetHoldSet()
+    if (!isResetHoldEnabled) return true
+
+    const hasNewVideoTrigger = jobs.some(job => this.isNewVideoPipelineTrigger(job))
+    if (!hasNewVideoTrigger) {
+      logger.warn(options.blockedMessage, options.blockedContext)
+      return false
+    }
+
+    logger.info(options.resumeMessage, options.resumeContext)
+    await this.clearVideoPipelineSystemResetHoldAndResume()
+
+    return true
   }
 
   async retryFailedJob (options: {
@@ -716,14 +828,29 @@ class JobQueue {
     await job.waitUntilFinished(queueEvents, timeoutMs)
   }
 
-  createSequentialJobFlow (...jobs: ((CreateJobArgument & CreateJobOptions) | undefined)[]) {
+  async createSequentialJobFlow (...jobs: ((CreateJobArgument & CreateJobOptions) | undefined)[]) {
+    const filteredJobs = jobs.filter(job => !!job)
+    if (filteredJobs.length === 0) return undefined
+
+    const isAllowed = await this.shouldAllowProtectedVideoPipelineFlowCreation(filteredJobs, {
+      blockedMessage:
+        '[JOB_QUEUE] Blocking sequential job flow creation because video pipeline reset hold is enabled ' +
+        'and no new-video trigger exists.',
+      blockedContext: {
+        jobTypes: filteredJobs.map(job => job.type)
+      },
+      resumeMessage: '[JOB_QUEUE] Clearing video pipeline reset hold before creating protected sequential job flow.',
+      resumeContext: {
+        jobTypes: filteredJobs.map(job => job.type)
+      }
+    })
+    if (!isAllowed) return undefined
+
     let lastJob: FlowJob
 
-    logger.debug('Creating jobs in local job queue', { jobs })
+    logger.debug('Creating jobs in local job queue', { jobs: filteredJobs })
 
-    for (const job of jobs) {
-      if (!job) continue
-
+    for (const job of filteredJobs) {
       lastJob = {
         ...this.buildJobFlowOption(job),
 
@@ -736,7 +863,25 @@ class JobQueue {
     return this.flowProducer.add(lastJob)
   }
 
-  createJobWithChildren (parent: CreateJobArgument & CreateJobOptions, children: (CreateJobArgument & CreateJobOptions)[]) {
+  async createJobWithChildren (parent: CreateJobArgument & CreateJobOptions, children: (CreateJobArgument & CreateJobOptions)[]) {
+    const flowJobs = [ parent, ...children ]
+    const isAllowed = await this.shouldAllowProtectedVideoPipelineFlowCreation(flowJobs, {
+      blockedMessage:
+        '[JOB_QUEUE] Blocking parent/children job flow creation because video pipeline reset hold is enabled ' +
+        'and no new-video trigger exists.',
+      blockedContext: {
+        parentType: parent.type,
+        childTypes: children.map(job => job.type)
+      },
+      resumeMessage:
+        '[JOB_QUEUE] Clearing video pipeline reset hold before creating protected parent/children job flow.',
+      resumeContext: {
+        parentType: parent.type,
+        childTypes: children.map(job => job.type)
+      }
+    })
+    if (!isAllowed) return undefined
+
     return this.flowProducer.add({
       ...this.buildJobFlowOption(parent),
 

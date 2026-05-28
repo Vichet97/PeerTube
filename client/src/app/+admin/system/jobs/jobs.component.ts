@@ -412,18 +412,36 @@ export class JobsComponent implements OnInit {
     if (this.recheckingVideosStatus) return
 
     this.recheckingVideosStatus = true
-    this.notifier.info($localize`Rechecking video status...`)
+    this.notifier.info($localize`Running video system resetter...`)
 
-    this.jobsService.recheckVideosStatus(this.jobType).subscribe({
-      next: ({ videosChecked, videosUpdated }) => {
+    this.jobsService.recheckVideosStatus().subscribe({
+      next: ({
+        videosChecked,
+        videosUpdated,
+        videosDeleted,
+        jobsRemoved,
+        jobsRemoveFailed,
+        countersReset,
+        queuesPaused,
+        resetHoldEnabled,
+        queueJobsDrained,
+        queueJobsCleaned,
+        orphanDbRecordsDeleted,
+        localFilesDeleted
+      }) => {
         this.recheckingVideosStatus = false
-        this.notifier.success($localize`Checked ${videosChecked} video(s), updated ${videosUpdated}.`)
+        this.notifier.success(
+          $localize`System reset complete: checked ${videosChecked} video(s), updated ${videosUpdated}, deleted ${videosDeleted}, ` +
+          $localize`removed ${jobsRemoved} indexed job(s), failed to remove ${jobsRemoveFailed}, drained ${queueJobsDrained} queued job(s), cleaned ${queueJobsCleaned} queued state record(s), ` +
+          $localize`reset ${countersReset} counter(s), deleted ${orphanDbRecordsDeleted} orphan DB record(s), deleted ${localFilesDeleted} orphan local file(s), ` +
+          $localize`paused ${queuesPaused} queue(s), reset hold ${resetHoldEnabled ? 'enabled' : 'disabled'}.`
+        )
         this.table().loadData()
         this.loadVideoMaintenanceCounts()
       },
       error: () => {
         this.recheckingVideosStatus = false
-        this.notifier.error($localize`Failed to recheck video status.`)
+        this.notifier.error($localize`Failed to run video system resetter.`)
       }
     })
   }

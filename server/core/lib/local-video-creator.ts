@@ -32,6 +32,8 @@ import { federateVideoIfNeeded } from './activitypub/videos/federate.js'
 import { AutomaticTagger } from './automatic-tags/automatic-tagger.js'
 import { setAndSaveVideoAutomaticTags } from './automatic-tags/automatic-tags.js'
 import { Hooks } from './plugins/hooks.js'
+import { JobQueue } from './job-queue/index.js'
+import { Redis } from './redis.js'
 import { createLocalVideoThumbnailsFromImage, createLocalVideoThumbnailsFromVideo } from './thumbnail.js'
 import { autoBlacklistVideoIfNeeded } from './video-blacklist.js'
 import { replaceChapters, replaceChaptersFromDescriptionIfNeeded } from './video-chapters.js'
@@ -120,6 +122,8 @@ export class LocalVideoCreator {
   }
 
   async create () {
+    await this.resumeVideoPipelineAfterSystemResetIfNeeded()
+
     this.video = new VideoModel(
       await Hooks.wrapObject(this.buildVideo(this.videoAttributes, this.channel), this.videoAttributeResultHook)
     ) as MVideoFullLight
@@ -260,6 +264,13 @@ export class LocalVideoCreator {
     await this.channel.setAsUpdated()
 
     return { video: this.video, videoFile: this.videoFile }
+  }
+
+  private async resumeVideoPipelineAfterSystemResetIfNeeded () {
+    if (!this.videoFilePath) return
+    if (!await Redis.Instance.isVideoPipelineSystemResetHoldSet()) return
+
+    await JobQueue.Instance.clearVideoPipelineSystemResetHoldAndResume()
   }
 
   private async createThumbnails () {

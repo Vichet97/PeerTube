@@ -371,7 +371,7 @@ class Redis {
 
   /* ************ Video deletion flag (for cancelling active transcoding jobs) ************ */
 
-  private static VIDEO_DELETION_FLAG_TTL = 3600000 // 1 hour
+  private static readonly VIDEO_DELETION_FLAG_TTL = 3600000 // 1 hour
 
   setVideoDeletionFlag (videoUUID: string) {
     return this.setValue('video-deletion-flag-' + videoUUID, '1', Redis.VIDEO_DELETION_FLAG_TTL)
@@ -379,6 +379,21 @@ class Redis {
 
   async isVideoDeletionFlagSet (videoUUID: string) {
     const value = await this.getValue('video-deletion-flag-' + videoUUID)
+    return !!value
+  }
+
+  /* ************ Video pipeline system reset hold ************ */
+
+  setVideoPipelineSystemResetHold () {
+    return this.setValue('video-pipeline-system-reset-hold', '1')
+  }
+
+  removeVideoPipelineSystemResetHold () {
+    return this.removeValue('video-pipeline-system-reset-hold')
+  }
+
+  async isVideoPipelineSystemResetHoldSet () {
+    const value = await this.getValue('video-pipeline-system-reset-hold')
     return !!value
   }
 

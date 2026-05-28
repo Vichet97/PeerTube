@@ -16,6 +16,21 @@ export type VideoMaintenanceCounts = {
   notYetTranscodedVideos: number
 }
 
+export type VideoSystemResetResult = {
+  videosChecked: number
+  videosUpdated: number
+  videosDeleted: number
+  jobsRemoved: number
+  jobsRemoveFailed: number
+  countersReset: number
+  queuesPaused: number
+  resetHoldEnabled: boolean
+  queueJobsDrained: number
+  queueJobsCleaned: number
+  orphanDbRecordsDeleted: number
+  localFilesDeleted: number
+}
+
 @Injectable()
 export class JobService {
   private authHttp = inject(HttpClient)
@@ -70,7 +85,7 @@ export class JobService {
   }
 
   recheckVideosStatus (jobType?: string) {
-    return this.authHttp.post<{ videosChecked: number, videosUpdated: number }>(
+    return this.authHttp.post<VideoSystemResetResult>(
       JobService.BASE_JOB_URL + '/recheck-videos-status',
       { jobType }
     ).pipe(

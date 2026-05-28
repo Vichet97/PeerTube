@@ -154,6 +154,7 @@ async function getVideoProcessingProgress (req: express.Request, res: express.Re
     return res.sendStatus(HttpStatusCode.NOT_FOUND_404)
   }
 
+  const isResetHoldEnabled = await Redis.Instance.isVideoPipelineSystemResetHoldSet()
   const state = video.state
 
   if (state === VideoState.TO_IMPORT) {
@@ -164,11 +165,19 @@ async function getVideoProcessingProgress (req: express.Request, res: express.Re
     return res.json({
       progress: videoImport.progress ?? 0,
       type: 'import',
-      active: true
+      active: isResetHoldEnabled !== true
     })
   }
 
   if (state === VideoState.TO_TRANSCODE) {
+    if (isResetHoldEnabled) {
+      return res.json({
+        progress: 0,
+        type: 'transcoding',
+        active: false
+      })
+    }
+
     const progress = await JobQueue.Instance.getTranscodingProgressForVideo(video.uuid)
     return res.json({
       progress: progress ?? 0,

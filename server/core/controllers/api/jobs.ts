@@ -5,29 +5,43 @@ import {
   JobState,
   JobType,
   ResultList,
+  RunnerJobState,
+  RunnerJobType,
   UserRight,
+  VideoImportState,
   VideoFileStream,
   VideoState,
   VideoStateType
 } from '@peertube/peertube-models'
 import { Job as BullJob } from 'bullmq'
 import express from 'express'
+import { readdir } from 'fs/promises'
+import { pathExists, remove } from 'fs-extra/esm'
+import { Op } from 'sequelize'
 import { isArray } from '../../helpers/custom-validators/misc.js'
 import { logger } from '../../helpers/logger.js'
 import { CONFIG } from '../../initializers/config.js'
+import { DIRECTORIES } from '../../initializers/constants.js'
 import { sequelizeTypescript } from '../../initializers/database.js'
 import { JobQueue } from '../../lib/job-queue/index.js'
 import { hasVideoResourcesToBeMoved } from '../../lib/move-storage/shared/move-video.js'
+import { getFSTorrentFilePath, getHLSResolutionPlaylistFilename } from '../../lib/paths.js'
+import { Redis } from '../../lib/redis.js'
 import {
   buildMoveVideoJob,
   buildLocalStoryboardJobIfNeeded,
   createMoveJobWithPendingMoveRollback
 } from '../../lib/video-jobs.js'
-import { moveToNextState } from '../../lib/video-state.js'
+import { VideoPathManager } from '../../lib/video-path-manager.js'
 import { VideoCaptionModel } from '../../models/video/video-caption.js'
+import { VideoImportModel } from '../../models/video/video-import.js'
 import { VideoJobInfoModel } from '../../models/video/video-job-info.js'
+import { VideoSourceModel } from '../../models/video/video-source.js'
+import { VideoStreamingPlaylistModel } from '../../models/video/video-streaming-playlist.js'
 import { StoryboardModel } from '../../models/video/storyboard.js'
 import { VideoModel } from '../../models/video/video.js'
+import { RunnerJobModel } from '../../models/runner/runner-job.js'
+import { MVideoWithAllFiles } from '../../types/models/index.js'
 import {
   apiRateLimiter,
   asyncMiddleware,
@@ -48,6 +62,128 @@ import {
 const jobsRouter = express.Router()
 
 jobsRouter.use(apiRateLimiter)
+
+type VideoRepairJobRef = {
+  job: BullJob
+  state: JobState
+  jobType: JobType
+}
+
+type VideoRepairJobIndex = {
+  byVideoUUID: Map<string, VideoRepairJobRef[]>
+  byVideoId: Map<number, VideoRepairJobRef[]>
+  byVideoImportId: Map<number, VideoRepairJobRef[]>
+}
+
+type VideoMediaIntegrity = {
+  hasMediaRecords: boolean
+  hasPlayableMediaRecords: boolean
+  hasFileSystemMediaRecords: boolean
+  hasObjectStorageMediaRecords: boolean
+  missingRequiredFiles: string[]
+  missingRepairableFiles: string[]
+  missingOriginalSourceIds: number[]
+  missingShaPlaylistIds: number[]
+}
+
+type SystemVideoResetResult = {
+  videosChecked: number
+  videosUpdated: number
+  videosDeleted: number
+  jobsRemoved: number
+  jobsRemoveFailed: number
+  countersReset: number
+  queuesPaused: number
+  resetHoldEnabled: boolean
+  queueJobsDrained: number
+  queueJobsCleaned: number
+  orphanDbRecordsDeleted: number
+  localFilesDeleted: number
+}
+
+type SystemResetPausedQueue = {
+  jobType: JobType
+  wasPaused: boolean
+}
+
+type VideoQueueCleanupResult = {
+  drained: number
+  cleaned: number
+}
+
+type SystemResetDbCleanupResult = {
+  deleted: number
+}
+
+type SystemResetLocalFilesResult = {
+  deleted: number
+}
+
+type ReferencedLocalFiles = {
+  paths: Set<string>
+  hlsDirectories: Set<string>
+}
+
+const VIDEO_REPAIR_JOB_STATES = [ 'waiting', 'delayed', 'prioritized', 'waiting-children', 'active', 'failed' ] as const
+const VIDEO_REPAIR_JOB_TYPES: JobType[] = [
+  'video-import',
+  'video-file-import',
+  'transcoding-job-builder',
+  'video-transcoding',
+  'move-to-object-storage',
+  'move-to-file-system',
+  'move-video-file-to-object-storage',
+  'move-hls-playlist-to-object-storage',
+  'move-thumbnail-to-object-storage',
+  'move-caption-to-object-storage',
+  'video-transcription',
+  'generate-video-storyboard',
+  'video-studio-edition',
+  'manage-video-torrent'
+]
+const INCOMPLETE_VIDEO_STATES = new Set<VideoStateType>([
+  VideoState.TO_IMPORT,
+  VideoState.TO_TRANSCODE,
+  VideoState.TO_MOVE_TO_EXTERNAL_STORAGE,
+  VideoState.TO_MOVE_TO_FILE_SYSTEM,
+  VideoState.TO_EDIT
+])
+const FAILED_VIDEO_STATES = new Set<VideoStateType>([
+  VideoState.TO_IMPORT_FAILED,
+  VideoState.TRANSCODING_FAILED,
+  VideoState.TO_MOVE_TO_EXTERNAL_STORAGE_FAILED,
+  VideoState.TO_MOVE_TO_FILE_SYSTEM_FAILED
+])
+const VIDEO_QUEUE_CLEAN_STATES = [
+  'completed',
+  'failed',
+  'active',
+  'paused',
+  'prioritized',
+  'delayed',
+  'waiting',
+  'wait'
+] as const
+const VIDEO_QUEUE_CLEAN_LIMIT = 100_000
+const LOCAL_VIDEO_STORAGE_DIRECTORIES = [
+  DIRECTORIES.WEB_VIDEOS.PUBLIC,
+  DIRECTORIES.WEB_VIDEOS.PRIVATE,
+  DIRECTORIES.HLS_STREAMING_PLAYLIST.PUBLIC,
+  DIRECTORIES.HLS_STREAMING_PLAYLIST.PRIVATE,
+  DIRECTORIES.ORIGINAL_VIDEOS,
+  CONFIG.STORAGE.THUMBNAILS_DIR,
+  CONFIG.STORAGE.STORYBOARDS_DIR,
+  CONFIG.STORAGE.CAPTIONS_DIR,
+  CONFIG.STORAGE.TORRENTS_DIR
+] as const
+const VIDEO_PIPELINE_RUNNER_JOB_TYPES: RunnerJobType[] = [
+  'vod-web-video-transcoding',
+  'vod-hls-transcoding',
+  'vod-audio-merge-transcoding',
+  'video-studio-transcoding',
+  'video-transcription',
+  'generate-video-storyboard'
+]
 
 jobsRouter.post('/pause',
   authenticate,
@@ -413,110 +549,866 @@ async function removeQueuedJob (job: BullJob) {
 
 async function recheckVideosStatus (req: express.Request, res: express.Response) {
   const jobType = req.body.jobType as string | undefined
+  const pausedQueues = await pauseVideoRepairQueuesForSystemReset()
+  await Redis.Instance.setVideoPipelineSystemResetHold()
 
+  const result = await runVideoSystemReset(jobType, pausedQueues)
+  return res.json(result)
+}
+
+async function runVideoSystemReset (
+  _jobType: string | undefined,
+  pausedQueues: SystemResetPausedQueue[]
+): Promise<SystemVideoResetResult> {
   const ids = await VideoModel.listLocalIds()
+  const existingVideoIds = new Set(ids)
+  const existingVideoUUIDs = new Set<string>()
+  const processedJobKeys = new Set<string>()
+  const jobIndex = await buildVideoRepairJobIndex()
 
-  const videoUUIDsWithPendingJobs = await JobQueue.Instance.listVideoUUIDsWithPendingTranscodingJobs()
-  const videoUUIDsWithPendingTranscriptionJobs = await JobQueue.Instance.listVideoUUIDsWithPendingTranscriptionJobs()
+  const result: SystemVideoResetResult = {
+    videosChecked: 0,
+    videosUpdated: 0,
+    videosDeleted: 0,
+    jobsRemoved: 0,
+    jobsRemoveFailed: 0,
+    countersReset: 0,
+    queuesPaused: pausedQueues.filter(q => !q.wasPaused).length,
+    resetHoldEnabled: true,
+    queueJobsDrained: 0,
+    queueJobsCleaned: 0,
+    orphanDbRecordsDeleted: 0,
+    localFilesDeleted: 0
+  }
 
-  let videosChecked = 0
-  let videosUpdated = 0
+  const queueCleanup = await clearVideoRepairQueuesForSystemReset()
+  result.queueJobsDrained += queueCleanup.drained
+  result.queueJobsCleaned += queueCleanup.cleaned
 
   for (const id of ids) {
-    const video = await VideoModel.loadFull(id)
-    if (!video || video.isLive) continue
+    const video = await VideoModel.loadWithFiles(id)
+    if (!video) continue
 
-    // If jobType filter is specified, only process videos with that job type
-    if (jobType && jobType !== 'all') {
-      if (jobType === 'transcoding' && video.state !== VideoState.TO_TRANSCODE && video.state !== VideoState.TRANSCODING_FAILED) {
-        continue
-      }
-      if (jobType === 'move-to-object-storage' && video.state !== VideoState.TO_MOVE_TO_EXTERNAL_STORAGE &&
-          video.state !== VideoState.TO_MOVE_TO_EXTERNAL_STORAGE_FAILED && video.state !== VideoState.TO_MOVE_TO_FILE_SYSTEM &&
-          video.state !== VideoState.TO_MOVE_TO_FILE_SYSTEM_FAILED) {
-        continue
-      }
-    }
-
-    videosChecked++
+    existingVideoUUIDs.add(video.uuid)
+    if (video.isLive) continue
 
     const info = await VideoJobInfoModel.load(video.id)
+    const videoImport = await VideoImportModel.unscoped().findOne({ where: { videoId: video.id } })
+    const jobRefs = getVideoRepairJobRefs(jobIndex, video.uuid, video.id, videoImport?.id)
+    const hasStaleCounters = !!info && (info.pendingMove > 0 || info.pendingTranscode > 0 || info.pendingTranscription > 0)
 
-    // === TRANSCODING SYNC ===
-    // If pendingTranscode > 0 but no jobs in queue, decrement counter
-    if (info?.pendingTranscode > 0) {
-      const hasActiveTranscodingJob = videoUUIDsWithPendingJobs.has(video.uuid)
-      if (!hasActiveTranscodingJob) {
-        // No active job, but counter is positive - clear the stale counter
-        await VideoJobInfoModel.decrease(video.uuid, 'pendingTranscode', info.pendingTranscode)
-        logger.info(
-          `Fixed pendingTranscode counter for video ${video.uuid}, was ${info.pendingTranscode}, now 0`
-        )
-        videosUpdated++
-      }
+    result.videosChecked++
+
+    const mediaIntegrity = await getVideoMediaIntegrity(video)
+    const shouldDeleteVideo = shouldDeleteVideoDuringSystemReset({ video, videoImport, mediaIntegrity })
+
+    if (shouldDeleteVideo) await Redis.Instance.setVideoDeletionFlag(video.uuid)
+
+    const cleanupResult = await removeVideoRepairJobs(jobRefs)
+    for (const ref of jobRefs) processedJobKeys.add(getVideoRepairJobKey(ref))
+    result.jobsRemoved += cleanupResult.removed
+    result.jobsRemoveFailed += cleanupResult.failed
+
+    const resetCounters = await resetVideoJobInfoCounters(video.uuid, info)
+    result.countersReset += resetCounters
+
+    if (shouldDeleteVideo) {
+      await markVideoImportAsFailedIfNeeded(videoImport, shouldDeleteVideo.reason)
+      await video.destroy()
+
+      logger.warn(
+        '[SYSTEM_RESETTER] Deleted corrupted/incomplete video %s: %s',
+        video.uuid,
+        shouldDeleteVideo.reason,
+        {
+          missingRequiredFiles: mediaIntegrity.missingRequiredFiles,
+          failedJobRemovals: cleanupResult.failed
+        }
+      )
+
+      result.videosDeleted++
+      result.videosUpdated++
+      existingVideoIds.delete(video.id)
+      existingVideoUUIDs.delete(video.uuid)
+      continue
     }
 
-    // If video state is TRANSCODING_FAILED but has no pending jobs, reset to TO_TRANSCODE
-    if (video.state === VideoState.TRANSCODING_FAILED) {
-      const hasActiveTranscodingJob = videoUUIDsWithPendingJobs.has(video.uuid)
-      const infoAfterDecrease = await VideoJobInfoModel.load(video.id)
-      if (!hasActiveTranscodingJob && (!infoAfterDecrease || infoAfterDecrease.pendingTranscode === 0)) {
-        video.state = VideoState.TO_TRANSCODE
-        await video.save()
-        logger.info(`Reset video ${video.uuid} from TRANSCODING_FAILED to TO_TRANSCODE`)
-        videosUpdated++
+    const metadataRepairs = await repairMissingMediaMetadataIfNeeded(mediaIntegrity)
+    const importRepaired = await repairImportStateIfNeeded(video, videoImport)
+    const transcodingRepaired = await repairTranscodingStateIfNeeded(video)
+    const moveRepaired = await repairObjectStorageMoveStateIfNeeded(video)
+
+    if (
+      hasStaleCounters ||
+      jobRefs.length !== 0 ||
+      cleanupResult.removed !== 0 ||
+      cleanupResult.failed !== 0 ||
+      metadataRepairs !== 0 ||
+      importRepaired ||
+      transcodingRepaired ||
+      moveRepaired
+    ) {
+      logger.info('[SYSTEM_RESETTER] Reset stale jobs/counters for video %s.', video.uuid, {
+        removedJobs: cleanupResult.removed,
+        failedJobRemovals: cleanupResult.failed,
+        resetCounters,
+        metadataRepairs,
+        importRepaired,
+        transcodingRepaired,
+        moveRepaired
+      })
+      result.videosUpdated++
+    }
+  }
+
+  const orphanCleanupResult = await removeOrphanedVideoRepairJobs({
+    jobIndex,
+    existingVideoIds,
+    existingVideoUUIDs,
+    processedJobKeys
+  })
+
+  result.jobsRemoved += orphanCleanupResult.removed
+  result.jobsRemoveFailed += orphanCleanupResult.failed
+
+  const dbCleanupResult = await cleanupOrphanSystemResetDbRecords()
+  result.orphanDbRecordsDeleted += dbCleanupResult.deleted
+
+  const localFilesCleanup = await cleanupOrphanLocalVideoFiles(ids)
+  result.localFilesDeleted += localFilesCleanup.deleted
+
+  logger.info('[SYSTEM_RESETTER] Video system reset completed.', result)
+
+  return result
+}
+
+async function pauseVideoRepairQueuesForSystemReset (): Promise<SystemResetPausedQueue[]> {
+  const queues = JobQueue.Instance.getQueues()
+  const pausedQueues: SystemResetPausedQueue[] = []
+
+  for (const jobType of VIDEO_REPAIR_JOB_TYPES) {
+    const queue = queues[jobType]
+    if (!queue) continue
+
+    try {
+      const wasPaused = await queue.isPaused()
+      pausedQueues.push({ jobType, wasPaused })
+
+      if (!wasPaused) {
+        await queue.pause()
       }
+    } catch (err) {
+      logger.warn('[SYSTEM_RESETTER] Cannot pause %s queue before reset.', jobType, { err })
+    }
+  }
+
+  await JobQueue.Instance.pause({ doNotWaitActive: true, jobTypes: VIDEO_REPAIR_JOB_TYPES })
+
+  logger.info('[SYSTEM_RESETTER] Paused %d video pipeline queue(s) before reset.', pausedQueues.filter(q => !q.wasPaused).length)
+
+  return pausedQueues
+}
+
+
+async function clearVideoRepairQueuesForSystemReset (): Promise<VideoQueueCleanupResult> {
+  const queues = JobQueue.Instance.getQueues()
+  let drained = 0
+  let cleaned = 0
+
+  for (const jobType of VIDEO_REPAIR_JOB_TYPES) {
+    const queue = queues[jobType]
+    if (!queue) continue
+
+    try {
+      const countsBefore = await queue.getJobCounts('waiting', 'wait', 'delayed', 'prioritized', 'waiting-children')
+      const drainCandidates = Object.values(countsBefore).reduce((acc, value) => acc + (value || 0), 0)
+      await queue.drain(true)
+      drained += drainCandidates
+    } catch (err) {
+      logger.warn('[SYSTEM_RESETTER] Cannot drain %s queue before cleanup.', jobType, { err })
     }
 
-    // === MOVE TO STORAGE SYNC ===
-    const hasResourcesToMoveToObjectStorage = await hasVideoResourcesToBeMoved(video, FileStorage.OBJECT_STORAGE)
-    const hasResourcesToMoveToFileSystem = await hasVideoResourcesToBeMoved(video, FileStorage.FILE_SYSTEM)
-
-    if (info?.pendingMove > 0 && !hasResourcesToMoveToObjectStorage) {
-      // All resources moved to object storage, but counter still positive - clear the stale counter
-      await VideoJobInfoModel.decrease(video.uuid, 'pendingMove', info.pendingMove)
-      logger.info(`Fixed pendingMove counter for video ${video.uuid}, resources now on object storage`)
-      videosUpdated++
-    }
-
-    if (hasResourcesToMoveToFileSystem && !hasResourcesToMoveToObjectStorage) {
-      // Fully moved to object storage - update state if still in pending state
-      if (video.state === VideoState.TO_MOVE_TO_EXTERNAL_STORAGE) {
-        // Move to next state (should be PUBLISHED)
-        await moveToNextState({ video, previousVideoState: video.state })
-        logger.info(`Video ${video.uuid} moved to next state after all files on object storage`)
-        videosUpdated++
-      }
-    } else if (hasResourcesToMoveToObjectStorage && !hasResourcesToMoveToFileSystem) {
-      // Fully on local storage - if in failed state, reset
-      if (video.state === VideoState.TO_MOVE_TO_EXTERNAL_STORAGE_FAILED) {
-        video.state = VideoState.TO_MOVE_TO_EXTERNAL_STORAGE
-        await video.save()
-        logger.info(`Reset video ${video.uuid} from TO_MOVE_TO_EXTERNAL_STORAGE_FAILED to TO_MOVE_TO_EXTERNAL_STORAGE`)
-        videosUpdated++
-      }
-    }
-
-    // === STORYBOARD SYNC ===
-    // Note: Storyboard doesn't have a counter in VideoJobInfoModel
-    // Storyboard status is tracked by whether a StoryboardModel record exists
-    // and doesn't block video state - no action needed here
-
-    // === TRANSCRIPTION SYNC ===
-    // If pendingTranscription > 0 but no jobs in queue, clear the stale counter so retained local files can be released.
-    if (info?.pendingTranscription > 0) {
-      const hasActiveTranscriptionJob = videoUUIDsWithPendingTranscriptionJobs.has(video.uuid)
-      if (!hasActiveTranscriptionJob) {
-        await VideoJobInfoModel.decrease(video.uuid, 'pendingTranscription', info.pendingTranscription)
-        logger.info(`Fixed pendingTranscription counter for video ${video.uuid}, was ${info.pendingTranscription}, now 0`)
-        videosUpdated++
+    for (const state of VIDEO_QUEUE_CLEAN_STATES) {
+      try {
+        const removedIds = await queue.clean(0, VIDEO_QUEUE_CLEAN_LIMIT, state)
+        cleaned += removedIds.length
+      } catch (err) {
+        logger.warn('[SYSTEM_RESETTER] Cannot clean %s jobs in state %s during system reset.', jobType, state, { err })
       }
     }
   }
 
-  logger.info(`Recheck videos status completed: checked ${videosChecked}, updated ${videosUpdated}`)
+  logger.info('[SYSTEM_RESETTER] Cleared queued video pipeline jobs before database/storage scrub.', { drained, cleaned })
 
-  return res.json({ videosChecked, videosUpdated })
+  return { drained, cleaned }
+}
+
+async function cleanupOrphanSystemResetDbRecords (): Promise<SystemResetDbCleanupResult> {
+  const [ runnerJobsCancelled ] = await RunnerJobModel.update(
+    {
+      state: RunnerJobState.CANCELLED,
+      processingJobToken: null,
+      progress: null,
+      runnerId: null,
+      finishedAt: new Date(),
+      error: 'Cleared by system resetter.'
+    },
+    {
+      where: {
+        type: VIDEO_PIPELINE_RUNNER_JOB_TYPES,
+        state: {
+          [Op.in]: [
+            RunnerJobState.PENDING,
+            RunnerJobState.PROCESSING,
+            RunnerJobState.WAITING_FOR_PARENT_JOB,
+            RunnerJobState.COMPLETING
+          ]
+        }
+      }
+    }
+  )
+
+  const [ orphanVideoImportsDeleted ] = await sequelizeTypescript.query(
+    'DELETE FROM "videoImport" ' +
+    'WHERE "videoId" IS NOT NULL ' +
+    'AND NOT EXISTS (SELECT 1 FROM "video" WHERE "video"."id" = "videoImport"."videoId")',
+    { raw: true }
+  )
+  const [ orphanVideoJobInfoDeleted ] = await sequelizeTypescript.query(
+    'DELETE FROM "videoJobInfo" WHERE NOT EXISTS (SELECT 1 FROM "video" WHERE "video"."id" = "videoJobInfo"."videoId") ' +
+    'OR (COALESCE("pendingMove", 0) = 0 AND COALESCE("pendingTranscode", 0) = 0 AND COALESCE("pendingTranscription", 0) = 0)',
+    { raw: true }
+  )
+
+  const deleted =
+    runnerJobsCancelled +
+    extractDeletedRowCount(orphanVideoImportsDeleted) +
+    extractDeletedRowCount(orphanVideoJobInfoDeleted)
+
+  logger.info('[SYSTEM_RESETTER] Deleted %d orphan/stale DB pipeline record(s).', deleted)
+
+  return { deleted }
+}
+
+async function cleanupOrphanLocalVideoFiles (localVideoIds: number[]): Promise<SystemResetLocalFilesResult> {
+  const referenced = await buildReferencedLocalFiles(localVideoIds)
+  let deleted = 0
+
+  for (const directory of LOCAL_VIDEO_STORAGE_DIRECTORIES) {
+    deleted += await cleanupUnreferencedFilesInDirectory(directory, referenced)
+  }
+
+  deleted += await cleanupUnreferencedHLSDirectories(referenced)
+
+  logger.info('[SYSTEM_RESETTER] Deleted %d orphan local video pipeline file(s).', deleted)
+
+  return { deleted }
+}
+
+async function buildReferencedLocalFiles (localVideoIds: number[]): Promise<ReferencedLocalFiles> {
+  const paths = new Set<string>()
+  const hlsDirectories = new Set<string>()
+
+  for (const id of localVideoIds) {
+    const video = await VideoModel.loadWithFiles(id)
+    if (!video || video.isLive) continue
+
+    for (const file of video.VideoFiles || []) {
+      if (file.filename) {
+        paths.add(normalizeSystemResetPath(VideoPathManager.Instance.getFSVideoFileOutputPath(video, file)))
+      }
+
+      if (file.torrentFilename) {
+        paths.add(normalizeSystemResetPath(getFSTorrentFilePath(file)))
+      }
+    }
+
+    for (const playlist of video.VideoStreamingPlaylists || []) {
+      const playlistDirectory = normalizeSystemResetPath(VideoPathManager.Instance.getFSHLSOutputPath(video))
+      hlsDirectories.add(playlistDirectory)
+
+      if (playlist.playlistFilename) {
+        paths.add(normalizeSystemResetPath(VideoPathManager.Instance.getFSHLSOutputPath(video, playlist.playlistFilename)))
+      }
+
+      if (playlist.segmentsSha256Filename) {
+        paths.add(normalizeSystemResetPath(VideoPathManager.Instance.getFSHLSOutputPath(video, playlist.segmentsSha256Filename)))
+      }
+
+      for (const file of playlist.VideoFiles || []) {
+        if (file.filename) {
+          paths.add(normalizeSystemResetPath(VideoPathManager.Instance.getFSHLSOutputPath(video, file.filename)))
+          paths.add(normalizeSystemResetPath(
+            VideoPathManager.Instance.getFSHLSOutputPath(video, getHLSResolutionPlaylistFilename(file.filename))
+          ))
+        }
+
+        if (file.torrentFilename) {
+          paths.add(normalizeSystemResetPath(getFSTorrentFilePath(file)))
+        }
+      }
+    }
+
+    const videoSources = await VideoSourceModel.listAll(video.id)
+    for (const source of videoSources) {
+      if (!source.keptOriginalFilename) continue
+      paths.add(normalizeSystemResetPath(VideoPathManager.Instance.getFSOriginalVideoFilePath(source.keptOriginalFilename)))
+    }
+
+    const captions = await VideoCaptionModel.listVideoCaptions(video.id)
+    for (const caption of captions) {
+      if (caption.filename) {
+        paths.add(normalizeSystemResetPath(caption.getFSFilePath()))
+      }
+
+      if (caption.m3u8Filename) {
+        paths.add(normalizeSystemResetPath(VideoPathManager.Instance.getFSHLSOutputPath(video, caption.m3u8Filename)))
+      }
+    }
+
+    for (const thumbnail of video.Thumbnails || []) {
+      if (!thumbnail.isLocal() || thumbnail.cached) continue
+      paths.add(normalizeSystemResetPath(thumbnail.getFSPath()))
+    }
+
+    const storyboard = await StoryboardModel.loadByVideo(video.id)
+    if (storyboard?.isLocal()) {
+      paths.add(normalizeSystemResetPath(storyboard.getFSPath()))
+    }
+  }
+
+  return { paths, hlsDirectories }
+}
+
+async function cleanupUnreferencedFilesInDirectory (directory: string, referenced: ReferencedLocalFiles): Promise<number> {
+  if (!await pathExists(directory)) return 0
+
+  let deleted = 0
+
+  for (const filePath of await listFilesRecursively(directory)) {
+    const normalizedPath = normalizeSystemResetPath(filePath)
+
+    if (referenced.paths.has(normalizedPath)) continue
+    if (referenced.hlsDirectories.has(normalizedPath)) continue
+
+    try {
+      await remove(filePath)
+      deleted++
+    } catch (err) {
+      logger.warn('[SYSTEM_RESETTER] Cannot remove orphan local file %s.', filePath, { err })
+    }
+  }
+
+  return deleted
+}
+
+async function cleanupUnreferencedHLSDirectories (referenced: ReferencedLocalFiles): Promise<number> {
+  let deleted = 0
+
+  for (const directory of [ DIRECTORIES.HLS_STREAMING_PLAYLIST.PUBLIC, DIRECTORIES.HLS_STREAMING_PLAYLIST.PRIVATE ]) {
+    if (!await pathExists(directory)) continue
+
+    const entries = await readdir(directory, { withFileTypes: true })
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue
+
+      const entryPath = normalizeSystemResetPath(joinSystemResetPath(directory, entry.name))
+      if (referenced.hlsDirectories.has(entryPath)) continue
+
+      try {
+        await remove(entryPath)
+        deleted++
+      } catch (err) {
+        logger.warn('[SYSTEM_RESETTER] Cannot remove orphan HLS directory %s.', entryPath, { err })
+      }
+    }
+  }
+
+  return deleted
+}
+
+async function listFilesRecursively (directory: string): Promise<string[]> {
+  const result: string[] = []
+  const entries = await readdir(directory, { withFileTypes: true })
+
+  for (const entry of entries) {
+    const entryPath = joinSystemResetPath(directory, entry.name)
+
+    if (entry.isDirectory()) {
+      result.push(...await listFilesRecursively(entryPath))
+      continue
+    }
+
+    if (entry.isFile()) result.push(entryPath)
+  }
+
+  return result
+}
+
+function normalizeSystemResetPath (path: string) {
+  return path.replace(/\\/g, '/').toLowerCase()
+}
+
+function extractDeletedRowCount (value: unknown) {
+  if (typeof value === 'number') return value
+  if (typeof value === 'bigint') return Number(value)
+  if (value && typeof value === 'object') {
+    const obj = value as Record<string, unknown>
+    for (const key of [ 'rowCount', 'affectedRows', 'count' ]) {
+      const current = obj[key]
+      if (typeof current === 'number') return current
+      if (typeof current === 'bigint') return Number(current)
+    }
+  }
+
+  return 0
+}
+
+function joinSystemResetPath (...parts: string[]) {
+  return parts.join('/').replace(/\\/g, '/')
+}
+
+async function buildVideoRepairJobIndex (): Promise<VideoRepairJobIndex> {
+  const index: VideoRepairJobIndex = {
+    byVideoUUID: new Map(),
+    byVideoId: new Map(),
+    byVideoImportId: new Map()
+  }
+  const queues = JobQueue.Instance.getQueues()
+
+  for (const jobType of VIDEO_REPAIR_JOB_TYPES) {
+    const queue = queues[jobType]
+    if (!queue) continue
+
+    for (const state of VIDEO_REPAIR_JOB_STATES) {
+      let jobs: BullJob[]
+
+      try {
+        jobs = await queue.getJobs([ state ], 0, 10000, true)
+      } catch (err) {
+        logger.warn('[SYSTEM_RESETTER] Cannot list %s jobs in state %s.', jobType, state, { err })
+        continue
+      }
+
+      for (const job of jobs) {
+        const ref = { job, state, jobType }
+        const data = job.data as {
+          videoUUID?: unknown
+          videoId?: unknown
+          videoImportId?: unknown
+        }
+
+        const videoUUID = typeof data?.videoUUID === 'string'
+          ? data.videoUUID
+          : undefined
+        const videoId = toPositiveInteger(data?.videoId)
+        const videoImportId = toPositiveInteger(data?.videoImportId)
+
+        if (videoUUID) pushMapValue(index.byVideoUUID, videoUUID, ref)
+        if (videoId) pushMapValue(index.byVideoId, videoId, ref)
+        if (videoImportId) pushMapValue(index.byVideoImportId, videoImportId, ref)
+      }
+    }
+  }
+
+  return index
+}
+
+function getVideoRepairJobRefs (
+  index: VideoRepairJobIndex,
+  videoUUID: string,
+  videoId: number,
+  videoImportId?: number
+) {
+  const refs = [
+    ...(index.byVideoUUID.get(videoUUID) || []),
+    ...(index.byVideoId.get(videoId) || []),
+    ...(videoImportId ? index.byVideoImportId.get(videoImportId) || [] : [])
+  ]
+
+  return dedupeVideoRepairJobRefs(refs)
+}
+
+async function getVideoMediaIntegrity (video: MVideoWithAllFiles): Promise<VideoMediaIntegrity> {
+  const missingRequiredFiles: string[] = []
+  const missingRepairableFiles: string[] = []
+  const missingOriginalSourceIds: number[] = []
+  const missingShaPlaylistIds: number[] = []
+  const webFiles = video.VideoFiles || []
+  const playlists = video.VideoStreamingPlaylists || []
+  const hlsFiles = playlists.flatMap(playlist => playlist.VideoFiles || [])
+  const sources = await VideoSourceModel.listAll(video.id)
+  const sourceFiles = sources.filter(source => !!source.keptOriginalFilename)
+
+  let hasFileSystemMediaRecords = false
+  let hasObjectStorageMediaRecords = false
+
+  for (const file of webFiles) {
+    if (file.storage === FileStorage.FILE_SYSTEM) {
+      hasFileSystemMediaRecords = true
+      await addMissingFileIfNeeded({
+        missingRequiredFiles,
+        label: `web video file ${file.id}`,
+        path: VideoPathManager.Instance.getFSVideoFileOutputPath(video, file)
+      })
+    } else if (file.storage === FileStorage.OBJECT_STORAGE) {
+      hasObjectStorageMediaRecords = true
+    }
+  }
+
+  for (const playlist of playlists) {
+    if (playlist.storage === FileStorage.FILE_SYSTEM) {
+      hasFileSystemMediaRecords = true
+
+      await addMissingFileIfNeeded({
+        missingRequiredFiles,
+        label: `HLS master playlist ${playlist.id}`,
+        path: VideoPathManager.Instance.getFSHLSOutputPath(video, playlist.playlistFilename)
+      })
+
+      if (playlist.segmentsSha256Filename) {
+        await addMissingFileIfNeeded({
+          missingRequiredFiles: missingRepairableFiles,
+          label: `HLS SHA playlist ${playlist.id}`,
+          path: VideoPathManager.Instance.getFSHLSOutputPath(video, playlist.segmentsSha256Filename),
+          onMissing: () => missingShaPlaylistIds.push(playlist.id)
+        })
+      }
+    } else if (playlist.storage === FileStorage.OBJECT_STORAGE) {
+      hasObjectStorageMediaRecords = true
+    }
+
+    for (const file of playlist.VideoFiles || []) {
+      if (file.storage === FileStorage.FILE_SYSTEM) {
+        hasFileSystemMediaRecords = true
+
+        await addMissingFileIfNeeded({
+          missingRequiredFiles,
+          label: `HLS media file ${file.id}`,
+          path: VideoPathManager.Instance.getFSHLSOutputPath(video, file.filename)
+        })
+        await addMissingFileIfNeeded({
+          missingRequiredFiles,
+          label: `HLS resolution playlist ${file.id}`,
+          path: VideoPathManager.Instance.getFSHLSOutputPath(video, getHLSResolutionPlaylistFilename(file.filename))
+        })
+      } else if (file.storage === FileStorage.OBJECT_STORAGE) {
+        hasObjectStorageMediaRecords = true
+      }
+    }
+  }
+
+  for (const source of sourceFiles) {
+    if (source.storage === FileStorage.FILE_SYSTEM) {
+      hasFileSystemMediaRecords = true
+
+      await addMissingFileIfNeeded({
+        missingRequiredFiles: missingRepairableFiles,
+        label: `original video source ${source.id}`,
+        path: VideoPathManager.Instance.getFSOriginalVideoFilePath(source.keptOriginalFilename),
+        onMissing: () => missingOriginalSourceIds.push(source.id)
+      })
+    } else if (source.storage === FileStorage.OBJECT_STORAGE) {
+      hasObjectStorageMediaRecords = true
+    }
+  }
+
+  return {
+    hasMediaRecords: webFiles.length !== 0 || hlsFiles.length !== 0 || sourceFiles.length !== 0,
+    hasPlayableMediaRecords: webFiles.length !== 0 || hlsFiles.length !== 0,
+    hasFileSystemMediaRecords,
+    hasObjectStorageMediaRecords,
+    missingRequiredFiles,
+    missingRepairableFiles,
+    missingOriginalSourceIds,
+    missingShaPlaylistIds
+  }
+}
+
+function shouldDeleteVideoDuringSystemReset (options: {
+  video: MVideoWithAllFiles
+  videoImport: VideoImportModel
+  mediaIntegrity: VideoMediaIntegrity
+}) {
+  const { video, videoImport, mediaIntegrity } = options
+
+  if (mediaIntegrity.missingRequiredFiles.length !== 0) {
+    return {
+      reason: `missing required local media file(s): ${mediaIntegrity.missingRequiredFiles.slice(0, 5).join(', ')}`
+    }
+  }
+
+  if (!mediaIntegrity.hasPlayableMediaRecords && !canRetryVideoImport(video, videoImport)) {
+    return { reason: 'video has no playable media records and cannot be retried as an import' }
+  }
+
+  if (!mediaIntegrity.hasMediaRecords && (FAILED_VIDEO_STATES.has(video.state) || INCOMPLETE_VIDEO_STATES.has(video.state))) {
+    return { reason: `video is in state ${video.state} without media records` }
+  }
+
+  return undefined
+}
+
+async function removeVideoRepairJobs (jobRefs: VideoRepairJobRef[]) {
+  let removed = 0
+  let failed = 0
+
+  for (const ref of dedupeVideoRepairJobRefs(jobRefs)) {
+    try {
+      await ref.job.remove()
+      removed++
+    } catch (err) {
+      failed++
+      logger.warn('[SYSTEM_RESETTER] Cannot remove %s job %s in state %s.', ref.jobType, ref.job.id, ref.state, { err })
+    }
+  }
+
+  return { removed, failed }
+}
+
+async function resetVideoJobInfoCounters (videoUUID: string, info: VideoJobInfoModel) {
+  if (!info) return 0
+
+  let reset = 0
+
+  if (info.pendingMove > 0) {
+    await VideoJobInfoModel.decrease(videoUUID, 'pendingMove', info.pendingMove)
+    reset += info.pendingMove
+  }
+
+  if (info.pendingTranscode > 0) {
+    await VideoJobInfoModel.decrease(videoUUID, 'pendingTranscode', info.pendingTranscode)
+    reset += info.pendingTranscode
+  }
+
+  if (info.pendingTranscription > 0) {
+    await VideoJobInfoModel.decrease(videoUUID, 'pendingTranscription', info.pendingTranscription)
+    reset += info.pendingTranscription
+  }
+
+  return reset
+}
+
+async function markVideoImportAsFailedIfNeeded (videoImport: VideoImportModel, reason: string) {
+  if (!videoImport) return
+  if (videoImport.state === VideoImportState.FAILED && videoImport.error === reason) return
+
+  videoImport.state = VideoImportState.FAILED
+  videoImport.error = reason
+  videoImport.progress = null
+  await videoImport.save()
+}
+
+async function repairMissingMediaMetadataIfNeeded (mediaIntegrity: VideoMediaIntegrity) {
+  let repaired = 0
+
+  for (const sourceId of mediaIntegrity.missingOriginalSourceIds) {
+    const source = await VideoSourceModel.findByPk(sourceId)
+    if (!source?.keptOriginalFilename) continue
+
+    source.keptOriginalFilename = null
+    source.storage = null
+    await source.save()
+    repaired++
+  }
+
+  for (const playlistId of mediaIntegrity.missingShaPlaylistIds) {
+    const playlist = await VideoStreamingPlaylistModel.findByPk(playlistId)
+    if (!playlist?.segmentsSha256Filename) continue
+
+    playlist.segmentsSha256Filename = null
+    playlist.segmentsSha256Url = null
+    await playlist.save()
+    repaired++
+  }
+
+  if (repaired !== 0) {
+    logger.info('[SYSTEM_RESETTER] Repaired %d missing optional media metadata record(s).', repaired, {
+      missingRepairableFiles: mediaIntegrity.missingRepairableFiles
+    })
+  }
+
+  return repaired
+}
+
+async function repairImportStateIfNeeded (
+  video: MVideoWithAllFiles,
+  videoImport: VideoImportModel
+) {
+  if (!videoImport) return false
+  if (!isImportRepairCandidate(video)) return false
+
+  const reason = !canRetryVideoImport(video, videoImport)
+    ? (videoImport.attempts >= CONFIG.IMPORT.VIDEOS.MAX_ATTEMPTS
+        ? 'video import reached the maximum number of attempts'
+        : 'video import is not retryable')
+    : 'Cleared by system resetter. Import will not resume automatically.'
+
+  await markVideoImportAsFailedIfNeeded(videoImport, reason)
+
+  if (video.state !== VideoState.TO_IMPORT_FAILED || video.waitTranscoding !== false) {
+    video.state = VideoState.TO_IMPORT_FAILED
+    video.waitTranscoding = false
+    await video.save()
+  }
+
+  videoImport.progress = null
+  videoImport.error = reason
+  await videoImport.save()
+
+  logger.info('[SYSTEM_RESETTER] Marked import as failed for video %s/import %d without requeueing.', video.uuid, videoImport.id, {
+    reason
+  })
+
+  return true
+}
+
+async function repairTranscodingStateIfNeeded (video: MVideoWithAllFiles) {
+  if (video.state !== VideoState.TO_TRANSCODE && video.state !== VideoState.TRANSCODING_FAILED) return false
+
+  const file = video.getMaxQualityFile(VideoFileStream.VIDEO) || video.getMaxQualityFile(VideoFileStream.AUDIO)
+  if (!file) return false
+
+  return publishVideoAfterStorageReset(video, 'system reset cleared stuck transcoding state')
+}
+
+async function repairObjectStorageMoveStateIfNeeded (video: MVideoWithAllFiles) {
+  if (video.state === VideoState.TO_MOVE_TO_EXTERNAL_STORAGE || video.state === VideoState.TO_MOVE_TO_EXTERNAL_STORAGE_FAILED) {
+    return repairMoveToObjectStorageStateIfNeeded(video)
+  }
+
+  if (video.state === VideoState.TO_MOVE_TO_FILE_SYSTEM || video.state === VideoState.TO_MOVE_TO_FILE_SYSTEM_FAILED) {
+    return repairMoveToFileSystemStateIfNeeded(video)
+  }
+
+  return false
+}
+
+async function repairMoveToObjectStorageStateIfNeeded (video: MVideoWithAllFiles) {
+  if (CONFIG.OBJECT_STORAGE.ENABLED !== true) {
+    return publishVideoAfterStorageReset(video, 'object storage is disabled')
+  }
+
+  const hasResourcesToMove = await hasVideoResourcesToBeMoved(video, FileStorage.OBJECT_STORAGE)
+
+  if (!hasResourcesToMove) {
+    return publishVideoAfterStorageReset(video, 'all resources are already out of local file storage')
+  }
+
+  return publishVideoAfterStorageReset(video, 'system reset cleared pending object-storage move state')
+}
+
+async function repairMoveToFileSystemStateIfNeeded (video: MVideoWithAllFiles) {
+  const hasResourcesToMove = await hasVideoResourcesToBeMoved(video, FileStorage.FILE_SYSTEM)
+
+  if (!hasResourcesToMove) {
+    return publishVideoAfterStorageReset(video, 'all resources are already on the file system')
+  }
+
+  return publishVideoAfterStorageReset(video, 'system reset cleared pending file-system move state')
+}
+
+async function publishVideoAfterStorageReset (video: MVideoWithAllFiles, reason: string) {
+  if (video.state === VideoState.PUBLISHED && video.waitTranscoding === false) return false
+
+  video.state = VideoState.PUBLISHED
+  video.waitTranscoding = false
+  await video.save()
+
+  logger.info('[SYSTEM_RESETTER] Published video %s after storage reset: %s.', video.uuid, reason)
+
+  return true
+}
+
+async function removeOrphanedVideoRepairJobs (options: {
+  jobIndex: VideoRepairJobIndex
+  existingVideoIds: Set<number>
+  existingVideoUUIDs: Set<string>
+  processedJobKeys: Set<string>
+}) {
+  const { jobIndex, existingVideoIds, existingVideoUUIDs, processedJobKeys } = options
+  const orphanRefs: VideoRepairJobRef[] = []
+
+  for (const [ videoUUID, refs ] of jobIndex.byVideoUUID) {
+    if (existingVideoUUIDs.has(videoUUID)) continue
+    orphanRefs.push(...refs)
+  }
+
+  for (const [ videoId, refs ] of jobIndex.byVideoId) {
+    if (existingVideoIds.has(videoId)) continue
+    orphanRefs.push(...refs)
+  }
+
+  const unprocessedOrphans = dedupeVideoRepairJobRefs(orphanRefs)
+    .filter(ref => !processedJobKeys.has(getVideoRepairJobKey(ref)))
+
+  if (unprocessedOrphans.length === 0) return { removed: 0, failed: 0 }
+
+  const result = await removeVideoRepairJobs(unprocessedOrphans)
+
+  logger.warn('[SYSTEM_RESETTER] Removed %d orphaned video job(s), failed to remove %d.', result.removed, result.failed)
+
+  return result
+}
+
+async function addMissingFileIfNeeded (options: {
+  missingRequiredFiles: string[]
+  label: string
+  path: string
+  onMissing?: () => void
+}) {
+  if (await pathExists(options.path)) return
+
+  options.missingRequiredFiles.push(`${options.label} (${options.path})`)
+  options.onMissing?.()
+}
+
+function canRetryVideoImport (video: MVideoWithAllFiles, videoImport: VideoImportModel) {
+  if (!videoImport) return false
+  if (video.state !== VideoState.TO_IMPORT && video.state !== VideoState.TO_IMPORT_FAILED) return false
+  if (videoImport.state === VideoImportState.CANCELLED || videoImport.state === VideoImportState.REJECTED) return false
+  if (videoImport.attempts >= CONFIG.IMPORT.VIDEOS.MAX_ATTEMPTS) return false
+
+  return !!videoImport.payload || !!videoImport.targetUrl || !!videoImport.magnetUri || !!videoImport.torrentName
+}
+
+function isImportRepairCandidate (video: MVideoWithAllFiles) {
+  return video.state === VideoState.TO_IMPORT || video.state === VideoState.TO_IMPORT_FAILED
+}
+
+function pushMapValue<K, V> (map: Map<K, V[]>, key: K, value: V) {
+  const values = map.get(key)
+  if (values) values.push(value)
+  else map.set(key, [ value ])
+}
+
+function toPositiveInteger (value: unknown) {
+  if (typeof value === 'number' && Number.isInteger(value) && value > 0) return value
+  if (typeof value !== 'string' || value.length === 0) return undefined
+
+  const parsed = Number(value)
+  return Number.isInteger(parsed) && parsed > 0
+    ? parsed
+    : undefined
+}
+
+function dedupeVideoRepairJobRefs (refs: VideoRepairJobRef[]) {
+  const seen = new Set<string>()
+  const result: VideoRepairJobRef[] = []
+
+  for (const ref of refs) {
+    const key = getVideoRepairJobKey(ref)
+    if (seen.has(key)) continue
+
+    seen.add(key)
+    result.push(ref)
+  }
+
+  return result
+}
+
+function getVideoRepairJobKey (ref: VideoRepairJobRef) {
+  return `${ref.jobType}:${ref.job.id}`
 }
 
 async function retryJob (req: express.Request, res: express.Response) {
@@ -636,8 +1528,8 @@ async function pauseJobQueue (req: express.Request, res: express.Response) {
   return res.sendStatus(HttpStatusCode.NO_CONTENT_204)
 }
 
-function resumeJobQueue (req: express.Request, res: express.Response) {
-  JobQueue.Instance.resume()
+async function resumeJobQueue (req: express.Request, res: express.Response) {
+  await JobQueue.Instance.resume()
 
   return res.sendStatus(HttpStatusCode.NO_CONTENT_204)
 }

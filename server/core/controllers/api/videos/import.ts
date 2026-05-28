@@ -26,6 +26,7 @@ import { getSecureTorrentName } from '../../../helpers/utils.js'
 import { CONFIG } from '../../../initializers/config.js'
 import { MIMETYPES } from '../../../initializers/constants.js'
 import { JobQueue } from '../../../lib/job-queue/job-queue.js'
+import { Redis } from '../../../lib/redis.js'
 import {
   asyncMiddleware,
   asyncRetryTransactionMiddleware,
@@ -101,6 +102,10 @@ async function cancelVideoImport (req: express.Request, res: express.Response) {
 async function retryVideoImport (req: express.Request, res: express.Response) {
   const videoImport = res.locals.videoImport
 
+  if (await Redis.Instance.isVideoPipelineSystemResetHoldSet()) {
+    await JobQueue.Instance.clearVideoPipelineSystemResetHoldAndResume()
+  }
+
   await JobQueue.Instance.createJob(await buildRetryImportJob(videoImport))
 
   return res.sendStatus(HttpStatusCode.NO_CONTENT_204)
@@ -169,6 +174,10 @@ async function handleTorrentImport (req: express.Request, res: express.Response,
   videoImport.payload = payload
   await videoImport.save()
 
+  if (await Redis.Instance.isVideoPipelineSystemResetHoldSet()) {
+    await JobQueue.Instance.clearVideoPipelineSystemResetHoldAndResume()
+  }
+
   await JobQueue.Instance.createJob({ type: 'video-import', payload })
 
   const videoImportFormatted = await videoImport.toFormattedJSON()
@@ -207,6 +216,11 @@ async function handleYoutubeDlImport (req: express.Request, res: express.Respons
       thumbnailFilePath: thumbnailfile?.path,
       user
     })
+
+    if (await Redis.Instance.isVideoPipelineSystemResetHoldSet()) {
+      await JobQueue.Instance.clearVideoPipelineSystemResetHoldAndResume()
+    }
+
     await JobQueue.Instance.createJob(job)
 
     const videoImportFormatted = await videoImport.toFormattedJSON()
