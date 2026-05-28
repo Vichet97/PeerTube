@@ -1,5 +1,5 @@
 import { CommonModule } from '@angular/common'
-import { Component, inject, OnInit, viewChild } from '@angular/core'
+import { Component, inject, OnDestroy, OnInit, viewChild } from '@angular/core'
 import { Notifier } from '@app/core'
 import { ActionDropdownComponent, DropdownAction } from '@app/shared/shared-main/buttons/action-dropdown.component'
 import { PTDatePipe } from '@app/shared/shared-main/common/date.pipe'
@@ -7,6 +7,8 @@ import { VideoImportService } from '@app/shared/shared-main/video/video-import.s
 import { Video } from '@app/shared/shared-main/video/video.model'
 import { ActorCellComponent } from '@app/shared/shared-tables/actor-cell.component'
 import { VideoImport, VideoImportState, VideoImportStateType } from '@peertube/peertube-models'
+import { interval, Subscription } from 'rxjs'
+import { tap } from 'rxjs/operators'
 import { AdvancedInputFilterComponent } from '../../shared/shared-forms/advanced-input-filter.component'
 import { NumberFormatterPipe } from '../../shared/shared-main/common/number-formatter.pipe'
 import { DataLoaderOptions, TableColumnInfo, TableComponent } from '../../shared/shared-tables/table.component'
@@ -25,13 +27,14 @@ import { DataLoaderOptions, TableColumnInfo, TableComponent } from '../../shared
     ActionDropdownComponent
   ]
 })
-export class MyVideoImportsComponent implements OnInit {
+export class MyVideoImportsComponent implements OnInit, OnDestroy {
   private notifier = inject(Notifier)
   private videoImportService = inject(VideoImportService)
 
   readonly table = viewChild<TableComponent<VideoImport>>('table')
 
   videoImportActions: DropdownAction<VideoImport>[] = []
+  private importsPollingSub?: Subscription
 
   columns: TableColumnInfo<string>[] = [
     { id: 'target', label: $localize`Target`, sortable: false },
@@ -79,6 +82,10 @@ export class MyVideoImportsComponent implements OnInit {
     ]
   }
 
+  ngOnDestroy () {
+    this.stopImportsPolling()
+  }
+
   getVideoImportStateClass (state: VideoImportStateType) {
     switch (state) {
       case VideoImportState.FAILED:
@@ -112,6 +119,20 @@ export class MyVideoImportsComponent implements OnInit {
 
   isVideoImportCancelled (videoImport: VideoImport) {
     return videoImport.state.id === VideoImportState.CANCELLED
+  }
+
+  isVideoImportRunning (videoImport: VideoImport) {
+    return videoImport.state.id === VideoImportState.PENDING || videoImport.state.id === VideoImportState.PROCESSING
+  }
+
+  shouldDisplayInlineProgress (videoImport: VideoImport) {
+    return this.isVideoImportRunning(videoImport) && videoImport.progress != null
+  }
+
+  getInlineProgressLabel (videoImport: VideoImport) {
+    if (videoImport.progress == null) return ''
+
+    return `${Math.round(videoImport.progress)}%`
   }
 
   getVideoUrl (video: { uuid: string }) {
@@ -177,5 +198,36 @@ export class MyVideoImportsComponent implements OnInit {
 
   private _dataLoader (options: DataLoaderOptions) {
     return this.videoImportService.listMyVideoImports({ ...options, includeCollaborations: true })
+      .pipe(
+        tap(result => this.syncImportsPolling(result.data))
+      )
+  }
+
+  private syncImportsPolling (imports: VideoImport[]) {
+    if (imports.some(videoImport => this.isVideoImportRunning(videoImport))) {
+      this.startImportsPolling()
+      return
+    }
+
+    this.stopImportsPolling()
+  }
+
+  private startImportsPolling () {
+    if (this.importsPollingSub) return
+
+    this.importsPollingSub = interval(2000)
+      .subscribe(() => {
+        const table = this.table()
+        if (!table || table.loading) return
+
+        table.loadData({ skipLoader: true }).catch(() => {
+          // noop, table notifier already handles the error
+        })
+      })
+  }
+
+  private stopImportsPolling () {
+    this.importsPollingSub?.unsubscribe()
+    this.importsPollingSub = undefined
   }
 }

@@ -1,11 +1,12 @@
 import { CommonModule } from '@angular/common'
-import { Component, LOCALE_ID, OnInit, inject, viewChild } from '@angular/core'
+import { Component, LOCALE_ID, OnDestroy, OnInit, inject, viewChild } from '@angular/core'
 import { Notifier, RestPagination } from '@app/core'
 import { GlobalIconComponent } from '@app/shared/shared-icons/global-icon.component'
 import { ButtonComponent } from '@app/shared/shared-main/buttons/button.component'
 import { Job, JobType } from '@peertube/peertube-models'
 import { SortMeta } from 'primeng/api'
-import { map } from 'rxjs/operators'
+import { interval, Subscription } from 'rxjs'
+import { map, tap } from 'rxjs/operators'
 import { VideoEdit } from '../common/video-edit.model'
 import { TableColumnInfo, TableComponent } from '../../../shared/shared-tables/table.component'
 import { VideoManageController } from '../video-manage-controller.service'
@@ -35,7 +36,7 @@ const PROGRESS_JOB_TYPES = new Set<JobType>([
     TableComponent
   ]
 })
-export class VideoRelatedJobsComponent implements OnInit {
+export class VideoRelatedJobsComponent implements OnInit, OnDestroy {
   private localeId = inject(LOCALE_ID)
   private notifier = inject(Notifier)
   private statsService = inject(VideoStatsService)
@@ -45,6 +46,7 @@ export class VideoRelatedJobsComponent implements OnInit {
 
   videoEdit: VideoEdit
   retryingJobKeys = new Set<string>()
+  private jobsPollingSub?: Subscription
 
   columns: TableColumnInfo<ColumnName>[] = [
     { id: 'id', class: 'job-id', label: $localize`ID`, sortable: false },
@@ -63,6 +65,10 @@ export class VideoRelatedJobsComponent implements OnInit {
 
   ngOnInit () {
     this.videoEdit = this.manageController.getStore().videoEdit
+  }
+
+  ngOnDestroy () {
+    this.stopJobsPolling()
   }
 
   getRandomJobTypeBadge (type: string) {
@@ -235,6 +241,7 @@ export class VideoRelatedJobsComponent implements OnInit {
 
     return this.statsService.getRelatedJobs(videoId)
       .pipe(
+        tap(result => this.syncJobsPolling(result.data)),
         map(result => {
           const sortedData = result.data.map(j => ({
             ...j,
@@ -255,5 +262,41 @@ export class VideoRelatedJobsComponent implements OnInit {
           }
         })
       )
+  }
+
+  private syncJobsPolling (jobs: Job[]) {
+    if (jobs.some(job => this.isJobStillRunning(job))) {
+      this.startJobsPolling()
+      return
+    }
+
+    this.stopJobsPolling()
+  }
+
+  private isJobStillRunning (job: Job) {
+    return job.state === 'active' ||
+      job.state === 'waiting' ||
+      job.state === 'delayed' ||
+      job.state === 'prioritized' ||
+      job.state === 'waiting-children'
+  }
+
+  private startJobsPolling () {
+    if (this.jobsPollingSub) return
+
+    this.jobsPollingSub = interval(2000)
+      .subscribe(() => {
+        const table = this.table()
+        if (!table || table.loading) return
+
+        table.loadData({ skipLoader: true }).catch(() => {
+          // noop, table notifier already handles the error
+        })
+      })
+  }
+
+  private stopJobsPolling () {
+    this.jobsPollingSub?.unsubscribe()
+    this.jobsPollingSub = undefined
   }
 }

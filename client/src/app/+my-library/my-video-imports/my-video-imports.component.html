@@ -46,6 +46,10 @@
       <span class="pt-badge" [ngClass]="getVideoImportStateClass(videoImport.state.id)">
         {{ videoImport.state.label }}
       </span>
+
+      @if (shouldDisplayInlineProgress(videoImport)) {
+        <div>{{ getInlineProgressLabel(videoImport) }}</div>
+      }
     </td>
 
     <td>{{ videoImport.createdAt | ptDate: 'short' }}</td>
