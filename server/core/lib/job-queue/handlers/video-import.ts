@@ -99,6 +99,11 @@ export {
 
 // ---------------------------------------------------------------------------
 
+type LocalVideoPipelineBacklogSnapshot = {
+  total: number
+  byType: Partial<Record<string, number>>
+}
+
 async function maybeDeferVideoImportForLocalPipeline (
   job: Job,
   videoImport: MVideoImportDefault,
@@ -116,19 +121,23 @@ async function maybeDeferVideoImportForLocalPipeline (
     transcodingConcurrency: CONFIG.TRANSCODING.CONCURRENCY,
     objectStorageConcurrency: CONFIG.OBJECT_STORAGE.CONCURRENCY
   })
+  const effectiveBacklogTotal = getVideoImportLocalPipelineBackpressureTotal(backlog)
 
-  if (!isVideoImportLocalPipelineBacklogged({ total: backlog.total, maxJobs })) return false
+  if (!isVideoImportLocalPipelineBacklogged({ total: effectiveBacklogTotal, maxJobs })) return false
 
   const customJobId = buildVideoImportBackpressureJobId(videoImport.id)
 
   logger.warn(
-    '[VIDEO_IMPORT] Deferring import %d from job %s for %d ms because local video pipeline backlog is %d/%d.',
+    '[VIDEO_IMPORT] Deferring import %d from job %s for %d ms because effective local video pipeline backlog is %d/%d.',
     videoImport.id,
     job.id,
     VIDEO_IMPORT_LOCAL_PIPELINE_BACKPRESSURE_DELAY_MS,
-    backlog.total,
+    effectiveBacklogTotal,
     maxJobs,
-    { backlogByType: backlog.byType }
+    {
+      backlogTotal: backlog.total,
+      backlogByType: backlog.byType
+    }
   )
 
   videoImport.state = VideoImportState.PENDING
@@ -170,6 +179,14 @@ export function buildVideoImportLocalPipelineBackpressureMaxJobs (options: {
   const objectStorageConcurrency = Math.max(1, options.objectStorageConcurrency || 1)
 
   return Math.max(10, transcodingConcurrency * 2 + objectStorageConcurrency)
+}
+
+export function getVideoImportLocalPipelineBackpressureTotal (backlog: LocalVideoPipelineBacklogSnapshot) {
+  // Caption object-storage moves can pile up long after the critical local video
+  // pipeline has drained. They should not block new imports from starting,
+  // otherwise imports get stuck in repeated 10-minute defer cycles even though
+  // the actual video download/transcode/move path has capacity.
+  return Math.max(0, backlog.total - (backlog.byType['move-caption-to-object-storage'] ?? 0))
 }
 
 export function isVideoImportLocalPipelineBacklogged (options: {
