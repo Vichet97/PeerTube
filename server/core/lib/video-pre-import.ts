@@ -14,7 +14,13 @@ import { isResolvingToUnicastOnly } from '@server/helpers/dns.js'
 import { guessLanguageFromReq, t } from '@server/helpers/i18n.js'
 import { logger } from '@server/helpers/logger.js'
 import { isMpdOrM3u8Url } from '@server/helpers/n-m3u8dl-re/index.js'
-import { customHeadersToYoutubeDLArgs, YoutubeDlImportError, YoutubeDlImportErrorCode, YoutubeDLInfo, YoutubeDLWrapper } from '@server/helpers/youtube-dl/index.js'
+import {
+  customHeadersToYoutubeDLArgs,
+  YoutubeDlImportError,
+  YoutubeDlImportErrorCode,
+  YoutubeDLInfo,
+  YoutubeDLWrapper
+} from '@server/helpers/youtube-dl/index.js'
 import { CONFIG } from '@server/initializers/config.js'
 import { sequelizeTypescript } from '@server/initializers/database.js'
 import { Hooks } from '@server/lib/plugins/hooks.js'
@@ -181,7 +187,8 @@ export async function buildYoutubeDLImport (options: {
     ? guessLanguageFromReq(req, res)
     : user.getLanguage()
 
-  const hasClearkeys = !!importDataOverride?.clearkeys
+  const normalizedClearkeys = normalizeClearkeysForImport(importDataOverride?.clearkeys)
+  const hasClearkeys = !!normalizedClearkeys
   const explicitDownloaderOverride = importDataOverride?.useNm3u8dlRe
   const preferredDownloader = CONFIG.IMPORT.VIDEOS.HTTP.PREFERRED_DOWNLOADER
   const useNm3u8dlRe = hasClearkeys
@@ -308,7 +315,7 @@ export async function buildYoutubeDLImport (options: {
     customHeaders: importDataOverride?.customHeaders,
     licenseServerUrl: importDataOverride?.licenseServerUrl,
     drmType: importDataOverride?.drmType,
-    clearkeys: importDataOverride?.clearkeys,
+    clearkeys: normalizedClearkeys,
     useNm3u8dlRe: useNm3u8dlRe || undefined,
     // If part of a sync process, there is a parent job that will aggregate children results
     preventException: !!channelSync
@@ -391,4 +398,58 @@ async function hasUnicastURLsOnly (youtubeDLInfo: YoutubeDLInfo) {
   }
 
   return true
+}
+
+function normalizeClearkeysForImport (clearkeys: unknown): string | undefined {
+  if (clearkeys === undefined || clearkeys === null || clearkeys === '') return undefined
+
+  let parsed: unknown
+
+  if (typeof clearkeys === 'string') {
+    try {
+      parsed = JSON.parse(clearkeys)
+    } catch {
+      logger.warn('[VIDEO_IMPORT] Ignoring invalid clearkeys string because it is not valid JSON.')
+      return undefined
+    }
+  } else {
+    parsed = clearkeys
+  }
+
+  if (isValidClearkeySet(parsed)) {
+    return JSON.stringify(parsed)
+  }
+
+  logger.warn('[VIDEO_IMPORT] Ignoring clearkeys payload because it does not contain actual kid/key pairs.', {
+    clearkeysPreview: buildClearkeysPreview(parsed)
+  })
+  return undefined
+}
+
+function isValidClearkeySet (value: unknown) {
+  if (!value || typeof value !== 'object') return false
+
+  if (Array.isArray(value)) {
+    return value.some(item => {
+      if (!item || typeof item !== 'object') return false
+
+      const record = item as Record<string, unknown>
+      return typeof record.kid === 'string' && record.kid.length > 0 &&
+        typeof record.k === 'string' && record.k.length > 0
+    })
+  }
+
+  const entries = Object.entries(value as Record<string, unknown>)
+  return entries.length > 0 && entries.every(([ kid, key ]) => {
+    return typeof kid === 'string' && kid.length > 0 &&
+      typeof key === 'string' && key.length > 0
+  })
+}
+
+function buildClearkeysPreview (value: unknown) {
+  try {
+    return JSON.stringify(value).slice(0, 500)
+  } catch {
+    return String(value).slice(0, 500)
+  }
 }

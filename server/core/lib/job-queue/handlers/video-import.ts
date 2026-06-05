@@ -102,6 +102,8 @@ export {
 type LocalVideoPipelineBacklogSnapshot = {
   total: number
   byType: Partial<Record<string, number>>
+  uniqueVideoUUIDTotal?: number
+  uniqueVideoUUIDsByType?: Partial<Record<string, number>>
 }
 
 async function maybeDeferVideoImportForLocalPipeline (
@@ -182,10 +184,17 @@ export function buildVideoImportLocalPipelineBackpressureMaxJobs (options: {
 }
 
 export function getVideoImportLocalPipelineBackpressureTotal (backlog: LocalVideoPipelineBacklogSnapshot) {
-  // Caption object-storage moves can pile up long after the critical local video
-  // pipeline has drained. They should not block new imports from starting,
-  // otherwise imports get stuck in repeated 10-minute defer cycles even though
-  // the actual video download/transcode/move path has capacity.
+  // Count distinct in-flight videos, not every granular child move job.
+  // A single video can fan out to many HLS/caption/object-storage jobs, and
+  // counting all of them makes the import backpressure gate trigger far too
+  // early, leaving new imports stuck in repeated delayed "To import" cycles.
+  //
+  // Caption-only moves are intentionally excluded in JobQueue because they do
+  // not consume the critical local web-video/transcoding pipeline capacity.
+  if (typeof backlog.uniqueVideoUUIDTotal === 'number') {
+    return backlog.uniqueVideoUUIDTotal
+  }
+
   return Math.max(0, backlog.total - (backlog.byType['move-caption-to-object-storage'] ?? 0))
 }
 

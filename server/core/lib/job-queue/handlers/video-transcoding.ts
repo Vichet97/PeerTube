@@ -271,7 +271,11 @@ async function waitForPreviousHLSMoveJobs (videoUUID: string) {
   const pollEveryMs = 2000
   let lastLogAt = 0
 
-  while (await JobQueue.Instance.hasPendingOrActiveHLSPlaylistMoveJob({ videoUUID, excludeCleanupJobs: true })) {
+  while (await JobQueue.Instance.hasPendingOrActiveHLSPlaylistMoveJob({
+    videoUUID,
+    excludeCleanupJobs: true,
+    activeOnly: true
+  })) {
     const elapsed = Date.now() - startedAt
     if (elapsed >= maxWaitMs) {
       throw new Error(`Timed out after ${elapsed}ms waiting for previous HLS move jobs of video ${videoUUID}`)

@@ -657,17 +657,21 @@ class JobQueue {
   async hasPendingOrActiveHLSPlaylistMoveJob (options: {
     videoUUID: string
     excludeCleanupJobs?: boolean
+    activeOnly?: boolean
   }): Promise<boolean> {
     const queue = this.queues['move-hls-playlist-to-object-storage']
     if (!queue) return false
 
-    const states: ('waiting' | 'delayed' | 'prioritized' | 'waiting-children' | 'active')[] = [
-      'waiting',
-      'delayed',
-      'prioritized',
-      'waiting-children',
-      'active'
-    ]
+    const { activeOnly = false } = options
+    const states: ('waiting' | 'delayed' | 'prioritized' | 'waiting-children' | 'active')[] = activeOnly
+      ? [ 'active' ]
+      : [
+          'waiting',
+          'delayed',
+          'prioritized',
+          'waiting-children',
+          'active'
+        ]
     const jobs = await queue.getJobs(states, 0, 1000, true)
 
     const { videoUUID, excludeCleanupJobs = false } = options
@@ -714,6 +718,8 @@ class JobQueue {
     ]
     const states: JobState[] = [ 'waiting', 'delayed', 'prioritized', 'waiting-children', 'active' ]
     const byType: Partial<Record<JobType, number>> = {}
+    const uniqueVideoUUIDsByType: Partial<Record<JobType, number>> = {}
+    const uniqueVideoUUIDs = new Set<string>()
     let total = 0
 
     for (const jobType of localPipelineJobTypes) {
@@ -725,9 +731,29 @@ class JobQueue {
 
       if (count !== 0) byType[jobType] = count
       total += count
+
+      if (jobType === 'move-caption-to-object-storage') continue
+
+      const jobs = await queue.getJobs(states as Parameters<Queue['getJobs']>[0], 0, 10000, true)
+      const uuidsForType = new Set<string>()
+
+      for (const job of jobs) {
+        const videoUUID = (job.data as { videoUUID?: string })?.videoUUID
+        if (!videoUUID) continue
+
+        uuidsForType.add(videoUUID)
+        uniqueVideoUUIDs.add(videoUUID)
+      }
+
+      if (uuidsForType.size !== 0) uniqueVideoUUIDsByType[jobType] = uuidsForType.size
     }
 
-    return { total, byType }
+    return {
+      total,
+      byType,
+      uniqueVideoUUIDTotal: uniqueVideoUUIDs.size,
+      uniqueVideoUUIDsByType
+    }
   }
 
   async getExistingMoveJob (jobType: JobType, videoUUID: string, options?: {
