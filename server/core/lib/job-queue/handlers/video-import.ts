@@ -51,6 +51,7 @@ import { createLocalVideoThumbnailsFromVideo } from '../../thumbnail.js'
 import { UserModel } from '@server/models/user/user.js'
 
 const VIDEO_IMPORT_LOCAL_PIPELINE_BACKPRESSURE_DELAY_MS = 10 * 60 * 1000
+const VIDEO_IMPORT_LOCAL_PIPELINE_BACKPRESSURE_MIN_DELAY_MS = 2 * 60 * 1000
 
 async function processVideoImport (job: Job): Promise<VideoImportPreventExceptionResult> {
   const payload = job.data as VideoImportPayload
@@ -127,13 +128,17 @@ async function maybeDeferVideoImportForLocalPipeline (
 
   if (!isVideoImportLocalPipelineBacklogged({ total: effectiveBacklogTotal, maxJobs })) return false
 
+  const delayMs = buildVideoImportLocalPipelineBackpressureDelayMs({
+    total: effectiveBacklogTotal,
+    maxJobs
+  })
   const customJobId = buildVideoImportBackpressureJobId(videoImport.id)
 
   logger.warn(
     '[VIDEO_IMPORT] Deferring import %d from job %s for %d ms because effective local video pipeline backlog is %d/%d.',
     videoImport.id,
     job.id,
-    VIDEO_IMPORT_LOCAL_PIPELINE_BACKPRESSURE_DELAY_MS,
+    delayMs,
     effectiveBacklogTotal,
     maxJobs,
     {
@@ -150,7 +155,7 @@ async function maybeDeferVideoImportForLocalPipeline (
     const delayedJob = await JobQueue.Instance.createJob({
       type: 'video-import',
       payload,
-      delay: VIDEO_IMPORT_LOCAL_PIPELINE_BACKPRESSURE_DELAY_MS,
+      delay: delayMs,
       customJobId
     })
 
@@ -186,6 +191,26 @@ export function buildVideoImportLocalPipelineBackpressureMaxJobs (options: {
   // tend to bounce into repeated 10-minute deferrals when the pipeline is busy
   // but still healthy.
   return Math.max(10, transcodingConcurrency * 2 + objectStorageConcurrency + moveDrainHeadroom)
+}
+
+export function buildVideoImportLocalPipelineBackpressureDelayMs (options: {
+  total: number
+  maxJobs: number
+}) {
+  const { total, maxJobs } = options
+
+  if (maxJobs <= 0) return VIDEO_IMPORT_LOCAL_PIPELINE_BACKPRESSURE_MIN_DELAY_MS
+
+  const overload = Math.max(0, total - maxJobs)
+  if (overload === 0) return VIDEO_IMPORT_LOCAL_PIPELINE_BACKPRESSURE_MIN_DELAY_MS
+
+  const saturationWindow = Math.max(5, Math.ceil(maxJobs / 2))
+  const ratio = Math.min(1, overload / saturationWindow)
+
+  return Math.round(
+    VIDEO_IMPORT_LOCAL_PIPELINE_BACKPRESSURE_MIN_DELAY_MS +
+    ratio * (VIDEO_IMPORT_LOCAL_PIPELINE_BACKPRESSURE_DELAY_MS - VIDEO_IMPORT_LOCAL_PIPELINE_BACKPRESSURE_MIN_DELAY_MS)
+  )
 }
 
 export function getVideoImportLocalPipelineBackpressureTotal (backlog: LocalVideoPipelineBacklogSnapshot) {

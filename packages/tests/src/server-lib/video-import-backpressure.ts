@@ -26,6 +26,29 @@ describe('video-import local pipeline backpressure', function () {
     expect(isVideoImportLocalPipelineBacklogged({ total: 26, maxJobs: 25 })).to.be.true
   })
 
+  it('should retry sooner when the backlog only slightly exceeds the threshold', function () {
+    const buildVideoImportLocalPipelineBackpressureDelayMs =
+      (videoImportBackpressure as any).buildVideoImportLocalPipelineBackpressureDelayMs as (options: {
+        total: number
+        maxJobs: number
+      }) => number
+
+    expect(buildVideoImportLocalPipelineBackpressureDelayMs({
+      total: 25,
+      maxJobs: 25
+    })).to.equal(120000)
+
+    expect(buildVideoImportLocalPipelineBackpressureDelayMs({
+      total: 26,
+      maxJobs: 25
+    })).to.be.lessThan(10 * 60 * 1000)
+
+    expect(buildVideoImportLocalPipelineBackpressureDelayMs({
+      total: 40,
+      maxJobs: 25
+    })).to.equal(10 * 60 * 1000)
+  })
+
   it('should ignore caption-only backlog when deciding whether to defer new imports', function () {
     const getVideoImportLocalPipelineBackpressureTotal =
       (videoImportBackpressure as any).getVideoImportLocalPipelineBackpressureTotal as (backlog: {
