@@ -17,6 +17,7 @@ import { copyFile } from 'fs/promises'
 import { basename, join } from 'path'
 import { CONFIG } from '../../initializers/config.js'
 import { VideoFileModel } from '../../models/video/video-file.js'
+import { VideoSourceModel } from '../../models/video/video-source.js'
 import { generateWebVideoFilename } from '../paths.js'
 import { buildNewFile, saveNewOriginalFileIfNeeded } from '../video-file.js'
 import { addLocalOrRemoteStoryboardJobIfNeeded } from '../video-jobs.js'
@@ -39,21 +40,50 @@ export async function optimizeOriginalVideofile (options: {
   const inputFileMutexReleaser = await VideoPathManager.Instance.lockFiles(options.video.uuid)
 
   try {
-    const video = await VideoModel.loadFull(options.video.id)
+    const video = await VideoModel.loadWithFiles(options.video.id) as MVideoFullLight
     const inputVideoFile = video.getMaxQualityFile(VideoFileStream.VIDEO)
     if (!inputVideoFile) {
       const inputAudioFile = video.getMaxQualityFile(VideoFileStream.AUDIO)
 
-      if (!inputAudioFile) {
-        throw new Error(`Cannot optimize video ${video.uuid} because no input file is available anymore.`)
+      if (inputAudioFile) {
+        return mergeAudioVideofile({
+          video,
+          resolution: DEFAULT_AUDIO_RESOLUTION,
+          fps: Math.min(DEFAULT_AUDIO_MERGE_RESOLUTION, CONFIG.TRANSCODING.FPS.MAX),
+          job
+        })
       }
 
-      return mergeAudioVideofile({
-        video,
-        resolution: DEFAULT_AUDIO_RESOLUTION,
-        fps: Math.min(DEFAULT_AUDIO_MERGE_RESOLUTION, CONFIG.TRANSCODING.FPS.MAX),
-        job
-      })
+      const latestSource = await VideoSourceModel.loadLatest(video.id)
+      if (latestSource?.keptOriginalFilename) {
+        return VideoPathManager.Instance.makeAvailableVideoSource(latestSource, async videoInputPath => {
+          const videoOutputPath = join(transcodeDirectory, video.id + '-transcoded' + newExtname)
+          const transcodeType: TranscodeVODOptionsType = await canDoQuickTranscode(videoInputPath, CONFIG.TRANSCODING.FPS.MAX)
+            ? 'quick-transcode'
+            : 'video'
+
+          const resolution = buildOriginalFileResolution(latestSource.resolution || 0)
+          const fps = computeOutputFPS({
+            inputFPS: latestSource.fps || CONFIG.TRANSCODING.FPS.MAX,
+            resolution,
+            isOriginResolution: true,
+            type: 'vod'
+          })
+
+          await buildFFmpegVOD({ job, videoUUID: video.uuid }).transcode({
+            type: transcodeType,
+            videoInputPath,
+            outputPath: videoOutputPath,
+            inputFileMutexReleaser,
+            resolution,
+            fps
+          })
+
+          return onWebVideoFileTranscoding({ video, videoOutputPath })
+        })
+      }
+
+      throw new Error(`Cannot optimize video ${video.uuid} because no input file is available anymore.`)
     }
 
     const result = await VideoPathManager.Instance.makeAvailableVideoFile(inputVideoFile, async videoInputPath => {
@@ -105,7 +135,7 @@ export async function transcodeNewWebVideoResolution (options: {
   const inputFileMutexReleaser = await VideoPathManager.Instance.lockFiles(videoArg.uuid)
 
   try {
-    const video = await VideoModel.loadFull(videoArg.uuid)
+    const video = await VideoModel.loadWithFiles(videoArg.uuid) as MVideoFullLight
 
     const result = await VideoPathManager.Instance.makeAvailableMaxQualityFiles(video, async ({ videoPath, separatedAudioPath }) => {
       const filename = generateWebVideoFilename(resolution, newExtname)

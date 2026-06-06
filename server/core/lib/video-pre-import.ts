@@ -453,3 +453,7 @@ function buildClearkeysPreview (value: unknown) {
     return String(value).slice(0, 500)
   }
 }
+
+export {
+  normalizeClearkeysForImport
+}

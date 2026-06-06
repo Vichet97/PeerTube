@@ -179,8 +179,13 @@ export function buildVideoImportLocalPipelineBackpressureMaxJobs (options: {
 }) {
   const transcodingConcurrency = Math.max(1, options.transcodingConcurrency || 1)
   const objectStorageConcurrency = Math.max(1, options.objectStorageConcurrency || 1)
+  const moveDrainHeadroom = Math.max(5, Math.ceil(objectStorageConcurrency / 2))
 
-  return Math.max(10, transcodingConcurrency * 2 + objectStorageConcurrency)
+  // We already dedupe backlog by video UUID, so use a little extra headroom for
+  // short bursts while the object-storage movers drain. Without this, imports
+  // tend to bounce into repeated 10-minute deferrals when the pipeline is busy
+  // but still healthy.
+  return Math.max(10, transcodingConcurrency * 2 + objectStorageConcurrency + moveDrainHeadroom)
 }
 
 export function getVideoImportLocalPipelineBackpressureTotal (backlog: LocalVideoPipelineBacklogSnapshot) {
@@ -529,7 +534,15 @@ async function afterImportSuccess (options: {
   }
 
   if (video.state === VideoState.TO_TRANSCODE) { // Create transcoding jobs?
-    postImportTasks.push(createOptimizeOrMergeAudioJobs({ video, videoFile, isNewVideo: true, user }))
+    postImportTasks.push((async () => {
+      const videoWithFiles = await VideoModel.loadWithFiles(video.uuid)
+      await createOptimizeOrMergeAudioJobs({
+        video: (videoWithFiles || video) as typeof video,
+        videoFile,
+        isNewVideo: true,
+        user
+      })
+    })())
   }
 
   await Promise.all(postImportTasks)

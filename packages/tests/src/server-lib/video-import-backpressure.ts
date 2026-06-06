@@ -12,7 +12,7 @@ describe('video-import local pipeline backpressure', function () {
     expect(buildVideoImportLocalPipelineBackpressureMaxJobs({
       transcodingConcurrency: 5,
       objectStorageConcurrency: 10
-    })).to.equal(20)
+    })).to.equal(25)
 
     expect(buildVideoImportLocalPipelineBackpressureMaxJobs({
       transcodingConcurrency: 1,
@@ -21,9 +21,9 @@ describe('video-import local pipeline backpressure', function () {
   })
 
   it('should defer imports when the downstream local pipeline reaches the limit', function () {
-    expect(isVideoImportLocalPipelineBacklogged({ total: 19, maxJobs: 20 })).to.be.false
-    expect(isVideoImportLocalPipelineBacklogged({ total: 20, maxJobs: 20 })).to.be.true
-    expect(isVideoImportLocalPipelineBacklogged({ total: 21, maxJobs: 20 })).to.be.true
+    expect(isVideoImportLocalPipelineBacklogged({ total: 24, maxJobs: 25 })).to.be.false
+    expect(isVideoImportLocalPipelineBacklogged({ total: 25, maxJobs: 25 })).to.be.true
+    expect(isVideoImportLocalPipelineBacklogged({ total: 26, maxJobs: 25 })).to.be.true
   })
 
   it('should ignore caption-only backlog when deciding whether to defer new imports', function () {
@@ -31,6 +31,7 @@ describe('video-import local pipeline backpressure', function () {
       (videoImportBackpressure as any).getVideoImportLocalPipelineBackpressureTotal as (backlog: {
         total: number
         byType: Record<string, number>
+        uniqueVideoUUIDTotal?: number
       }) => number
 
     expect(getVideoImportLocalPipelineBackpressureTotal({
@@ -48,6 +49,25 @@ describe('video-import local pipeline backpressure', function () {
         'move-to-object-storage': 5
       }
     })).to.equal(15)
+  })
+
+  it('should prefer unique in-flight video counts over raw granular job totals', function () {
+    const getVideoImportLocalPipelineBackpressureTotal =
+      (videoImportBackpressure as any).getVideoImportLocalPipelineBackpressureTotal as (backlog: {
+        total: number
+        byType: Record<string, number>
+        uniqueVideoUUIDTotal?: number
+      }) => number
+
+    expect(getVideoImportLocalPipelineBackpressureTotal({
+      total: 250,
+      byType: {
+        'video-transcoding': 40,
+        'move-hls-playlist-to-object-storage': 200,
+        'move-caption-to-object-storage': 10
+      },
+      uniqueVideoUUIDTotal: 18
+    })).to.equal(18)
   })
 
   it('should bucket delayed import job IDs so repeated deferrals can be requeued later', function () {
