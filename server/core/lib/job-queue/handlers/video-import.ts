@@ -132,7 +132,7 @@ async function maybeDeferVideoImportForLocalPipeline (
     total: effectiveBacklogTotal,
     maxJobs
   })
-  const customJobId = buildVideoImportBackpressureJobId(videoImport.id)
+  const customJobId = buildVideoImportBackpressureJobId(videoImport.id, Date.now(), delayMs)
 
   logger.warn(
     '[VIDEO_IMPORT] Deferring import %d from job %s for %d ms because effective local video pipeline backlog is %d/%d.',
