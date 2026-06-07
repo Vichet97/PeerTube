@@ -396,13 +396,29 @@ export class YoutubeDLCLI {
     try {
       return await this.runCommand({ url, completeArgs, processOptions, timeout })
     } catch (err) {
-      if (!this.shouldRetryWithoutAria2c({ err, completeArgs })) throw err
+      let retryErr = err
 
-      return this.retryWithoutAria2c({
-        url,
-        args,
-        runner: completeArgs => this.runCommand({ url, completeArgs, processOptions, timeout })
-      })
+      if (this.shouldRetryWithoutAria2c({ err, completeArgs })) {
+        try {
+          return await this.retryWithoutAria2c({
+            url,
+            args,
+            runner: completeArgs => this.runCommand({ url, completeArgs, processOptions, timeout })
+          })
+        } catch (errAfterAria2cRetry) {
+          retryErr = errAfterAria2cRetry
+        }
+      }
+
+      if (this.shouldRetryWithFFmpegDownloader({ err: retryErr, completeArgs })) {
+        return this.retryWithFFmpegDownloader({
+          url,
+          args,
+          runner: completeArgs => this.runCommand({ url, completeArgs, processOptions, timeout })
+        })
+      }
+
+      throw this.toError(retryErr)
     }
   }
 
@@ -443,13 +459,29 @@ export class YoutubeDLCLI {
     try {
       return await this.runCommandWithProgress({ url, completeArgs, processOptions, timeout, onProgress })
     } catch (err) {
-      if (!this.shouldRetryWithoutAria2c({ err, completeArgs })) throw err
+      let retryErr = err
 
-      return this.retryWithoutAria2c({
-        url,
-        args,
-        runner: completeArgs => this.runCommandWithProgress({ url, completeArgs, processOptions, timeout, onProgress })
-      })
+      if (this.shouldRetryWithoutAria2c({ err, completeArgs })) {
+        try {
+          return await this.retryWithoutAria2c({
+            url,
+            args,
+            runner: completeArgs => this.runCommandWithProgress({ url, completeArgs, processOptions, timeout, onProgress })
+          })
+        } catch (errAfterAria2cRetry) {
+          retryErr = errAfterAria2cRetry
+        }
+      }
+
+      if (this.shouldRetryWithFFmpegDownloader({ err: retryErr, completeArgs })) {
+        return this.retryWithFFmpegDownloader({
+          url,
+          args,
+          runner: completeArgs => this.runCommandWithProgress({ url, completeArgs, processOptions, timeout, onProgress })
+        })
+      }
+
+      throw this.toError(retryErr)
     }
   }
 
@@ -565,6 +597,29 @@ export class YoutubeDLCLI {
     return runner(fallbackArgs)
   }
 
+  private async retryWithFFmpegDownloader (options: {
+    url: string
+    args: string[]
+    runner: (completeArgs: string[]) => Promise<string[] | undefined>
+  }) {
+    const { url, args, runner } = options
+
+    logger.warn(
+      'yt-dlp native HLS downloader failed for %s. Retrying with ffmpeg downloader and --hls-use-mpegts.',
+      url,
+      lTags()
+    )
+
+    const baseArgs = this.stripPerformanceOptions(this.stripDownloaderOptions(args))
+    let fallbackArgs = await this.buildYoutubeDLArgs({
+      args: [ '--downloader', 'ffmpeg', '--hls-use-mpegts' ].concat(baseArgs),
+      withAria2c: false
+    })
+    fallbackArgs = this.stripPerformanceOptions(fallbackArgs)
+
+    return runner(fallbackArgs)
+  }
+
   private stripDownloaderOptions (args: string[]) {
     const result: string[] = []
 
@@ -584,6 +639,25 @@ export class YoutubeDLCLI {
     return result
   }
 
+  private stripPerformanceOptions (args: string[]) {
+    const result: string[] = []
+
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i]
+
+      if (arg === '--concurrent-fragments') {
+        i++
+        continue
+      }
+
+      if (arg.startsWith('--concurrent-fragments=')) continue
+
+      result.push(arg)
+    }
+
+    return result
+  }
+
   private shouldRetryWithoutAria2c (options: {
     err: unknown
     completeArgs: string[]
@@ -595,6 +669,17 @@ export class YoutubeDLCLI {
     return this.isAria2cProtocolRelativeUrlError(err)
   }
 
+  private shouldRetryWithFFmpegDownloader (options: {
+    err: unknown
+    completeArgs: string[]
+  }) {
+    const { err, completeArgs } = options
+
+    if (this.hasFFmpegDownloader(completeArgs)) return false
+
+    return this.isNativeLiveHlsDownloaderError(err)
+  }
+
   private hasAria2cDownloader (args: string[]) {
     const downloaderIndex = args.indexOf('--downloader')
     if (downloaderIndex !== -1) {
@@ -604,6 +689,15 @@ export class YoutubeDLCLI {
     return args.some(arg => arg.startsWith('--downloader=') && arg.includes('aria2c'))
   }
 
+  private hasFFmpegDownloader (args: string[]) {
+    const downloaderIndex = args.indexOf('--downloader')
+    if (downloaderIndex !== -1) {
+      return args[downloaderIndex + 1]?.includes('ffmpeg') === true
+    }
+
+    return args.some(arg => arg.startsWith('--downloader=') && arg.includes('ffmpeg'))
+  }
+
   private isAria2cProtocolRelativeUrlError (err: unknown) {
     const errorString = this.stringifyError(err)
 
@@ -611,7 +705,14 @@ export class YoutubeDLCLI {
       (
         errorString.includes('Unable to open fragment') ||
         errorString.includes('aria2c exited with code')
-      )
+        )
+  }
+
+  private isNativeLiveHlsDownloaderError (err: unknown) {
+    const errorString = this.stringifyError(err)
+
+    return errorString.includes('Live HLS streams are not supported by the native downloader') &&
+      errorString.includes('--hls-use-mpegts')
   }
 
   private stringifyError (err: unknown) {
@@ -631,6 +732,12 @@ export class YoutubeDLCLI {
     }
 
     return stringValues.join('\n')
+  }
+
+  private toError (err: unknown) {
+    return err instanceof Error
+      ? err
+      : new Error(this.stringifyError(err) || String(err))
   }
 
   private wrapWithJSRuntimeOptions (args: string[]) {

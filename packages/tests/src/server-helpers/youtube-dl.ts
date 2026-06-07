@@ -178,4 +178,65 @@ describe('YoutubeDLCLI', function () {
       }
     })
   })
+
+  describe('native live HLS fallback to ffmpeg downloader', function () {
+    let cli: any
+
+    before(function () {
+      cli = Object.create(YoutubeDLCLI.prototype)
+    })
+
+    it('Should detect native live HLS downloader failures that should retry with ffmpeg', function () {
+      const err = {
+        stdout: 'WARNING: Live HLS streams are not supported by the native downloader.',
+        stderr: 'please add "--downloader ffmpeg --hls-use-mpegts" to your command'
+      }
+
+      expect(cli.shouldRetryWithFFmpegDownloader({
+        err,
+        completeArgs: [ '--concurrent-fragments', '10' ]
+      })).to.be.true
+    })
+
+    it('Should add ffmpeg downloader flags and keep custom headers when retrying native live HLS failures', async function () {
+      const originalDescriptor = Object.getOwnPropertyDescriptor(CONFIG.IMPORT.VIDEOS.HTTP.YOUTUBE_DL_RELEASE, 'NAME')
+
+      Object.defineProperty(CONFIG.IMPORT.VIDEOS.HTTP.YOUTUBE_DL_RELEASE, 'NAME', {
+        get: () => 'yt-dlp',
+        configurable: true
+      })
+
+      try {
+        const inputArgs = [
+          '--newline',
+          '--concurrent-fragments',
+          '10',
+          '--add-header',
+          'referer: https://kisskh.co/',
+          '--add-header',
+          'User-Agent: Mozilla/5.0',
+          '--merge-output-format',
+          'mp4'
+        ]
+
+        const result: string[] | undefined = await cli.retryWithFFmpegDownloader({
+          url: 'https://hls15.cdnvideo11.shop/master/example.m3u8',
+          args: inputArgs,
+          runner: async (completeArgs: string[]) => completeArgs
+        })
+
+        expect(result).to.include.members([
+          '--downloader',
+          'ffmpeg',
+          '--hls-use-mpegts',
+          '--add-header',
+          'referer: https://kisskh.co/',
+          'User-Agent: Mozilla/5.0'
+        ])
+        expect(result).to.not.include('--concurrent-fragments')
+      } finally {
+        Object.defineProperty(CONFIG.IMPORT.VIDEOS.HTTP.YOUTUBE_DL_RELEASE, 'NAME', originalDescriptor)
+      }
+    })
+  })
 })

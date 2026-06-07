@@ -368,7 +368,10 @@ async function processFile (downloader: () => Promise<string>, videoImport: MVid
 
     // Get information about this video
     const stats = await stat(tmpVideoPath)
-    const user = await UserModel.loadByVideoId(videoImport.videoId)
+    const user = videoImport.User ?? await UserModel.loadByVideoId(videoImport.videoId)
+    if (!user) {
+      throw new Error(`Cannot process video import ${videoImport.id}: owner user could not be loaded.`)
+    }
 
     const isAble = await isUserQuotaValid({ channelUserId: user.id, uploadSize: stats.size })
     if (isAble === false) {
@@ -427,7 +430,7 @@ async function processFile (downloader: () => Promise<string>, videoImport: MVid
         createTorrentAndSetInfoHash(videoImportWithFiles.Video, videoFile)
       ])
 
-      const { videoImportUpdated, video } = await retryTransactionWrapper(() => {
+      const { videoImportUpdated, videoUUID } = await retryTransactionWrapper(() => {
         return sequelizeTypescript.transaction(async t => {
           // Refresh video
           const video = await VideoModel.load(videoImportWithFiles.videoId, t)
@@ -450,10 +453,6 @@ async function processFile (downloader: () => Promise<string>, videoImport: MVid
           const automaticTags = await new AutomaticTagger().buildVideoAutomaticTags({ video, transaction: t })
           await setAndSaveVideoAutomaticTags({ video, automaticTags, transaction: t })
 
-          // Now we can federate the video (reload from database, we need more attributes)
-          const videoForFederation = await VideoModel.loadFull(video.uuid, t)
-          await federateVideoIfNeeded(videoForFederation, true, t)
-
           // Update video import object
           videoImportWithFiles.state = VideoImportState.SUCCESS
           videoImportWithFiles.progress = 100
@@ -461,9 +460,20 @@ async function processFile (downloader: () => Promise<string>, videoImport: MVid
 
           logger.info('Video %s imported.', video.uuid)
 
-          return { videoImportUpdated, video: videoForFederation }
+          return { videoImportUpdated, videoUUID: video.uuid }
         })
       })
+
+      const video = await VideoModel.loadFull(videoUUID)
+      if (!video) {
+        logger.warn(
+          '[VIDEO_IMPORT] Video %s disappeared after import transaction commit. Skipping federation and post-import tasks.',
+          videoUUID
+        )
+        return
+      }
+
+      await federateVideoIfNeeded(video, true)
 
       await afterImportSuccess({
         videoImport: videoImportUpdated,
