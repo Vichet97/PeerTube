@@ -436,12 +436,12 @@ async function processFile (downloader: () => Promise<string>, videoImport: MVid
           const video = await VideoModel.load(videoImportWithFiles.videoId, t)
           if (!video) throw new Error('Video linked to import ' + videoImportWithFiles.videoId + ' does not exist anymore.')
 
-          await videoFile.save({ transaction: t })
+          const persistedVideoFile = await VideoFileModel.customUpsert(videoFile, 'video', t)
 
           // Update video DB object
           video.duration = duration
           video.state = buildNextVideoState(video.state)
-          video.aspectRatio = buildAspectRatio({ width: videoFile.width, height: videoFile.height })
+          video.aspectRatio = buildAspectRatio({ width: persistedVideoFile.width, height: persistedVideoFile.height })
           await video.save({ transaction: t })
 
           if (thumbnails.length !== 0) {
@@ -472,6 +472,11 @@ async function processFile (downloader: () => Promise<string>, videoImport: MVid
         )
         return
       }
+
+      await ensureImportMediaPersistedOrThrow({
+        videoUUID,
+        videoImport: videoImportUpdated
+      })
 
       await federateVideoIfNeeded(video, true)
 
@@ -614,4 +619,29 @@ async function onImportError (err: Error, tempVideoPath: string, videoImport: MV
   })
 
   Notifier.Instance.notifyOnFinishedVideoImport({ videoImport, success: false })
+}
+
+async function ensureImportMediaPersistedOrThrow (options: {
+  videoUUID: string
+  videoImport: MVideoImport
+}) {
+  const { videoUUID, videoImport } = options
+
+  const persistedVideo = await VideoModel.loadWithFiles(videoUUID)
+  if (!persistedVideo) {
+    throw new Error(`Imported video ${videoUUID} disappeared before post-import verification.`)
+  }
+
+  const hasPersistedMedia =
+    (persistedVideo.VideoFiles?.length || 0) > 0 ||
+    persistedVideo.VideoStreamingPlaylists?.some(playlist => (playlist.VideoFiles?.length || 0) > 0) === true
+
+  if (hasPersistedMedia) return
+
+  const err = new Error(
+    `Imported media for video ${videoUUID} was not durably persisted before transcoding scheduling.`
+  )
+
+  await onImportError(err, null, videoImport as MVideoImportVideo)
+  throw err
 }
