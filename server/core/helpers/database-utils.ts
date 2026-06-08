@@ -1,9 +1,12 @@
 import retry from 'async/retry.js'
 import Bluebird from 'bluebird'
+import { isRetryableTransactionError } from '@server/helpers/retryable-transaction-error.js'
 import { Transaction } from 'sequelize'
 import { Model } from 'sequelize-typescript'
 import { sequelizeTypescript } from '@server/initializers/database.js'
 import { logger } from './logger.js'
+
+export { isRetryableTransactionError } from './retryable-transaction-error.js'
 
 export function retryTransactionWrapper<T, A, B, C, D> (
   functionToRetry: (arg1: A, arg2: B, arg3: C, arg4: D) => Promise<T>,
@@ -66,33 +69,6 @@ export function transactionRetryer<T> (func: (err: any, data: T) => any) {
       (err, data) => err ? rej(err) : res(data)
     )
   })
-}
-
-export function isRetryableTransactionError (err: unknown) {
-  if (!err || typeof err !== 'object') return false
-
-  const error = err as {
-    name?: string
-    message?: string
-    code?: string
-    parent?: { code?: string, message?: string }
-    original?: { code?: string, message?: string }
-  }
-
-  if (error.name === 'SequelizeDatabaseError') return true
-
-  const code = error.parent?.code || error.original?.code || error.code
-  if (code === '40001' || code === '40P01') return true
-
-  const message = (
-    error.parent?.message ||
-    error.original?.message ||
-    error.message ||
-    ''
-  ).toLowerCase()
-
-  return message.includes('could not serialize access') ||
-    message.includes('deadlock detected')
 }
 
 export function saveInTransactionWithRetries<T extends Pick<Model, 'save' | 'changed'>> (model: T) {

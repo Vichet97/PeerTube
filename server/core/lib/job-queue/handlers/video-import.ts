@@ -30,7 +30,7 @@ import { buildNextVideoState } from '@server/lib/video-state.js'
 import { createTorrentAndSetInfoHash, downloadWebTorrentVideo } from '@server/lib/webtorrent.js'
 import { JobQueue } from '@server/lib/job-queue/index.js'
 import { VideoCaptionModel } from '@server/models/video/video-caption.js'
-import { MUserId, MVideoFile, MVideoFullLight } from '@server/types/models/index.js'
+import { MThumbnail, MUserId, MVideoFile, MVideoFullLight } from '@server/types/models/index.js'
 import { MVideoImport, MVideoImportDefault, MVideoImportDefaultFiles, MVideoImportVideo } from '@server/types/models/video/video-import.js'
 import { Job } from 'bullmq'
 import { FfprobeData } from 'fluent-ffmpeg'
@@ -42,9 +42,11 @@ import { logger } from '../../../helpers/logger.js'
 import { getSecureTorrentName } from '../../../helpers/utils.js'
 import { CONSTRAINTS_FIELDS, JOB_TTL } from '../../../initializers/constants.js'
 import { sequelizeTypescript } from '../../../initializers/database.js'
+import { buildRetryableImportedModelFactory } from './video-import-retryable-model.js'
 import { VideoFileModel } from '../../../models/video/video-file.js'
 import { VideoImportModel } from '../../../models/video/video-import.js'
 import { VideoModel } from '../../../models/video/video.js'
+import { ThumbnailModel } from '../../../models/video/thumbnail.js'
 import { federateVideoIfNeeded } from '../../activitypub/videos/index.js'
 import { Notifier } from '../../notifier/index.js'
 import { createLocalVideoThumbnailsFromVideo } from '../../thumbnail.js'
@@ -430,13 +432,20 @@ async function processFile (downloader: () => Promise<string>, videoImport: MVid
         createTorrentAndSetInfoHash(videoImportWithFiles.Video, videoFile)
       ])
 
-      const { videoImportUpdated, videoUUID } = await retryTransactionWrapper(() => {
+      // The transaction below can be retried on serialization/deadlock errors.
+      // Any Sequelize model inserted during a failed attempt may keep an id and
+      // lose its "new record" status even though the transaction rolled back,
+      // so rebuild fresh file/thumbnail instances on every retry attempt.
+      const createRetryVideoFile = buildRetryableImportedVideoFileFactory(videoFile)
+      const createRetryThumbnails = buildRetryableImportedThumbnailFactory(thumbnails)
+
+      const { videoImportUpdated, videoUUID, persistedVideoFile } = await retryTransactionWrapper(() => {
         return sequelizeTypescript.transaction(async t => {
           // Refresh video
           const video = await VideoModel.load(videoImportWithFiles.videoId, t)
           if (!video) throw new Error('Video linked to import ' + videoImportWithFiles.videoId + ' does not exist anymore.')
 
-          const persistedVideoFile = await VideoFileModel.customUpsert(videoFile, 'video', t)
+          const persistedVideoFile = await VideoFileModel.customUpsert(createRetryVideoFile(), 'video', t)
 
           // Update video DB object
           video.duration = duration
@@ -444,8 +453,9 @@ async function processFile (downloader: () => Promise<string>, videoImport: MVid
           video.aspectRatio = buildAspectRatio({ width: persistedVideoFile.width, height: persistedVideoFile.height })
           await video.save({ transaction: t })
 
-          if (thumbnails.length !== 0) {
-            await video.replaceAndSaveThumbnails(thumbnails, t)
+          const transactionThumbnails = createRetryThumbnails()
+          if (transactionThumbnails.length !== 0) {
+            await video.replaceAndSaveThumbnails(transactionThumbnails, t)
           }
 
           await replaceChaptersIfNotExist({ video, chapters: containerChapters, transaction: t })
@@ -456,11 +466,13 @@ async function processFile (downloader: () => Promise<string>, videoImport: MVid
           // Update video import object
           videoImportWithFiles.state = VideoImportState.SUCCESS
           videoImportWithFiles.progress = 100
+          videoImportWithFiles.changed('state', true)
+          videoImportWithFiles.changed('progress', true)
           const videoImportUpdated = await videoImportWithFiles.save({ transaction: t }) as MVideoImport
 
           logger.info('Video %s imported.', video.uuid)
 
-          return { videoImportUpdated, videoUUID: video.uuid }
+          return { videoImportUpdated, videoUUID: video.uuid, persistedVideoFile }
         })
       })
 
@@ -483,7 +495,7 @@ async function processFile (downloader: () => Promise<string>, videoImport: MVid
       await afterImportSuccess({
         videoImport: videoImportUpdated,
         video,
-        videoFile,
+        videoFile: persistedVideoFile,
         user: videoImport.User,
         generateTranscription: options.generateTranscription
       })
@@ -515,6 +527,19 @@ async function generateThumbnails (options: {
   if (videoImportWithFiles.Video.Thumbnails.length !== 0) return []
 
   return createLocalVideoThumbnailsFromVideo({ video: videoImportWithFiles.Video, videoFile, ffprobe })
+}
+
+export function buildRetryableImportedVideoFileFactory (videoFile: MVideoFile) {
+  return buildRetryableImportedModelFactory(videoFile, attributes => new VideoFileModel(attributes) as MVideoFile)
+}
+
+export function buildRetryableImportedThumbnailFactory (thumbnails: MThumbnail[]) {
+  const factories = thumbnails.map(thumbnail => buildRetryableImportedModelFactory(
+    thumbnail,
+    attributes => new ThumbnailModel(attributes) as MThumbnail
+  ))
+
+  return () => factories.map(factory => factory())
 }
 
 async function afterImportSuccess (options: {

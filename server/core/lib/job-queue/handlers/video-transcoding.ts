@@ -2,7 +2,6 @@ import {
   HLSTranscodingPayload,
   MergeAudioTranscodingPayload,
   NewWebVideoResolutionTranscodingPayload,
-  VideoState,
   OptimizeTranscodingPayload,
   VideoResolution,
   VideoTranscodingPayload
@@ -22,6 +21,7 @@ import { MUser, MUserId, MVideoFullLight } from '@server/types/models/index.js'
 import { Job } from 'bullmq'
 import { logger, loggerTagsFactory } from '../../../helpers/logger.js'
 import { VideoModel } from '../../../models/video/video.js'
+import { publishVideoAfterFirstTranscodingBatchIfNeededWithDeps } from './video-transcoding-publish.js'
 
 type HandlerFunction = (job: Job, payload: VideoTranscodingPayload, video: MVideoFullLight, user: MUser) => Promise<void>
 
@@ -295,42 +295,14 @@ async function waitForPreviousHLSMoveJobs (videoUUID: string) {
   }
 }
 
-async function publishVideoAfterFirstTranscodingBatchIfNeeded (options: {
+export async function publishVideoAfterFirstTranscodingBatchIfNeeded (options: {
   videoUUID: string
   isNewVideo: boolean
 }) {
-  const { videoUUID, isNewVideo } = options
-
-  const video = await VideoModel.loadFull(videoUUID)
-  if (!video) return
-
-  // Publish as soon as the first playable batch exists, even when object-storage
-  // move jobs are still pending.
-  if (video.state !== VideoState.TO_TRANSCODE && video.state !== VideoState.TO_MOVE_TO_EXTERNAL_STORAGE) return
-
-  const hasWebFiles = video.VideoFiles.length !== 0
-  const hlsPlaylist = video.getHLSPlaylist()
-  const hasHLSFiles = !!hlsPlaylist && hlsPlaylist.VideoFiles.length !== 0
-  if (!hasWebFiles && !hasHLSFiles) return
-
   const { sequelizeTypescript } = await import('@server/initializers/database.js')
-  await sequelizeTypescript.transaction(async transaction => {
-    const videoInTx = await VideoModel.loadFull(videoUUID, transaction)
-    if (!videoInTx) return
 
-    if (videoInTx.state !== VideoState.TO_TRANSCODE && videoInTx.state !== VideoState.TO_MOVE_TO_EXTERNAL_STORAGE) return
-
-    const hasWebFilesInTx = videoInTx.VideoFiles.length !== 0
-    const hlsPlaylistInTx = videoInTx.getHLSPlaylist()
-    const hasHLSFilesInTx = !!hlsPlaylistInTx && hlsPlaylistInTx.VideoFiles.length !== 0
-    if (!hasWebFilesInTx && !hasHLSFilesInTx) return
-
-    videoInTx.waitTranscoding = false
-    await videoInTx.setNewState(VideoState.PUBLISHED, isNewVideo, transaction)
+  return publishVideoAfterFirstTranscodingBatchIfNeededWithDeps(options, {
+    loadVideo: (id, transaction) => VideoModel.loadFull(id, transaction as any),
+    runTransaction: fn => sequelizeTypescript.transaction(transaction => fn(transaction))
   })
-
-  logger.info(
-    '[TRANSCODE_HANDLER] Published %s after first transcoding batch so playback can start while remaining jobs continue.',
-    videoUUID
-  )
 }
