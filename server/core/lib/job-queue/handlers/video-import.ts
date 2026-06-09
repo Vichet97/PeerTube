@@ -43,6 +43,7 @@ import { getSecureTorrentName } from '../../../helpers/utils.js'
 import { CONSTRAINTS_FIELDS, JOB_TTL } from '../../../initializers/constants.js'
 import { sequelizeTypescript } from '../../../initializers/database.js'
 import { buildRetryableImportedModelFactory } from './video-import-retryable-model.js'
+import { handleDeletedVideoImportInterruption } from './video-import-deletion-interruption.js'
 import { getVideoImportSkipReason, isVideoImportBackpressureJobId } from './video-import-processability.js'
 import { VideoFileModel } from '../../../models/video/video-file.js'
 import { VideoImportModel } from '../../../models/video/video-import.js'
@@ -52,6 +53,7 @@ import { federateVideoIfNeeded } from '../../activitypub/videos/index.js'
 import { Notifier } from '../../notifier/index.js'
 import { createLocalVideoThumbnailsFromVideo } from '../../thumbnail.js'
 import { UserModel } from '@server/models/user/user.js'
+import { getFSTorrentFilePath } from '../../paths.js'
 
 const VIDEO_IMPORT_LOCAL_PIPELINE_BACKPRESSURE_DELAY_MS = 10 * 60 * 1000
 const VIDEO_IMPORT_LOCAL_PIPELINE_BACKPRESSURE_MIN_DELAY_MS = 2 * 60 * 1000
@@ -374,6 +376,7 @@ type ProcessFileOptions = {
 }
 async function processFile (downloader: () => Promise<string>, videoImport: MVideoImportDefault, options: ProcessFileOptions) {
   let tmpVideoPath: string
+  let movedVideoDestPath: string
   let videoFile: MVideoFile
 
   try {
@@ -458,6 +461,7 @@ async function processFile (downloader: () => Promise<string>, videoImport: MVid
       // Move file
       const videoDestFile = VideoPathManager.Instance.getFSVideoFileOutputPath(videoImportWithFiles.Video, videoFile)
       await move(tmpVideoPath, videoDestFile)
+      movedVideoDestPath = videoDestFile
 
       tmpVideoPath = null // This path is not used anymore
 
@@ -537,6 +541,25 @@ async function processFile (downloader: () => Promise<string>, videoImport: MVid
       videoFileLockReleaser()
     }
   } catch (err) {
+    const handledDeletionInterruption = await handleDeletedVideoImportInterruption({
+      err,
+      tempVideoPath: tmpVideoPath,
+      movedVideoDestPath,
+      torrentPath: videoFile?.torrentFilename
+        ? getFSTorrentFilePath(videoFile)
+        : undefined
+    }, {
+      loadImport: () => VideoImportModel.loadAndPopulateVideo(videoImport.id),
+      removePath: path => remove(path)
+    })
+    if (handledDeletionInterruption) {
+      logger.info(
+        '[VIDEO_IMPORT] Stopping import %d because the linked video was deleted during processing.',
+        videoImport.id
+      )
+      return
+    }
+
     await onImportError(err, tmpVideoPath, videoImport)
 
     throw err
