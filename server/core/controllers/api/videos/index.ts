@@ -233,6 +233,7 @@ async function listVideos (req: express.Request, res: express.Response) {
 
 async function removeVideo (req: express.Request, res: express.Response) {
   const videoInstance = res.locals.videoAll
+  const videoImport = await VideoImportModel.unscoped().findOne({ where: { videoId: videoInstance.id } })
 
   // Set Redis flag so active transcoding workers can detect deletion and exit promptly
   await Redis.Instance.setVideoDeletionFlag(videoInstance.uuid)
@@ -241,7 +242,7 @@ async function removeVideo (req: express.Request, res: express.Response) {
   await VideoJobInfoModel.abortAllTasks(videoInstance.uuid, 'pendingTranscode')
   await VideoJobInfoModel.abortAllTasks(videoInstance.uuid, 'pendingMove')
   await VideoJobInfoModel.abortAllTasks(videoInstance.uuid, 'pendingTranscription')
-  await JobQueue.Instance.removeAllVideoJobsForVideo(videoInstance.uuid, videoInstance.id)
+  await JobQueue.Instance.removeAllVideoJobsForVideo(videoInstance.uuid, videoInstance.id, videoImport?.id)
   await cleanupStagedTranscriptionAudio(videoInstance.uuid)
 
   await sequelizeTypescript.transaction(async t => {

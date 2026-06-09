@@ -27,6 +27,7 @@ import { JobQueue } from '../../lib/job-queue/index.js'
 import { hasVideoResourcesToBeMoved } from '../../lib/move-storage/shared/move-video.js'
 import { getFSTorrentFilePath, getHLSResolutionPlaylistFilename } from '../../lib/paths.js'
 import { Redis } from '../../lib/redis.js'
+import { getUnprocessedOrphanedVideoRepairJobRefs } from './video-repair-job-orphans.js'
 import {
   buildMoveVideoJob,
   buildLocalStoryboardJobIfNeeded,
@@ -706,6 +707,7 @@ async function runVideoSystemReset (
   const ids = await VideoModel.listLocalIds()
   const existingVideoIds = new Set(ids)
   const existingVideoUUIDs = new Set<string>()
+  const existingVideoImportIds = new Set<number>()
   const processedJobKeys = new Set<string>()
   const jobIndex = await buildVideoRepairJobIndex()
 
@@ -737,6 +739,7 @@ async function runVideoSystemReset (
 
     const info = await VideoJobInfoModel.load(video.id)
     const videoImport = await VideoImportModel.unscoped().findOne({ where: { videoId: video.id } })
+    if (videoImport?.id) existingVideoImportIds.add(videoImport.id)
     const jobRefs = getVideoRepairJobRefs(jobIndex, video.uuid, video.id, videoImport?.id)
     const hasStaleCounters = !!info && (info.pendingMove > 0 || info.pendingTranscode > 0 || info.pendingTranscription > 0)
 
@@ -808,6 +811,7 @@ async function runVideoSystemReset (
     jobIndex,
     existingVideoIds,
     existingVideoUUIDs,
+    existingVideoImportIds,
     processedJobKeys
   })
 
@@ -1516,23 +1520,19 @@ async function removeOrphanedVideoRepairJobs (options: {
   jobIndex: VideoRepairJobIndex
   existingVideoIds: Set<number>
   existingVideoUUIDs: Set<string>
+  existingVideoImportIds: Set<number>
   processedJobKeys: Set<string>
 }) {
-  const { jobIndex, existingVideoIds, existingVideoUUIDs, processedJobKeys } = options
-  const orphanRefs: VideoRepairJobRef[] = []
-
-  for (const [ videoUUID, refs ] of jobIndex.byVideoUUID) {
-    if (existingVideoUUIDs.has(videoUUID)) continue
-    orphanRefs.push(...refs)
-  }
-
-  for (const [ videoId, refs ] of jobIndex.byVideoId) {
-    if (existingVideoIds.has(videoId)) continue
-    orphanRefs.push(...refs)
-  }
-
-  const unprocessedOrphans = dedupeVideoRepairJobRefs(orphanRefs)
-    .filter(ref => !processedJobKeys.has(getVideoRepairJobKey(ref)))
+  const { jobIndex, existingVideoIds, existingVideoUUIDs, existingVideoImportIds, processedJobKeys } = options
+  const unprocessedOrphans = getUnprocessedOrphanedVideoRepairJobRefs({
+    index: jobIndex,
+    existingVideoIds,
+    existingVideoUUIDs,
+    existingVideoImportIds,
+    processedJobKeys,
+    dedupeRefs: dedupeVideoRepairJobRefs,
+    getRefKey: getVideoRepairJobKey
+  })
 
   if (unprocessedOrphans.length === 0) return { removed: 0, failed: 0 }
 

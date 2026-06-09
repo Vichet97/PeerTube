@@ -35,6 +35,11 @@ import {
 import { jobStates } from '@server/helpers/custom-validators/jobs.js'
 import { toCompleteUUID } from '@server/helpers/custom-validators/misc.js'
 import { CONFIG, registerConfigChangedHandler } from '@server/initializers/config.js'
+import {
+  DeletedVideoJobIdentifiers,
+  listDeletedVideoJobTypes,
+  shouldRemoveDeletedVideoJob
+} from '@server/lib/job-queue/deleted-video-job-matchers.js'
 import { processVideoRedundancy } from '@server/lib/job-queue/handlers/video-redundancy.js'
 import { scheduleRetainedLocalFilesCleanup } from '@server/lib/move-storage/move-to-object-storage.js'
 import {
@@ -1265,22 +1270,17 @@ class JobQueue {
    * Active jobs are attempted; if removal fails (e.g. job locked), the worker will exit and throw
    * "Video was deleted - transcoding job cancelled" so the job appears as failed with that reason.
    */
-  async removeAllVideoJobsForVideo (videoUUID: string, videoId: number): Promise<void> {
+  async removeAllVideoJobsForVideo (videoUUID: string, videoId: number, videoImportId?: number): Promise<void> {
     const CANCELLED_REASON = 'Video was deleted - transcoding job cancelled'
     const states = [ 'waiting', 'delayed', 'prioritized', 'waiting-children', 'active' ] as const
     let removedCount = 0
+    const identifiers: DeletedVideoJobIdentifiers = { videoUUID, videoId, videoImportId }
 
-    const queueConfigs: { name: JobType; match: (data: any) => boolean }[] = [
-      { name: 'video-transcoding', match: (d) => d.videoUUID === videoUUID },
-      { name: 'transcoding-job-builder', match: (d) => d.videoUUID === videoUUID },
-      { name: 'move-to-object-storage', match: (d) => 'videoUUID' in d && d.videoUUID === videoUUID },
-      { name: 'move-to-file-system', match: (d) => 'videoUUID' in d && d.videoUUID === videoUUID },
-      { name: 'video-transcription', match: (d) => d.videoUUID === videoUUID },
-      { name: 'generate-video-storyboard', match: (d) => d.videoUUID === videoUUID },
-      { name: 'federate-video', match: (d) => d.videoUUID === videoUUID },
-      { name: 'video-studio-edition', match: (d) => d.videoUUID === videoUUID },
-      { name: 'manage-video-torrent', match: (d) => d.videoId === videoId }
-    ]
+    const queueConfigs = listDeletedVideoJobTypes()
+      .map(name => ({
+        name,
+        match: (data: any) => shouldRemoveDeletedVideoJob(name, data, identifiers)
+      }))
 
     for (const { name: queueName, match } of queueConfigs) {
       const queue = this.queues[queueName]

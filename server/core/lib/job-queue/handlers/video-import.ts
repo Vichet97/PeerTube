@@ -43,6 +43,7 @@ import { getSecureTorrentName } from '../../../helpers/utils.js'
 import { CONSTRAINTS_FIELDS, JOB_TTL } from '../../../initializers/constants.js'
 import { sequelizeTypescript } from '../../../initializers/database.js'
 import { buildRetryableImportedModelFactory } from './video-import-retryable-model.js'
+import { getVideoImportSkipReason, isVideoImportBackpressureJobId } from './video-import-processability.js'
 import { VideoFileModel } from '../../../models/video/video-file.js'
 import { VideoImportModel } from '../../../models/video/video-import.js'
 import { VideoModel } from '../../../models/video/video.js'
@@ -58,9 +59,8 @@ const VIDEO_IMPORT_LOCAL_PIPELINE_BACKPRESSURE_MIN_DELAY_MS = 2 * 60 * 1000
 async function processVideoImport (job: Job): Promise<VideoImportPreventExceptionResult> {
   const payload = job.data as VideoImportPayload
 
-  const videoImport = await getVideoImportOrDie(payload)
-  if (videoImport.state === VideoImportState.CANCELLED) {
-    logger.info('Do not process import since it has been cancelled', { payload })
+  const videoImport = await getVideoImportOrSkip(job, payload)
+  if (!videoImport) {
     return { resultType: 'success' }
   }
 
@@ -312,11 +312,31 @@ async function processYoutubeDLImport (job: Job, videoImport: MVideoImportDefaul
   return processFile(downloader, videoImport, options)
 }
 
-async function getVideoImportOrDie (payload: VideoImportPayload) {
+async function getVideoImportOrSkip (job: Job, payload: VideoImportPayload) {
   const videoImport = await VideoImportModel.loadAndPopulateVideo(payload.videoImportId)
-  if (!videoImport) throw new Error('Video import not found')
+  if (!videoImport) {
+    if (isVideoImportBackpressureJobId(job.id)) {
+      logger.info(
+        '[VIDEO_IMPORT] Skipping stale delayed backpressure job %s because import %d does not exist anymore.',
+        job.id,
+        payload.videoImportId
+      )
+      return undefined
+    }
+
+    throw new Error('Video import not found')
+  }
 
   if (!videoImport.Video) {
+    if (isVideoImportBackpressureJobId(job.id)) {
+      logger.info(
+        '[VIDEO_IMPORT] Skipping stale delayed backpressure job %s because import %d has no linked video anymore.',
+        job.id,
+        payload.videoImportId
+      )
+      return undefined
+    }
+
     const err = new Error(
       `Cannot process video import ${payload.videoImportId}: the video import or video linked to this import does not exist anymore.`
     )
@@ -324,6 +344,20 @@ async function getVideoImportOrDie (payload: VideoImportPayload) {
     await onImportError(err, null, videoImport)
 
     throw err
+  }
+
+  const skipReason = getVideoImportSkipReason({
+    importState: videoImport.state,
+    videoState: videoImport.Video.state
+  })
+  if (skipReason) {
+    logger.info(
+      '[VIDEO_IMPORT] Skipping stale import job %s for import %d because %s.',
+      job.id,
+      payload.videoImportId,
+      skipReason
+    )
+    return undefined
   }
 
   return videoImport
