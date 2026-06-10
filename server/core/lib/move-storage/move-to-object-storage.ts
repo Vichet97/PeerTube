@@ -231,12 +231,16 @@ export async function moveVideoToObjectStorage (options: {
 
 export function moveCaptionToObjectStorage (options: {
   captionId: number
+  videoUUID?: string
+  includeAllVideoCaptions?: boolean
   loggerTags: LoggerTags['tags']
 }) {
-  const { captionId, loggerTags } = options
+  const { captionId, videoUUID, includeAllVideoCaptions, loggerTags } = options
 
   return moveCaptionToStorage({
     captionId,
+    videoUUID,
+    includeAllVideoCaptions,
     loggerTags: [ ...lTagsBase().tags, ...loggerTags ],
     moveCaptionFiles
   })
@@ -607,38 +611,66 @@ async function moveCaptionFiles (captions: MVideoCaption[], hls: MStreamingPlayl
     if (caption.storage === FileStorage.FILE_SYSTEM) {
       const captionPath = caption.getFSFilePath()
       const destinationKey = `${CONFIG.OBJECT_STORAGE.CAPTIONS.PREFIX || ''}${caption.filename}`
+      const fileExists = await pathExists(captionPath)
 
-      logger.info('[MOVE_STORAGE] Moving caption file to object storage', {
-        captionId: caption.id,
-        sourcePath: captionPath,
-        destinationBucket: CONFIG.OBJECT_STORAGE.CAPTIONS.BUCKET_NAME,
-        destinationKey,
-        filename: caption.filename,
-        language: caption.language,
-        ...lTagsBase()
-      })
+      if (fileExists) {
+        logger.info('[MOVE_STORAGE] Moving caption file to object storage', {
+          captionId: caption.id,
+          sourcePath: captionPath,
+          destinationBucket: CONFIG.OBJECT_STORAGE.CAPTIONS.BUCKET_NAME,
+          destinationKey,
+          filename: caption.filename,
+          language: caption.language,
+          ...lTagsBase()
+        })
 
-      await storeVideoCaption(captionPath, caption.filename)
+        await storeVideoCaption(captionPath, caption.filename)
 
-      logger.debug(`Checking readiness before marking caption file as moved to object storage`, lTagsBase())
-      await removeLocalFileAfterMove({
-        path: captionPath,
-        videoUUID: pipelineVideoUUID ?? (caption as MVideoCaption & { Video?: MVideo }).Video?.uuid,
-        objectStorageKey: caption.filename,
-        bucketInfo: CONFIG.OBJECT_STORAGE.CAPTIONS
-      })
+        logger.debug(`Checking readiness before marking caption file as moved to object storage`, lTagsBase())
+        await removeLocalFileAfterMove({
+          path: captionPath,
+          videoUUID: pipelineVideoUUID ?? (caption as MVideoCaption & { Video?: MVideo }).Video?.uuid,
+          objectStorageKey: caption.filename,
+          bucketInfo: CONFIG.OBJECT_STORAGE.CAPTIONS
+        })
+
+        logger.info('[MOVE_STORAGE] Caption file moved successfully', {
+          captionId: caption.id,
+          sourcePath: captionPath,
+          destinationKey,
+          filename: caption.filename,
+          ...lTagsBase()
+        })
+      } else {
+        const objectStorageReady = await checkObjectStorageReadiness({
+          key: caption.filename,
+          bucketInfo: CONFIG.OBJECT_STORAGE.CAPTIONS,
+          maxRetries: 1,
+          retryIntervalMs: 0,
+          logNotReadyAsDebug: true
+        })
+
+        if (!objectStorageReady) {
+          throw new Error(
+            `Caption file ${caption.filename} does not exist at ${captionPath} and object storage copy is not ready`
+          )
+        }
+
+        logger.warn(
+          '[MOVE_STORAGE] Caption file %s is missing locally but object storage copy is ready; marking it as moved',
+          caption.filename,
+          {
+            captionId: caption.id,
+            sourcePath: captionPath,
+            destinationKey,
+            ...lTagsBase()
+          }
+        )
+      }
 
       // Assign new values before building the m3u8 file
       caption.storage = FileStorage.OBJECT_STORAGE
       await caption.save()
-
-      logger.info('[MOVE_STORAGE] Caption file moved successfully', {
-        captionId: caption.id,
-        sourcePath: captionPath,
-        destinationKey,
-        filename: caption.filename,
-        ...lTagsBase()
-      })
     }
 
     if (hls) {

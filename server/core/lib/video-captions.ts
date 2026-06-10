@@ -62,7 +62,7 @@ export async function createLocalCaption (options: {
   })
 
   if (CONFIG.OBJECT_STORAGE.ENABLED && videoCaption.storage === FileStorage.FILE_SYSTEM) {
-    const job = await buildCaptionMoveJob(videoCaption.id)
+    const job = await buildCaptionMoveJob(videoCaption.id, video.uuid)
     if (job) {
       await JobQueue.Instance.createJob(job)
       logger.info(`Created move job for caption ${videoCaption.filename}`, lTags(video.uuid))

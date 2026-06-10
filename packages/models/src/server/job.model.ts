@@ -250,6 +250,7 @@ export interface MoveVideoStoragePayload {
 
 export interface MoveCaptionPayload {
   captionId: number
+  videoUUID?: string
 }
 
 export interface MoveVideoFilePayload {

@@ -371,74 +371,29 @@ export async function processMoveToObjectStorage (job: Job) {
 
     // Check if caption exists and get its current state
     const caption = await VideoCaptionModel.loadWithVideo(payload.captionId)
+    const targetVideoUUID = payload.videoUUID ?? caption?.Video?.uuid
 
-    if (!caption) {
+    if (!caption && !targetVideoUUID) {
       // Caption was deleted, skip this job
       logger.info('[MOVE_JOB] Caption %s not found, skipping job %s', payload.captionId, job.id)
       return
     }
 
-    // Skip if caption is already on object storage
-    if (caption.storage === FileStorage.OBJECT_STORAGE) {
-      logger.info('[MOVE_JOB] Caption %s is already on object storage, refreshing related playlists for job %s', payload.captionId, job.id)
-      await moveCaptionToObjectStorage({
-        captionId: payload.captionId,
-        loggerTags: lTagsBase().tags
-      })
-      updateProgress(100)
-      return
-    }
-
-    // Check if the source file exists
-    const captionPath = caption.getFSFilePath()
-    const fileExists = await pathExists(captionPath)
-
-    if (!fileExists) {
-      const objectStorageReady = await checkObjectStorageReadiness({
-        key: caption.filename,
-        bucketInfo: CONFIG.OBJECT_STORAGE.CAPTIONS,
-        maxRetries: 1,
-        retryIntervalMs: 0,
-        logNotReadyAsDebug: true
-      })
-
-      if (!objectStorageReady) {
-        throw new Error(
-          `Caption file ${caption.filename} does not exist at ${captionPath} and object storage copy is not ready`
-        )
-      }
-
-      logger.warn(
-        '[MOVE_JOB] Caption file %s does not exist at %s, but object storage copy is ready; marking as moved for job %s',
-        caption.filename,
-        captionPath,
-        job.id
-      )
-      caption.storage = FileStorage.OBJECT_STORAGE
-      await caption.save()
-
-      updateProgress(50)
-      await moveCaptionToObjectStorage({
-        captionId: payload.captionId,
-        loggerTags: lTagsBase().tags
-      })
-
-      updateProgress(100)
-      logger.info('[MOVE_JOB] Caption playlist refresh completed for caption %s already present in object storage', payload.captionId)
-      return
-    }
-
-    logger.info('[MOVE_JOB] Moving caption %s from %s', caption.filename, captionPath)
-
     updateProgress(50)
 
     await moveCaptionToObjectStorage({
       captionId: payload.captionId,
+      videoUUID: targetVideoUUID,
+      includeAllVideoCaptions: true,
       loggerTags: lTagsBase().tags
     })
 
     updateProgress(100)
-    logger.info('[MOVE_JOB] Caption move completed for caption %s', payload.captionId)
+    logger.info(
+      '[MOVE_JOB] Caption move batch completed for caption %s%s',
+      payload.captionId,
+      targetVideoUUID ? ` (video ${targetVideoUUID})` : ''
+    )
   } else {
     throw new Error('Unknown payload type')
   }

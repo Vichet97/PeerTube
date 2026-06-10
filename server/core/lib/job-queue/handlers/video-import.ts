@@ -130,7 +130,28 @@ async function maybeDeferVideoImportForLocalPipeline (
   })
   const effectiveBacklogTotal = getVideoImportLocalPipelineBackpressureTotal(backlog)
 
-  if (!isVideoImportLocalPipelineBacklogged({ total: effectiveBacklogTotal, maxJobs })) return false
+  if (!shouldDeferVideoImportForLocalPipeline({
+    jobId: job.id,
+    total: effectiveBacklogTotal,
+    maxJobs
+  })) {
+    if (isVideoImportBackpressureJobId(job.id) && isVideoImportLocalPipelineBacklogged({ total: effectiveBacklogTotal, maxJobs })) {
+      logger.warn(
+        '[VIDEO_IMPORT] Backpressure retry job %s for import %d hit the backlog gate again at %d/%d. ' +
+        'Continuing without another deferral to avoid indefinite "To import" loops.',
+        job.id,
+        videoImport.id,
+        effectiveBacklogTotal,
+        maxJobs,
+        {
+          backlogTotal: backlog.total,
+          backlogByType: backlog.byType
+        }
+      )
+    }
+
+    return false
+  }
 
   const delayMs = buildVideoImportLocalPipelineBackpressureDelayMs({
     total: effectiveBacklogTotal,
@@ -237,6 +258,16 @@ export function isVideoImportLocalPipelineBacklogged (options: {
   maxJobs: number
 }) {
   return options.maxJobs > 0 && options.total >= options.maxJobs
+}
+
+export function shouldDeferVideoImportForLocalPipeline (options: {
+  jobId: string | number | undefined
+  total: number
+  maxJobs: number
+}) {
+  if (!isVideoImportLocalPipelineBacklogged({ total: options.total, maxJobs: options.maxJobs })) return false
+
+  return !isVideoImportBackpressureJobId(options.jobId)
 }
 
 export function buildVideoImportBackpressureJobId (

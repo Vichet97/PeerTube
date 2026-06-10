@@ -5,12 +5,13 @@ import { remove } from 'fs-extra/esm'
 import { mkdtemp, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { VideoState } from '@peertube/peertube-models'
+import { FileStorage, VideoState } from '@peertube/peertube-models'
 import {
   buildRetainedLocalFileCleanupDelay,
   maybeTransitionAfterObjectStorageMove,
   removeLocalFileAfterMove
 } from '@peertube/peertube-server/core/lib/move-storage/move-to-object-storage.js'
+import { pickCaptionsForMoveBatch } from '@peertube/peertube-server/core/lib/move-storage/shared/move-caption.js'
 import { CONFIG } from '@peertube/peertube-server/core/initializers/config.js'
 import { VideoPathManager } from '@peertube/peertube-server/core/lib/video-path-manager.js'
 import { VideoModel } from '@peertube/peertube-server/core/models/video/video.js'
@@ -81,19 +82,45 @@ describe('move-to-object-storage', function () {
   })
 
   it('should build caption moves on the dedicated caption queue', async function () {
-    const originalGetExistingCaptionMoveJob = JobQueue.Instance.getExistingCaptionMoveJob
-    JobQueue.Instance.getExistingCaptionMoveJob = (() => Promise.resolve(null)) as typeof JobQueue.Instance.getExistingCaptionMoveJob
+    const originalGetExistingCaptionMoveJobByVideoUUID = JobQueue.Instance.getExistingCaptionMoveJobByVideoUUID
+    JobQueue.Instance.getExistingCaptionMoveJobByVideoUUID =
+      (() => Promise.resolve(null)) as typeof JobQueue.Instance.getExistingCaptionMoveJobByVideoUUID
 
     try {
-      const job = await buildCaptionMoveJob(42)
+      const job = await buildCaptionMoveJob(42, 'video-uuid')
 
       expect(job).to.deep.equal({
         type: 'move-caption-to-object-storage',
-        payload: { captionId: 42 }
+        payload: { captionId: 42, videoUUID: 'video-uuid' }
       })
     } finally {
-      JobQueue.Instance.getExistingCaptionMoveJob = originalGetExistingCaptionMoveJob
+      JobQueue.Instance.getExistingCaptionMoveJobByVideoUUID = originalGetExistingCaptionMoveJobByVideoUUID
     }
+  })
+
+  it('should batch caption moves by video and skip already-processed captions', function () {
+    const selected = pickCaptionsForMoveBatch({
+      representativeCaptionId: 2,
+      includeAllVideoCaptions: true,
+      captions: [
+        { id: 1, storage: FileStorage.OBJECT_STORAGE, m3u8Filename: 'caption-1.m3u8' } as any,
+        { id: 2, storage: FileStorage.FILE_SYSTEM, m3u8Filename: null } as any,
+        { id: 3, storage: FileStorage.FILE_SYSTEM, m3u8Filename: 'caption-3.m3u8' } as any
+      ]
+    })
+
+    expect(selected.map(c => c.id)).to.deep.equal([ 2, 3 ])
+
+    const emptySelection = pickCaptionsForMoveBatch({
+      representativeCaptionId: 1,
+      includeAllVideoCaptions: true,
+      captions: [
+        { id: 1, storage: FileStorage.OBJECT_STORAGE, m3u8Filename: 'caption-1.m3u8' } as any,
+        { id: 2, storage: FileStorage.OBJECT_STORAGE, m3u8Filename: 'caption-2.m3u8' } as any
+      ]
+    })
+
+    expect(emptySelection).to.deep.equal([])
   })
 
   it('should roll back pendingMove for granular move jobs that were not queued', async function () {

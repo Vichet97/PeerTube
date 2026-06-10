@@ -78,23 +78,37 @@ export async function buildMoveVideoJob (options: {
   }
 }
 
-export async function buildCaptionMoveJob (captionId: number) {
-  // Check if there's already a pending/active move job for this caption
-  const existingJob = await JobQueue.Instance.getExistingCaptionMoveJob(captionId)
+export async function buildCaptionMoveJob (captionId: number, videoUUID?: string) {
+  // Check if there's already a pending/active move job for this caption/video batch
+  const existingJob = videoUUID
+    ? await JobQueue.Instance.getExistingCaptionMoveJobByVideoUUID(videoUUID)
+    : await JobQueue.Instance.getExistingCaptionMoveJob(captionId)
   if (existingJob) {
     // Check if job failed by looking at failedReason
     const hasFailed = existingJob.failedReason !== undefined && existingJob.failedReason !== null
     if (hasFailed) {
-      logger.info(`[MOVE_JOB] Previous caption job %s failed, will create new job for caption %s`, existingJob.id, captionId)
+      logger.info(
+        `[MOVE_JOB] Previous caption job %s failed, will create new job for caption %s%s`,
+        existingJob.id,
+        captionId,
+        videoUUID ? ` (video ${videoUUID})` : ''
+      )
     } else {
-      logger.info(`[MOVE_JOB] Skipping duplicate move job for caption %s - job %s already pending/active`, captionId, existingJob.id)
+      logger.info(
+        `[MOVE_JOB] Skipping duplicate move job for caption %s%s - job %s already pending/active`,
+        captionId,
+        videoUUID ? ` (video ${videoUUID})` : '',
+        existingJob.id
+      )
       return undefined
     }
   }
 
   return {
     type: 'move-caption-to-object-storage' as const,
-    payload: { captionId }
+    payload: videoUUID
+      ? { captionId, videoUUID }
+      : { captionId }
   }
 }
 

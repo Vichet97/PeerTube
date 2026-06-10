@@ -802,6 +802,21 @@ class JobQueue {
     return matchingJobs.find(job => job.failedReason === undefined || job.failedReason === null) || matchingJobs[0] || null
   }
 
+  async getExistingCaptionMoveJobByVideoUUID (videoUUID: string) {
+    const queues = [
+      this.queues['move-to-object-storage'],
+      this.queues['move-caption-to-object-storage']
+    ].filter(Boolean)
+    if (queues.length === 0) return null
+
+    const states: ('waiting' | 'delayed' | 'active' | 'failed')[] = [ 'waiting', 'delayed', 'active', 'failed' ]
+    const jobs = (await Promise.all(queues.map(queue => queue.getJobs(states, 0, 10000, true)))).flat()
+
+    const matchingJobs = jobs.filter((job: Job) => job.data?.videoUUID === videoUUID)
+
+    return matchingJobs.find(job => job.failedReason === undefined || job.failedReason === null) || matchingJobs[0] || null
+  }
+
   async getExistingHLSPlaylistMoveJobs (videoUUID: string, playlistId: number, fileIds: number[], options?: {
     match?: 'exact' | 'overlap'
   }) {
