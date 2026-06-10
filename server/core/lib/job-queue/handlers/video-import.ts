@@ -1,4 +1,4 @@
-import { buildAspectRatio } from '@peertube/peertube-core-utils'
+import { buildAspectRatio, timeoutPromise } from '@peertube/peertube-core-utils'
 import { ffprobePromise, getChaptersFromContainer, getVideoStreamDuration } from '@peertube/peertube-ffmpeg'
 import {
   VideoImportPayload,
@@ -57,6 +57,7 @@ import { getFSTorrentFilePath } from '../../paths.js'
 
 const VIDEO_IMPORT_LOCAL_PIPELINE_BACKPRESSURE_DELAY_MS = 10 * 60 * 1000
 const VIDEO_IMPORT_LOCAL_PIPELINE_BACKPRESSURE_MIN_DELAY_MS = 2 * 60 * 1000
+export const VIDEO_IMPORT_PREPARATION_STEP_TIMEOUT_MS = 10 * 60 * 1000
 
 async function processVideoImport (job: Job): Promise<VideoImportPreventExceptionResult> {
   const payload = job.data as VideoImportPayload
@@ -497,8 +498,18 @@ async function processFile (downloader: () => Promise<string>, videoImport: MVid
       tmpVideoPath = null // This path is not used anymore
 
       const [ thumbnails ] = await Promise.all([
-        generateThumbnails({ videoImportWithFiles, videoFile, ffprobe }),
-        createTorrentAndSetInfoHash(videoImportWithFiles.Video, videoFile)
+        runImportPreparationStep({
+          importId: videoImport.id,
+          videoUUID: videoImportWithFiles.Video.uuid,
+          step: 'generate-thumbnails',
+          run: () => generateThumbnails({ videoImportWithFiles, videoFile, ffprobe })
+        }),
+        runImportPreparationStep({
+          importId: videoImport.id,
+          videoUUID: videoImportWithFiles.Video.uuid,
+          step: 'create-torrent',
+          run: () => createTorrentAndSetInfoHash(videoImportWithFiles.Video, videoFile)
+        })
       ])
 
       // The transaction below can be retried on serialization/deadlock errors.
@@ -615,6 +626,61 @@ async function generateThumbnails (options: {
   if (videoImportWithFiles.Video.Thumbnails.length !== 0) return []
 
   return createLocalVideoThumbnailsFromVideo({ video: videoImportWithFiles.Video, videoFile, ffprobe })
+}
+
+export async function runImportPreparationStep <T> (options: {
+  importId: number
+  videoUUID: string
+  step: string
+  run: () => Promise<T>
+  timeoutMs?: number
+}): Promise<T> {
+  const {
+    importId,
+    videoUUID,
+    step,
+    run,
+    timeoutMs = VIDEO_IMPORT_PREPARATION_STEP_TIMEOUT_MS
+  } = options
+  const startedAt = Date.now()
+
+  logger.info('[VIDEO_IMPORT] Starting preparation step %s for import %d video %s', step, importId, videoUUID)
+
+  try {
+    const promise = Promise.resolve().then(run)
+    const result = await timeoutPromise(promise, timeoutMs) as T
+
+    logger.info(
+      '[VIDEO_IMPORT] Finished preparation step %s for import %d video %s in %dms',
+      step,
+      importId,
+      videoUUID,
+      Date.now() - startedAt
+    )
+
+    return result
+  } catch (err) {
+    const elapsedMs = Date.now() - startedAt
+    const stepError = err instanceof Error
+      ? err.message === 'Timeout'
+        ? new Error(
+            `Video import preparation step ${step} timed out after ${timeoutMs}ms for import ${importId} video ${videoUUID}`,
+            { cause: err }
+          )
+        : err
+      : new Error(`Video import preparation step ${step} failed for import ${importId} video ${videoUUID}`, { cause: err })
+
+    logger.error(
+      '[VIDEO_IMPORT] Preparation step %s failed for import %d video %s after %dms',
+      step,
+      importId,
+      videoUUID,
+      elapsedMs,
+      { err: stepError, timeoutMs }
+    )
+
+    throw stepError
+  }
 }
 
 export function buildRetryableImportedVideoFileFactory (videoFile: MVideoFile) {
