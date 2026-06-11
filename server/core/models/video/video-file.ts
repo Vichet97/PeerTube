@@ -362,6 +362,23 @@ export class VideoFileModel extends SequelizeModel<VideoFileModel> {
     return VideoFileModel.findAll<MVideoFile>(query)
   }
 
+  static listByStreamingPlaylistWithMetadata (streamingPlaylistId: number, transaction?: Transaction) {
+    const query = {
+      include: [
+        {
+          model: VideoStreamingPlaylistModel.unscoped(),
+          required: true,
+          where: {
+            id: streamingPlaylistId
+          }
+        }
+      ],
+      transaction
+    }
+
+    return VideoFileModel.scope(ScopeNames.WITH_METADATA).findAll<MVideoFile>(query)
+  }
+
   static getStats () {
     const webVideoFilesQuery: FindOptions = {
       include: [

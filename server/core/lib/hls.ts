@@ -6,6 +6,7 @@ import { ApplicationModel } from '@server/models/application/application.js'
 import { VideoCaptionModel } from '@server/models/video/video-caption.js'
 import { MStreamingPlaylist, MStreamingPlaylistFilesVideo, MVideo, MVideoCaption } from '@server/types/models/index.js'
 import { MVideoFileStreamingPlaylist } from '@server/types/models/video/video-file.js'
+import { FfprobeData } from 'fluent-ffmpeg'
 import { ensureDir, move, outputJSON, pathExists, remove } from 'fs-extra/esm'
 import { open, readFile, stat, writeFile } from 'fs/promises'
 import flatten from 'lodash-es/flatten.js'
@@ -36,6 +37,32 @@ function getPublishedVideoFiles<T extends { storage: FileStorageType }> (playlis
   if (playlistStorage !== FileStorage.OBJECT_STORAGE) return videoFiles
 
   return videoFiles.filter(file => file.storage === FileStorage.OBJECT_STORAGE)
+}
+
+export function getStoredVideoFileProbeData (file: Pick<MVideoFileStreamingPlaylist, 'metadata'>) {
+  const metadata = file.metadata as FfprobeData | undefined
+  if (!metadata?.streams || !Array.isArray(metadata.streams)) return undefined
+
+  return metadata
+}
+
+export async function resolveHLSPlaylistFileProbeInput (file: MVideoFileStreamingPlaylist, playlist: MStreamingPlaylistFilesVideo) {
+  const storedProbe = getStoredVideoFileProbeData(file)
+  if (storedProbe) {
+    return {
+      path: file.filename,
+      probe: storedProbe,
+      fetchedFromStorage: false
+    }
+  }
+
+  return VideoPathManager.Instance.makeAvailableVideoFile(file.withVideoOrPlaylist(playlist), async videoFilePath => {
+    return {
+      path: videoFilePath,
+      probe: await ffprobePromise(videoFilePath),
+      fetchedFromStorage: true
+    }
+  })
 }
 
 export async function updateStreamingPlaylistsInfohashesIfNeeded () {
@@ -137,7 +164,7 @@ function updateMasterHLSPlaylist (video: MVideo, playlistArg: MStreamingPlaylist
     if (!playlist) return null
 
     const captions = await VideoCaptionModel.listVideoCaptions(video.id)
-    const videoFiles = await VideoFileModel.listByStreamingPlaylist(playlist.id)
+    const videoFiles = await VideoFileModel.listByStreamingPlaylistWithMetadata(playlist.id)
 
     const extMediaAudio: string[] = []
     const extMediaSubtitle: string[] = []
@@ -162,43 +189,43 @@ function updateMasterHLSPlaylist (video: MVideo, playlistArg: MStreamingPlaylist
     for (const file of sortBy(publishedVideoFiles, 'resolution')) {
       const playlistFilename = getHLSResolutionPlaylistFilename(file.filename)
 
-      await VideoPathManager.Instance.makeAvailableVideoFile(file.withVideoOrPlaylist(playlist), async videoFilePath => {
-        const probe = await ffprobePromise(videoFilePath)
+      const { path: videoFilePath, probe } = await resolveHLSPlaylistFileProbeInput(file.withVideoOrPlaylist(playlist), playlist)
 
-        if (splitAudioAndVideo && file.resolution === VideoResolution.H_NOVIDEO) {
-          separatedAudioCodec = await getAudioStreamCodec(videoFilePath, probe)
-        }
+      if (splitAudioAndVideo && file.resolution === VideoResolution.H_NOVIDEO) {
+        separatedAudioCodec = await getAudioStreamCodec(videoFilePath, probe)
+      }
 
-        const size = await getVideoStreamDimensionsInfo(videoFilePath, probe)
+      const size = file.hasVideo()
+        ? { width: file.width || 0, height: file.height || 0 }
+        : await getVideoStreamDimensionsInfo(videoFilePath, probe)
 
-        const bandwidth = 'BANDWIDTH=' + video.getBandwidthBits(file)
-        const resolution = file.resolution === VideoResolution.H_NOVIDEO
-          ? ''
-          : `,RESOLUTION=${size?.width || 0}x${size?.height || 0}`
+      const bandwidth = 'BANDWIDTH=' + video.getBandwidthBits(file)
+      const resolution = file.resolution === VideoResolution.H_NOVIDEO
+        ? ''
+        : `,RESOLUTION=${size?.width || 0}x${size?.height || 0}`
 
-        let line = `#EXT-X-STREAM-INF:${bandwidth}${resolution}`
-        if (file.fps) line += ',FRAME-RATE=' + file.fps
+      let line = `#EXT-X-STREAM-INF:${bandwidth}${resolution}`
+      if (file.fps) line += ',FRAME-RATE=' + file.fps
 
-        const codecs = await Promise.all([
-          getVideoStreamCodec(videoFilePath, probe),
-          separatedAudioCodec || getAudioStreamCodec(videoFilePath, probe)
-        ])
+      const codecs = await Promise.all([
+        getVideoStreamCodec(videoFilePath, probe),
+        separatedAudioCodec || getAudioStreamCodec(videoFilePath, probe)
+      ])
 
-        line += `,CODECS="${codecs.filter(c => !!c).join(',')}"`
+      line += `,CODECS="${codecs.filter(c => !!c).join(',')}"`
 
-        if (splitAudioAndVideo) line += `,AUDIO="audio"`
-        if (extMediaSubtitle.length !== 0) line += `,SUBTITLES="subtitles"`
+      if (splitAudioAndVideo) line += `,AUDIO="audio"`
+      if (extMediaSubtitle.length !== 0) line += `,SUBTITLES="subtitles"`
 
-        // Don't include audio only resolution as a regular "video" resolution
-        // Some player may use it automatically and so the user would not have a video stream
-        // But if it's the only resolution we can treat it as a regular stream
-        if (resolution || (!splitAudioAndVideo && publishedVideoFiles.length === 1)) {
-          extStreamInfo.push(line)
-          extStreamInfo.push(playlistFilename)
-        } else if (splitAudioAndVideo && hasPublishedVideoFiles) {
-          extMediaAudio.push(`#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Audio",AUTOSELECT=YES,DEFAULT=YES,URI="${playlistFilename}"`)
-        }
-      })
+      // Don't include audio only resolution as a regular "video" resolution
+      // Some player may use it automatically and so the user would not have a video stream
+      // But if it's the only resolution we can treat it as a regular stream
+      if (resolution || (!splitAudioAndVideo && publishedVideoFiles.length === 1)) {
+        extStreamInfo.push(line)
+        extStreamInfo.push(playlistFilename)
+      } else if (splitAudioAndVideo && hasPublishedVideoFiles) {
+        extMediaAudio.push(`#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Audio",AUTOSELECT=YES,DEFAULT=YES,URI="${playlistFilename}"`)
+      }
     }
 
     const masterPlaylists = [ '#EXTM3U', '#EXT-X-VERSION:3', '', ...extMediaSubtitle, '', ...extMediaAudio, '', ...extStreamInfo ]
