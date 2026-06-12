@@ -32,16 +32,16 @@ import {
   VideoTranscodingPayload,
   VideoTranscriptionPayload
 } from '@peertube/peertube-models'
-import { jobStates } from '@server/helpers/custom-validators/jobs.js'
-import { toCompleteUUID } from '@server/helpers/custom-validators/misc.js'
-import { CONFIG, registerConfigChangedHandler } from '@server/initializers/config.js'
+import { jobStates } from '../../helpers/custom-validators/jobs.js'
+import { toCompleteUUID } from '../../helpers/custom-validators/misc.js'
+import { CONFIG, registerConfigChangedHandler } from '../../initializers/config.js'
 import {
   DeletedVideoJobIdentifiers,
   listDeletedVideoJobTypes,
   shouldRemoveDeletedVideoJob
-} from '@server/lib/job-queue/deleted-video-job-matchers.js'
-import { processVideoRedundancy } from '@server/lib/job-queue/handlers/video-redundancy.js'
-import { scheduleRetainedLocalFilesCleanup } from '@server/lib/move-storage/move-to-object-storage.js'
+} from './deleted-video-job-matchers.js'
+import { processVideoRedundancy } from './handlers/video-redundancy.js'
+import { scheduleRetainedLocalFilesCleanup } from '../move-storage/move-to-object-storage.js'
 import {
   FlowJob,
   FlowProducer,
@@ -92,6 +92,7 @@ import { processVideoTranscoding } from './handlers/video-transcoding.js'
 import { processVideoTranscription } from './handlers/video-transcription.js'
 import { processVideosViewsStats } from './handlers/video-views-stats.js'
 import { Op } from 'sequelize'
+import { Redis as IORedis } from 'ioredis'
 
 const TRANSCODING_PROGRESS_CACHE_TTL_MS = 1000
 
@@ -243,8 +244,10 @@ class JobQueue {
   private workers: { [id in JobType]?: Worker } = {}
   private queues: { [id in JobType]?: Queue } = {}
   private queueEvents: { [id in JobType]?: QueueEvents } = {}
+  private readonly startedQueueEvents = new Set<JobType>()
 
   private flowProducer: FlowProducer
+  private sharedRedisClient: IORedis
 
   private initialized = false
   private jobRedisPrefix: string
@@ -262,15 +265,16 @@ class JobQueue {
     this.initialized = true
 
     this.jobRedisPrefix = 'bull-' + WEBSERVER.HOST
+    this.sharedRedisClient = new IORedis(Redis.getRedisClientOptions('BullMQShared', { maxRetriesPerRequest: null }))
+    const disableWorkers = process.env.PEERTUBE_TEST_DISABLE_JOB_WORKERS === 'true'
 
     for (const handlerName of Object.keys(handlers)) {
-      this.buildWorker(handlerName)
+      if (!disableWorkers) this.buildWorker(handlerName)
       this.buildQueue(handlerName)
-      this.buildQueueEvent(handlerName)
     }
 
     this.flowProducer = new FlowProducer({
-      connection: Redis.getRedisClientOptions('FlowProducer'),
+      connection: this.sharedRedisClient,
       prefix: this.jobRedisPrefix
     })
     this.flowProducer.on('error', err => {
@@ -280,8 +284,13 @@ class JobQueue {
     this.addRepeatableJobs()
 
     registerConfigChangedHandler(() => {
+      if (disableWorkers) return
+
       for (const handlerName of Object.keys(handlers)) {
-        this.workers[handlerName].concurrency = this.getJobConcurrency(handlerName)
+        const worker = this.workers[handlerName]
+        if (!worker) continue
+
+        worker.concurrency = this.getJobConcurrency(handlerName)
       }
     })
   }
@@ -307,7 +316,7 @@ class JobQueue {
       autorun: false,
       concurrency: this.getJobConcurrency(handlerName),
       prefix: this.jobRedisPrefix,
-      connection: Redis.getRedisClientOptions('Worker'),
+      connection: this.sharedRedisClient,
       maxStalledCount: 10,
       lockDuration
     }
@@ -359,7 +368,7 @@ class JobQueue {
 
   private buildQueue (handlerName: JobType) {
     const queueOptions: QueueOptions = {
-      connection: Redis.getRedisClientOptions('Queue'),
+      connection: this.sharedRedisClient,
       prefix: this.jobRedisPrefix
     }
 
@@ -375,9 +384,12 @@ class JobQueue {
   }
 
   private buildQueueEvent (handlerName: JobType) {
+    const existing = this.queueEvents[handlerName]
+    if (existing) return existing
+
     const queueEventsOptions: QueueEventsOptions = {
       autorun: false,
-      connection: Redis.getRedisClientOptions('QueueEvent'),
+      connection: this.sharedRedisClient,
       prefix: this.jobRedisPrefix
     }
 
@@ -387,6 +399,7 @@ class JobQueue {
     })
 
     this.queueEvents[handlerName] = queueEvents
+    return queueEvents
   }
 
   // ---------------------------------------------------------------------------
@@ -401,11 +414,15 @@ class JobQueue {
         return Promise.all([
           worker.close(false),
           queue.close(),
-          queueEvent.close()
+          queueEvent?.close()
         ])
       })
 
-    return Promise.all(promises)
+    await Promise.all(promises)
+
+    if (this.sharedRedisClient) {
+      await this.sharedRedisClient.quit().catch(() => this.sharedRedisClient.disconnect())
+    }
   }
 
   start () {
@@ -414,11 +431,9 @@ class JobQueue {
     const promises = Object.keys(this.workers)
       .map(handlerName => {
         const worker: Worker = this.workers[handlerName]
-        const queueEvent: QueueEvents = this.queueEvents[handlerName]
 
         return Promise.all([
-          worker.run(),
-          queueEvent.run()
+          worker.run()
         ])
       })
 
@@ -858,8 +873,14 @@ class JobQueue {
     const queue = this.queues[jobType]
     if (!queue) return
 
-    const queueEvents = this.queueEvents[jobType]
-    if (!queueEvents) return
+    const queueEvents = this.queueEvents[jobType] ?? this.buildQueueEvent(jobType)
+
+    if (!this.startedQueueEvents.has(jobType)) {
+      await queueEvents.waitUntilReady()
+      void queueEvents.run()
+        .catch(err => logger.error('Error while running on-demand job queue events %s.', jobType, { err }))
+      this.startedQueueEvents.add(jobType)
+    }
 
     const job = await queue.getJob(String(jobId))
     if (!job) {

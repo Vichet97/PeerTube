@@ -177,6 +177,10 @@ const FAILED_VIDEO_STATES = new Set<VideoStateType>([
   VideoState.TO_MOVE_TO_EXTERNAL_STORAGE_FAILED,
   VideoState.TO_MOVE_TO_FILE_SYSTEM_FAILED
 ])
+const ORPHAN_INCOMPLETE_VIDEO_IMPORT_STATES = [
+  VideoImportState.PENDING,
+  VideoImportState.PROCESSING
+] as const
 const VIDEO_QUEUE_CLEAN_STATES = [
   'completed',
   'failed',
@@ -966,8 +970,9 @@ async function cleanupOrphanSystemResetDbRecords (): Promise<SystemResetDbCleanu
 
   const [ orphanVideoImportsDeleted ] = await sequelizeTypescript.query(
     'DELETE FROM "videoImport" ' +
-    'WHERE "videoId" IS NOT NULL ' +
-    'AND NOT EXISTS (SELECT 1 FROM "video" WHERE "video"."id" = "videoImport"."videoId")',
+    'WHERE ("videoId" IS NULL ' +
+    'OR NOT EXISTS (SELECT 1 FROM "video" WHERE "video"."id" = "videoImport"."videoId")) ' +
+    `AND "state" IN (${ORPHAN_INCOMPLETE_VIDEO_IMPORT_STATES.join(', ')})`,
     { raw: true }
   )
   const [ orphanVideoJobInfoDeleted ] = await sequelizeTypescript.query(
