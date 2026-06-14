@@ -640,6 +640,27 @@ describe('Test video imports', function () {
       expect(data).to.have.lengthOf(0)
     })
 
+    it('Should mark a pending import as failed if its linked video is deleted', async function () {
+      await server.jobs.pauseJobQueue()
+
+      pendingImportId = await importVideo('delete pending import video')
+
+      const beforeDelete = await server.videoImports.listMyVideoImports({ id: pendingImportId })
+      expect(beforeDelete.total).to.equal(1)
+      expect(beforeDelete.data).to.have.lengthOf(1)
+      expect(beforeDelete.data[0].state.id).to.equal(VideoImportState.PENDING)
+
+      const pendingVideoId = beforeDelete.data[0].video.id
+      await server.videos.remove({ id: pendingVideoId })
+
+      const afterDelete = await server.videoImports.listMyVideoImports({ id: pendingImportId })
+      expect(afterDelete.total).to.equal(1)
+      expect(afterDelete.data).to.have.lengthOf(1)
+      expect(afterDelete.data[0].state.id).to.equal(VideoImportState.FAILED)
+      expect(afterDelete.data[0].error).to.contain('Video was deleted before import completed.')
+      expect(afterDelete.data[0].video ?? null).to.be.null
+    })
+
     it('Should fail an import', async function () {
       await server.jobs.pauseJobQueue()
 

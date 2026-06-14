@@ -1,4 +1,4 @@
-import { HttpStatusCode, VideoChannelActivityAction, VideoState } from '@peertube/peertube-models'
+import { HttpStatusCode, VideoChannelActivityAction, VideoImportState, VideoState } from '@peertube/peertube-models'
 import { pickCommonVideoQuery } from '@server/helpers/query.js'
 import { openapiOperationDoc } from '@server/middlewares/doc.js'
 import { getServerActor } from '@server/models/application/application.js'
@@ -234,6 +234,16 @@ async function listVideos (req: express.Request, res: express.Response) {
 async function removeVideo (req: express.Request, res: express.Response) {
   const videoInstance = res.locals.videoAll
   const videoImport = await VideoImportModel.unscoped().findOne({ where: { videoId: videoInstance.id } })
+
+  if (
+    videoImport &&
+    (videoImport.state === VideoImportState.PENDING || videoImport.state === VideoImportState.PROCESSING)
+  ) {
+    videoImport.state = VideoImportState.FAILED
+    videoImport.progress = null
+    videoImport.error = 'Video was deleted before import completed.'
+    await videoImport.save()
+  }
 
   // Set Redis flag so active transcoding workers can detect deletion and exit promptly
   await Redis.Instance.setVideoDeletionFlag(videoInstance.uuid)
