@@ -19,22 +19,6 @@ import { buildCaptionMoveJob, createPendingMoveJobs } from '@peertube/peertube-s
 import { JobQueue } from '@peertube/peertube-server/core/lib/job-queue/index.js'
 import { VideoJobInfoModel } from '@peertube/peertube-server/core/models/video/video-job-info.js'
 
-async function waitUntil (condition: () => boolean, options: {
-  timeoutMs?: number
-  intervalMs?: number
-} = {}) {
-  const { timeoutMs = 2_000, intervalMs = 25 } = options
-  const deadline = Date.now() + timeoutMs
-
-  while (Date.now() < deadline) {
-    if (condition()) return
-
-    await new Promise(resolve => setTimeout(resolve, intervalMs))
-  }
-
-  throw new Error(`Condition not met within ${timeoutMs} ms`)
-}
-
 describe('move-to-object-storage', function () {
   it('should skip stale move completion when the video is back in TO_TRANSCODE', async function () {
     const originalLoadFull = VideoModel.loadFull
@@ -191,7 +175,7 @@ describe('move-to-object-storage', function () {
     })).to.equal(0)
   })
 
-  it('should delete retained local files after active work unlocks even if future counters remain pending', async function () {
+  it('should keep retained local files after unlock while pipeline counters remain pending', async function () {
     this.timeout(5_000)
 
     const originalKeepLocalFileAfterMove = CONFIG.OBJECT_STORAGE.KEEP_LOCAL_FILE_AFTER_MOVE
@@ -223,9 +207,10 @@ describe('move-to-object-storage', function () {
 
       releaser()
 
-      await waitUntil(() => existsSync(path) === false)
-      expect(existsSync(path)).to.be.false
+      await new Promise(resolve => setTimeout(resolve, 500))
+      expect(existsSync(path)).to.be.true
     } finally {
+      expect(existsSync(path)).to.be.false
       releaser()
 
       CONFIG.OBJECT_STORAGE.KEEP_LOCAL_FILE_AFTER_MOVE = originalKeepLocalFileAfterMove
@@ -234,4 +219,59 @@ describe('move-to-object-storage', function () {
       await remove(tmpDirectory).catch(() => {})
     }
   })
+
+  it('should keep retained local files while pipeline counters are still pending', async function () {
+    this.timeout(5_000)
+
+    const originalKeepLocalFileAfterMove = CONFIG.OBJECT_STORAGE.KEEP_LOCAL_FILE_AFTER_MOVE
+    const originalLoadByUUID = VideoJobInfoModel.loadByUUID
+
+    const videoUUID = 'video-uuid-pending-counters'
+    const tmpDirectory = await mkdtemp(join(tmpdir(), 'peertube-retained-pending-'))
+    const path = join(tmpDirectory, 'segment.ts')
+
+    CONFIG.OBJECT_STORAGE.KEEP_LOCAL_FILE_AFTER_MOVE = 0
+
+    let loadCount = 0
+    VideoJobInfoModel.loadByUUID = ((uuid: string) => {
+      if (uuid !== videoUUID) return Promise.resolve(null as any)
+
+      loadCount++
+      if (loadCount < 3) {
+        return Promise.resolve({
+          pendingMove: 1,
+          pendingTranscode: 0,
+          pendingTranscription: 0
+        } as any)
+      }
+
+      return Promise.resolve({
+        pendingMove: 0,
+        pendingTranscode: 0,
+        pendingTranscription: 0
+      } as any)
+    }) as typeof VideoJobInfoModel.loadByUUID
+
+    try {
+      await writeFile(path, 'test')
+
+      await removeLocalFileAfterMove({
+        path,
+        videoUUID,
+        skipReadinessCheck: true
+      })
+
+      await new Promise(resolve => setTimeout(resolve, 200))
+      expect(existsSync(path)).to.be.true
+
+      await new Promise(resolve => setTimeout(resolve, 500))
+      expect(existsSync(path)).to.be.true
+    } finally {
+      CONFIG.OBJECT_STORAGE.KEEP_LOCAL_FILE_AFTER_MOVE = originalKeepLocalFileAfterMove
+      VideoJobInfoModel.loadByUUID = originalLoadByUUID
+
+      await remove(tmpDirectory).catch(() => {})
+    }
+  })
+
 })

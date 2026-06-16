@@ -210,13 +210,13 @@ export function buildVideoImportLocalPipelineBackpressureMaxJobs (options: {
 }) {
   const transcodingConcurrency = Math.max(1, options.transcodingConcurrency || 1)
   const objectStorageConcurrency = Math.max(1, options.objectStorageConcurrency || 1)
-  const moveDrainHeadroom = Math.max(5, Math.ceil(objectStorageConcurrency / 2))
+  const moveDrainHeadroom = Math.max(8, Math.ceil(objectStorageConcurrency))
 
   // We already dedupe backlog by video UUID, so use a little extra headroom for
   // short bursts while the object-storage movers drain. Without this, imports
   // tend to bounce into repeated 10-minute deferrals when the pipeline is busy
   // but still healthy.
-  return Math.max(10, transcodingConcurrency * 2 + objectStorageConcurrency + moveDrainHeadroom)
+  return Math.max(15, transcodingConcurrency * 3 + objectStorageConcurrency + moveDrainHeadroom)
 }
 
 export function buildVideoImportLocalPipelineBackpressureDelayMs (options: {

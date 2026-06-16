@@ -267,12 +267,11 @@ async function processMoveHLSPlaylist (
     const fragmentExists = await pathExists(fragmentPath)
     const playlistExists = await pathExists(playlistPath)
 
-    if (!fragmentExists && !await isHLSFileAlreadyReadyOnObjectStorage(video, videoFile.filename)) {
-      missingFiles.push(fragmentPath)
-    }
-    if (!playlistExists && !await isHLSFileAlreadyReadyOnObjectStorage(video, playlistFilename)) {
-      missingFiles.push(playlistPath)
-    }
+    const fragmentReadyOnOS = fragmentExists || await isHLSFileAlreadyReadyOnObjectStorage(video, videoFile.filename)
+    const playlistReadyOnOS = playlistExists || await isHLSFileAlreadyReadyOnObjectStorage(video, playlistFilename)
+
+    if (!fragmentReadyOnOS) missingFiles.push(fragmentPath)
+    if (!playlistReadyOnOS) missingFiles.push(playlistPath)
 
     filesToMove.push(fileId)
   }

@@ -342,17 +342,31 @@ export async function moveHLSSegmentFilesToObjectStorage (
     const resolutionPlaylistExists = await pathExists(playlistPath)
 
     if (!fragmentExists) {
-      await ensureObjectStorageFileReady({
-        objectStorageKey: generateHLSObjectStorageKey(video, fragmentFilename),
-        bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS
+      const fragmentReady = await checkObjectStorageReadiness({
+        key: generateHLSObjectStorageKey(video, fragmentFilename),
+        bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS,
+        maxRetries: 1,
+        retryIntervalMs: 0,
+        logNotReadyAsDebug: true
       })
+
+      if (!fragmentReady) {
+        throw new Error(`HLS fragment ${fragmentFilename} is missing locally and not ready in object storage`)
+      }
     }
 
     if (!resolutionPlaylistExists) {
-      await ensureObjectStorageFileReady({
-        objectStorageKey: generateHLSObjectStorageKey(video, playlistFilename),
-        bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS
+      const resolutionPlaylistReady = await checkObjectStorageReadiness({
+        key: generateHLSObjectStorageKey(video, playlistFilename),
+        bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS,
+        maxRetries: 1,
+        retryIntervalMs: 0,
+        logNotReadyAsDebug: true
       })
+
+      if (!resolutionPlaylistReady) {
+        throw new Error(`HLS resolution playlist ${playlistFilename} is missing locally and not ready in object storage`)
+      }
     }
 
     if (!fragmentExists && !resolutionPlaylistExists) {
@@ -1899,6 +1913,39 @@ function scheduleLocalFileRemovalAfterActiveFileWork (options: {
             lTagsBase(videoUUID)
           )
           return
+        }
+
+        const jobInfo = await VideoJobInfoModel.loadByUUID(videoUUID)
+        const pendingMove = jobInfo?.pendingMove ?? 0
+        const pendingTranscode = jobInfo?.pendingTranscode ?? 0
+        const pendingTranscription = jobInfo?.pendingTranscription ?? 0
+
+        if (pendingMove > 0 || pendingTranscode > 0 || pendingTranscription > 0) {
+          logger.info(
+            'Keeping local file %s for video %s because pipeline counters are still pending ' +
+            '(pendingMove=%d, pendingTranscode=%d, pendingTranscription=%d).',
+            path,
+            videoUUID,
+            pendingMove,
+            pendingTranscode,
+            pendingTranscription,
+            lTagsBase(videoUUID)
+          )
+
+          await wait(CONFIG.OBJECT_STORAGE.MOVE_FILE_DELAY || LOCAL_CLEANUP_RETRY_DELAY_MS)
+          continue
+        }
+
+        if (await JobQueue.Instance.hasPendingOrActiveLocalFileConsumerJob(videoUUID)) {
+          logger.info(
+            'Keeping local file %s for video %s because queued local file consumer jobs are still pending.',
+            path,
+            videoUUID,
+            lTagsBase(videoUUID)
+          )
+
+          await wait(CONFIG.OBJECT_STORAGE.MOVE_FILE_DELAY || LOCAL_CLEANUP_RETRY_DELAY_MS)
+          continue
         }
 
         if (VideoPathManager.Instance.hasLockedFiles(videoUUID)) {
