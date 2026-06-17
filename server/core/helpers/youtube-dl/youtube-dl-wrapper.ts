@@ -189,11 +189,16 @@ export class YoutubeDLWrapper {
     return subtitles
   }
 
-  async downloadVideo (fileExt: string, timeout: number, onProgress?: (percent: number) => void, youtubeDLArgs?: string[]): Promise<string> {
-    // Leave empty the extension, youtube-dl will add it
+  async downloadVideo (
+    fileExt: string,
+    timeout: number,
+    onProgress?: (percent: number) => void,
+    youtubeDLArgs?: string[]
+  ): Promise<string> {
     const pathWithoutExtension = generateVideoImportTmpPath(this.url, '')
+    const outputPath = generateVideoImportTmpPath(this.url, '.mp4')
 
-    logger.info('Importing youtubeDL video %s to %s', this.url, pathWithoutExtension, lTags())
+    logger.info('Importing youtubeDL video %s to %s', this.url, outputPath, lTags())
 
     const youtubeDL = await YoutubeDLCLI.safeGet()
 
@@ -201,16 +206,17 @@ export class YoutubeDLWrapper {
       await youtubeDL.download({
         url: this.url,
         format: YoutubeDLCLI.getYoutubeDLVideoFormat(this.enabledResolutions, this.useBestFormat),
-        output: pathWithoutExtension,
+        output: outputPath,
         timeout,
         processOptions,
         onProgress,
         additionalYoutubeDLArgs: youtubeDLArgs
       })
 
-      // If youtube-dl did not guess an extension for our file, just use .mp4 as default
+      // Some yt-dlp post-processing paths still materialize the file without an
+      // extension. Normalize those leftovers to the explicit .mp4 output path.
       if (await pathExists(pathWithoutExtension)) {
-        await move(pathWithoutExtension, pathWithoutExtension + '.mp4')
+        await move(pathWithoutExtension, outputPath)
       }
 
       const path = await this.guessVideoPathWithExtension(pathWithoutExtension, fileExt)

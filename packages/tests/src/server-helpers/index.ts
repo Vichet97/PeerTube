@@ -1,6 +1,7 @@
 import './activitypub.js'
 import './core-utils.js'
 import './crypto.js'
+import './drm-decrypt.js'
 import './dns.js'
 import './image.js'
 import './markdown.js'

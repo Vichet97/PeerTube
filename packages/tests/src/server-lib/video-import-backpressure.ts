@@ -13,17 +13,17 @@ describe('video-import local pipeline backpressure', function () {
     expect(buildVideoImportLocalPipelineBackpressureMaxJobs({
       transcodingConcurrency: 5,
       objectStorageConcurrency: 10
-    })).to.equal(25)
+    })).to.equal(45)
 
     expect(buildVideoImportLocalPipelineBackpressureMaxJobs({
       transcodingConcurrency: 1,
       objectStorageConcurrency: 1
-    })).to.equal(10)
+    })).to.equal(15)
   })
 
   it('should defer imports when the downstream local pipeline reaches the limit', function () {
     expect(isVideoImportLocalPipelineBacklogged({ total: 24, maxJobs: 25 })).to.be.false
-    expect(isVideoImportLocalPipelineBacklogged({ total: 25, maxJobs: 25 })).to.be.true
+    expect(isVideoImportLocalPipelineBacklogged({ total: 25, maxJobs: 25 })).to.be.false
     expect(isVideoImportLocalPipelineBacklogged({ total: 26, maxJobs: 25 })).to.be.true
   })
 

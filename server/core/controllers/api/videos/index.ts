@@ -245,27 +245,33 @@ async function removeVideo (req: express.Request, res: express.Response) {
     await videoImport.save()
   }
 
-  // Set Redis flag so active transcoding workers can detect deletion and exit promptly
-  await Redis.Instance.setVideoDeletionFlag(videoInstance.uuid)
+  try {
+    // Abort all video-related jobs and remove queued jobs so they don't run after video is deleted
+    await VideoJobInfoModel.abortAllTasks(videoInstance.uuid, 'pendingTranscode')
+    await VideoJobInfoModel.abortAllTasks(videoInstance.uuid, 'pendingMove')
+    await VideoJobInfoModel.abortAllTasks(videoInstance.uuid, 'pendingTranscription')
+    await JobQueue.Instance.removeAllVideoJobsForVideo(videoInstance.uuid, videoInstance.id, videoImport?.id)
+    await cleanupStagedTranscriptionAudio(videoInstance.uuid)
 
-  // Abort all video-related jobs and remove queued jobs so they don't run after video is deleted
-  await VideoJobInfoModel.abortAllTasks(videoInstance.uuid, 'pendingTranscode')
-  await VideoJobInfoModel.abortAllTasks(videoInstance.uuid, 'pendingMove')
-  await VideoJobInfoModel.abortAllTasks(videoInstance.uuid, 'pendingTranscription')
-  await JobQueue.Instance.removeAllVideoJobsForVideo(videoInstance.uuid, videoInstance.id, videoImport?.id)
-  await cleanupStagedTranscriptionAudio(videoInstance.uuid)
+    // Set the Redis deletion flag only immediately before the DB delete so long-running
+    // cleanup work cannot leave a stale flag behind on videos that ultimately survive.
+    await Redis.Instance.setVideoDeletionFlag(videoInstance.uuid)
 
-  await sequelizeTypescript.transaction(async t => {
-    await videoInstance.destroy({ transaction: t })
+    await sequelizeTypescript.transaction(async t => {
+      await videoInstance.destroy({ transaction: t })
 
-    await VideoChannelActivityModel.addVideoActivity({
-      action: VideoChannelActivityAction.DELETE,
-      user: res.locals.oauth.token.User,
-      channel: videoInstance.VideoChannel,
-      video: videoInstance,
-      transaction: t
+      await VideoChannelActivityModel.addVideoActivity({
+        action: VideoChannelActivityAction.DELETE,
+        user: res.locals.oauth.token.User,
+        channel: videoInstance.VideoChannel,
+        video: videoInstance,
+        transaction: t
+      })
     })
-  })
+  } catch (err) {
+    await Redis.Instance.clearVideoDeletionFlag(videoInstance.uuid)
+    throw err
+  }
 
   auditLogger.delete(getAuditIdFromRes(res), new VideoAuditView(await videoInstance.toFormattedDetailsJSON()))
   logger.info('Video with name %s and uuid %s deleted.', videoInstance.name, videoInstance.uuid)

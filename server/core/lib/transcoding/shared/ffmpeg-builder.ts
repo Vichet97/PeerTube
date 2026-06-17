@@ -1,7 +1,7 @@
 import { Job } from 'bullmq'
 import { getFFmpegCommandWrapperOptions } from '@server/helpers/ffmpeg/index.js'
 import { logger } from '@server/helpers/logger.js'
-import { Redis } from '@server/lib/redis.js'
+import { isVideoDeletionPending } from '@server/lib/video-deletion.js'
 import { FFmpegVOD } from '@peertube/peertube-ffmpeg'
 import { VideoTranscodingProfilesManager } from '../default-transcoding-profiles.js'
 
@@ -35,8 +35,16 @@ export function buildFFmpegVOD (jobOrOptions?: Job | { job?: Job, videoUUID?: st
   if (videoUUID) {
     abortController = new AbortController()
     redisCheckInterval = setInterval(() => {
-      Redis.Instance.isVideoDeletionFlagSet(videoUUID)
-        .then(flagged => { if (flagged && abortController) abortController.abort() })
+      isVideoDeletionPending(videoUUID)
+        .then(flagged => {
+          if (!flagged) {
+            cancelledVideoUUIDs.delete(videoUUID)
+            return
+          }
+
+          cancelledVideoUUIDs.add(videoUUID)
+          if (abortController) abortController.abort()
+        })
         .catch(() => { /* ignore */ })
     }, 150)
   }
@@ -63,10 +71,17 @@ export function buildFFmpegVOD (jobOrOptions?: Job | { job?: Job, videoUUID?: st
     // Throttled async check: poll Redis periodically; when video is deleted, set cache so next progress call throws
     if (videoUUID && Date.now() - lastCheckTime >= CHECK_INTERVAL_MS && !checkInProgress) {
       checkInProgress = true
-      Redis.Instance.isVideoDeletionFlagSet(videoUUID)
+      isVideoDeletionPending(videoUUID)
         .then(flagged => {
           lastCheckTime = Date.now()
-          if (flagged) cancelledVideoUUIDs.add(videoUUID)
+
+          if (!flagged) {
+            cancelledVideoUUIDs.delete(videoUUID)
+            return
+          }
+
+          cancelledVideoUUIDs.add(videoUUID)
+          if (abortController) abortController.abort()
         })
         .catch(() => { /* ignore Redis errors */ })
         .finally(() => { checkInProgress = false })
@@ -100,7 +115,10 @@ export function buildFFmpegVOD (jobOrOptions?: Job | { job?: Job, videoUUID?: st
     onEnd: setCompletedProgress,
 
     abortSignal: abortController?.signal,
-    onSettled: () => { if (redisCheckInterval) clearInterval(redisCheckInterval) }
+    onSettled: () => {
+      if (redisCheckInterval) clearInterval(redisCheckInterval)
+      if (videoUUID) cancelledVideoUUIDs.delete(videoUUID)
+    }
   }, timeoutMs)
 }
 

@@ -752,8 +752,6 @@ async function runVideoSystemReset (
     const mediaIntegrity = await getVideoMediaIntegrity(video)
     const shouldDeleteVideo = shouldDeleteVideoDuringSystemReset({ video, videoImport, mediaIntegrity })
 
-    if (shouldDeleteVideo) await Redis.Instance.setVideoDeletionFlag(video.uuid)
-
     const cleanupResult = await removeVideoRepairJobs(jobRefs)
     for (const ref of jobRefs) processedJobKeys.add(getVideoRepairJobKey(ref))
     result.jobsRemoved += cleanupResult.removed
@@ -764,7 +762,13 @@ async function runVideoSystemReset (
 
     if (shouldDeleteVideo) {
       await markVideoImportAsFailedIfNeeded(videoImport, shouldDeleteVideo.reason)
-      await video.destroy()
+      await Redis.Instance.setVideoDeletionFlag(video.uuid)
+      try {
+        await video.destroy()
+      } catch (err) {
+        await Redis.Instance.clearVideoDeletionFlag(video.uuid)
+        throw err
+      }
 
       logger.warn(
         '[SYSTEM_RESETTER] Deleted corrupted/incomplete video %s: %s',

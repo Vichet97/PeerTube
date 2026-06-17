@@ -9,6 +9,7 @@ import {
 import { logger } from '@server/helpers/logger.js'
 import { CONFIG } from '@server/initializers/config.js'
 import { JOB_TTL } from '@server/initializers/constants.js'
+import { isVideoDeletionPending } from '@server/lib/video-deletion.js'
 import { getHLSResolutionPlaylistFilename } from '@server/lib/paths.js'
 import { moveToFailedMoveToObjectStorageState } from '@server/lib/video-state.js'
 import { VideoJobInfoModel } from '@server/models/video/video-job-info.js'
@@ -135,6 +136,12 @@ async function processMoveVideoFile (
 
   logger.info('[GRANULAR_MOVE] Processing video file move job %s for file %s of video %s', job.id, fileId, videoUUID)
 
+  if (await isVideoDeletionPending(videoUUID, { confirmDelayMs: 250 })) {
+    logger.info('[GRANULAR_MOVE] Skipping video file move job %s because video %s is being deleted', job.id, videoUUID)
+    updateProgress(100)
+    return
+  }
+
   const video = await VideoModel.loadWithFiles(videoUUID)
   if (!video) {
     logger.warn('[GRANULAR_MOVE] Video %s not found, skipping file move', videoUUID)
@@ -219,6 +226,12 @@ async function processMoveHLSPlaylist (
   }
 
   logger.info('[GRANULAR_MOVE] Processing HLS playlist move job %s for playlist %s, files %s', job.id, playlistId, fileIds.join(', '))
+
+  if (await isVideoDeletionPending(videoUUID, { confirmDelayMs: 250 })) {
+    logger.info('[GRANULAR_MOVE] Skipping HLS playlist move job %s because video %s is being deleted', job.id, videoUUID)
+    updateProgress(100)
+    return
+  }
 
   const video = await VideoModel.loadWithFiles(videoUUID)
   if (!video) {
@@ -482,6 +495,12 @@ async function processMoveThumbnail (
   const { videoUUID, thumbnailId, isNewVideo, previousVideoState } = payload
 
   logger.info('[GRANULAR_MOVE] Processing thumbnail move job %s for thumbnail %s', job.id, thumbnailId)
+
+  if (await isVideoDeletionPending(videoUUID, { confirmDelayMs: 250 })) {
+    logger.info('[GRANULAR_MOVE] Skipping thumbnail move job %s because video %s is being deleted', job.id, videoUUID)
+    updateProgress(100)
+    return
+  }
 
   const video = await VideoModel.loadWithFiles(videoUUID)
   if (!video) {

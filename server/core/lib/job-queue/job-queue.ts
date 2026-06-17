@@ -663,13 +663,13 @@ class JobQueue {
     if (captionId !== undefined) {
       // Check for caption-specific job
       return jobs.some((job: Job) => {
-        const data = job.data as { captionId?: number; videoUUID?: string }
+        const data = (job?.data ?? {}) as { captionId?: number; videoUUID?: string }
         return data?.captionId === captionId
       })
     }
 
     return jobs.some((job: Job) => {
-      const data = job.data as { videoUUID?: string }
+      const data = (job?.data ?? {}) as { videoUUID?: string }
       return data?.videoUUID === videoUUID
     })
   }
@@ -697,7 +697,7 @@ class JobQueue {
     const { videoUUID, excludeCleanupJobs = false } = options
 
     return jobs.some((job: Job) => {
-      const data = job.data as { videoUUID?: string, cleanupMode?: 'move' | 'cleanup' }
+      const data = (job?.data ?? {}) as { videoUUID?: string, cleanupMode?: 'move' | 'cleanup' }
       if (data?.videoUUID !== videoUUID) return false
 
       if (excludeCleanupJobs && data.cleanupMode === 'cleanup') return false
@@ -758,7 +758,7 @@ class JobQueue {
       const uuidsForType = new Set<string>()
 
       for (const job of jobs) {
-        const videoUUID = (job.data as { videoUUID?: string })?.videoUUID
+        const videoUUID = ((job?.data ?? {}) as { videoUUID?: string })?.videoUUID
         if (!videoUUID) continue
 
         uuidsForType.add(videoUUID)
@@ -790,11 +790,18 @@ class JobQueue {
     const jobs = await queue.getJobs(states, 0, 10000, true)
 
     const matchingJobs = jobs.filter((job: Job) => {
-      if (job.data?.videoUUID !== videoUUID) return false
-      if (options?.isFollowUp !== undefined && (job.data?.isFollowUp === true) !== options.isFollowUp) return false
-      if (options?.fileId !== undefined && job.data?.fileId !== options.fileId) return false
-      if (options?.thumbnailId !== undefined && job.data?.thumbnailId !== options.thumbnailId) return false
-      if (options?.captionId !== undefined && job.data?.captionId !== options.captionId) return false
+      const data = (job?.data ?? {}) as {
+        videoUUID?: string
+        isFollowUp?: boolean
+        fileId?: number
+        thumbnailId?: number
+        captionId?: number
+      }
+      if (data.videoUUID !== videoUUID) return false
+      if (options?.isFollowUp !== undefined && (data.isFollowUp === true) !== options.isFollowUp) return false
+      if (options?.fileId !== undefined && data.fileId !== options.fileId) return false
+      if (options?.thumbnailId !== undefined && data.thumbnailId !== options.thumbnailId) return false
+      if (options?.captionId !== undefined && data.captionId !== options.captionId) return false
 
       return true
     })
@@ -812,7 +819,7 @@ class JobQueue {
     const states: ('waiting' | 'delayed' | 'active' | 'failed')[] = [ 'waiting', 'delayed', 'active', 'failed' ]
     const jobs = (await Promise.all(queues.map(queue => queue.getJobs(states, 0, 10000, true)))).flat()
 
-    const matchingJobs = jobs.filter((job: Job) => job.data?.captionId === captionId)
+    const matchingJobs = jobs.filter((job: Job) => ((job?.data ?? {}) as { captionId?: number }).captionId === captionId)
 
     return matchingJobs.find(job => job.failedReason === undefined || job.failedReason === null) || matchingJobs[0] || null
   }
@@ -827,7 +834,7 @@ class JobQueue {
     const states: ('waiting' | 'delayed' | 'active' | 'failed')[] = [ 'waiting', 'delayed', 'active', 'failed' ]
     const jobs = (await Promise.all(queues.map(queue => queue.getJobs(states, 0, 10000, true)))).flat()
 
-    const matchingJobs = jobs.filter((job: Job) => job.data?.videoUUID === videoUUID)
+    const matchingJobs = jobs.filter((job: Job) => ((job?.data ?? {}) as { videoUUID?: string }).videoUUID === videoUUID)
 
     return matchingJobs.find(job => job.failedReason === undefined || job.failedReason === null) || matchingJobs[0] || null
   }

@@ -1,5 +1,5 @@
 import { Job } from 'bullmq'
-import { FileStorage, VideoPrivacyType } from '@peertube/peertube-models'
+import { FileStorage, VideoChannelResetPayload, VideoPrivacyType } from '@peertube/peertube-models'
 import { CONFIG } from '@server/initializers/config.js'
 import { logger } from '@server/helpers/logger.js'
 import { Redis } from '@server/lib/redis.js'
@@ -19,7 +19,6 @@ import { VideoJobInfoModel } from '@server/models/video/video-job-info.js'
 import { VideoSourceModel } from '@server/models/video/video-source.js'
 import { StoryboardModel } from '@server/models/video/storyboard.js'
 import { ThumbnailModel } from '@server/models/video/thumbnail.js'
-import { VideoChannelResetPayload } from '@peertube/peertube-models'
 
 export async function processVideoChannelReset (job: Job) {
   const payload = job.data as VideoChannelResetPayload
@@ -48,8 +47,6 @@ export async function processVideoChannelReset (job: Job) {
 
   for (const video of videos) {
     try {
-      await Redis.Instance.setVideoDeletionFlag(video.uuid)
-
       await VideoJobInfoModel.abortAllTasks(video.uuid, 'pendingTranscode')
       await VideoJobInfoModel.abortAllTasks(video.uuid, 'pendingMove')
       await VideoJobInfoModel.abortAllTasks(video.uuid, 'pendingTranscription')
@@ -60,11 +57,18 @@ export async function processVideoChannelReset (job: Job) {
       // Clean up object storage files
       await cleanupVideoObjectStorage(videoFull)
 
-      await VideoModel.destroy({
-        where: {
-          id: video.id
-        }
-      })
+      await Redis.Instance.setVideoDeletionFlag(video.uuid)
+
+      try {
+        await VideoModel.destroy({
+          where: {
+            id: video.id
+          }
+        })
+      } catch (err) {
+        await Redis.Instance.clearVideoDeletionFlag(video.uuid)
+        throw err
+      }
 
       deletedCount++
       logger.debug(`Deleted video "${video.name}" (uuid: ${video.uuid})`)

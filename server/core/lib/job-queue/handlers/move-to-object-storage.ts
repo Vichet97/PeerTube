@@ -13,6 +13,7 @@ import {
   onMoveVideoToObjectStorageFailure
 } from '@server/lib/move-storage/move-to-object-storage.js'
 import { moveToNextState } from '@server/lib/video-state.js'
+import { isVideoDeletionPending } from '@server/lib/video-deletion.js'
 import { VideoJobInfoModel } from '@server/models/video/video-job-info.js'
 import { VideoPathManager } from '@server/lib/video-path-manager.js'
 import { VideoModel } from '@server/models/video/video.js'
@@ -97,6 +98,12 @@ export async function processMoveToObjectStorage (job: Job) {
   if (isMoveVideoStoragePayload(payload)) {
     // [LOGGER] Job started (video)
     logger.info('[MOVE_JOB] Move-to-object-storage job %s started for video %s', job.id, payload.videoUUID)
+
+    if (await isVideoDeletionPending(payload.videoUUID, { confirmDelayMs: 250 })) {
+      logger.info('[MOVE_JOB] Skipping move-to-object-storage job %s because video %s is being deleted', job.id, payload.videoUUID)
+      updateProgress(100)
+      return
+    }
 
     const video = await VideoModel.loadWithFiles(payload.videoUUID)
     if (!video) {
@@ -376,6 +383,12 @@ export async function processMoveToObjectStorage (job: Job) {
     if (!caption && !targetVideoUUID) {
       // Caption was deleted, skip this job
       logger.info('[MOVE_JOB] Caption %s not found, skipping job %s', payload.captionId, job.id)
+      return
+    }
+
+    if (targetVideoUUID && await isVideoDeletionPending(targetVideoUUID, { confirmDelayMs: 250 })) {
+      logger.info('[MOVE_JOB] Skipping caption move job %s because video %s is being deleted', job.id, targetVideoUUID)
+      updateProgress(100)
       return
     }
 

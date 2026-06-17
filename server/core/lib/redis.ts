@@ -374,7 +374,36 @@ class Redis {
   private static readonly VIDEO_DELETION_FLAG_TTL = 3600000 // 1 hour
 
   setVideoDeletionFlag (videoUUID: string) {
-    return this.setValue('video-deletion-flag-' + videoUUID, '1', Redis.VIDEO_DELETION_FLAG_TTL)
+    return this.setObject('video-deletion-flag-' + videoUUID, {
+      setAt: Date.now()
+    }, Redis.VIDEO_DELETION_FLAG_TTL)
+  }
+
+  clearVideoDeletionFlag (videoUUID: string) {
+    return this.removeValue('video-deletion-flag-' + videoUUID)
+  }
+
+  async getVideoDeletionFlagState (videoUUID: string) {
+    const value = await this.getValue('video-deletion-flag-' + videoUUID)
+    if (!value) return null
+
+    try {
+      const parsed = JSON.parse(value) as { setAt?: unknown }
+
+      if (typeof parsed?.setAt === 'number' && Number.isFinite(parsed.setAt)) {
+        return {
+          legacy: false,
+          setAt: parsed.setAt
+        }
+      }
+    } catch {
+      // Legacy flags used a plain "1" string.
+    }
+
+    return {
+      legacy: true,
+      setAt: undefined
+    }
   }
 
   async isVideoDeletionFlagSet (videoUUID: string) {

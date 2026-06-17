@@ -212,11 +212,12 @@ export function buildVideoImportLocalPipelineBackpressureMaxJobs (options: {
   const objectStorageConcurrency = Math.max(1, options.objectStorageConcurrency || 1)
   const moveDrainHeadroom = Math.max(8, Math.ceil(objectStorageConcurrency))
 
-  // We already dedupe backlog by video UUID, so use a little extra headroom for
-  // short bursts while the object-storage movers drain. Without this, imports
-  // tend to bounce into repeated 10-minute deferrals when the pipeline is busy
-  // but still healthy.
-  return Math.max(15, transcodingConcurrency * 3 + objectStorageConcurrency + moveDrainHeadroom)
+  // We already dedupe backlog by video UUID, so let the queue absorb several
+  // waves of pending downstream work before we start deferring new imports.
+  // Otherwise, normal transcode backlog causes the import API to pin many fresh
+  // imports in repeated "Pending / To import" cycles even though the pipeline is
+  // still draining and local file retention is now guarded elsewhere.
+  return Math.max(15, transcodingConcurrency * 5 + objectStorageConcurrency + moveDrainHeadroom)
 }
 
 export function buildVideoImportLocalPipelineBackpressureDelayMs (options: {
@@ -258,7 +259,7 @@ export function isVideoImportLocalPipelineBacklogged (options: {
   total: number
   maxJobs: number
 }) {
-  return options.maxJobs > 0 && options.total >= options.maxJobs
+  return options.maxJobs > 0 && options.total > options.maxJobs
 }
 
 export function shouldDeferVideoImportForLocalPipeline (options: {
@@ -406,6 +407,16 @@ type ProcessFileOptions = {
   clearkeys?: string | null
   useNm3u8dlRe?: boolean
 }
+
+export function shouldRunDrmDecryptionForImport (options: ProcessFileOptions) {
+  if (CONFIG.IMPORT.VIDEOS.HTTP.DRM_DECRYPTION.ENABLED !== true) return false
+  if (options.type !== 'youtube-dl') return false
+  if (options.useNm3u8dlRe) return false
+  if (CONFIG.IMPORT.VIDEOS.HTTP.DRM_DECRYPTION.ARGS.length === 0) return false
+
+  return !!options.licenseServerUrl || !!options.drmType || !!options.clearkeys
+}
+
 async function processFile (downloader: () => Promise<string>, videoImport: MVideoImportDefault, options: ProcessFileOptions) {
   let tmpVideoPath: string
   let movedVideoDestPath: string
@@ -416,7 +427,7 @@ async function processFile (downloader: () => Promise<string>, videoImport: MVid
     tmpVideoPath = await downloader()
 
     // Optional DRM decryption step (before transcoding). Skip when N_m3u8DL-RE already decrypted.
-    if (CONFIG.IMPORT.VIDEOS.HTTP.DRM_DECRYPTION.ENABLED && options.type === 'youtube-dl' && !options.useNm3u8dlRe) {
+    if (shouldRunDrmDecryptionForImport(options)) {
       const ext = tmpVideoPath.match(/\.[^/.]+$/)?.[0] ?? '.mp4'
       const baseName = basename(tmpVideoPath, ext)
       const decryptedPath = join(dirname(tmpVideoPath), `${baseName}-decrypted${ext}`)

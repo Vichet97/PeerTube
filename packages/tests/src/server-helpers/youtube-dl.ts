@@ -1,7 +1,12 @@
 /* eslint-disable @typescript-eslint/no-unused-expressions,@typescript-eslint/require-await */
 
 import { expect } from 'chai'
+import { mkdtemp, writeFile } from 'fs/promises'
+import { remove } from 'fs-extra/esm'
+import { tmpdir } from 'os'
+import { join } from 'path'
 import { YoutubeDLCLI } from '@peertube/peertube-server/core/helpers/youtube-dl/youtube-dl-cli.js'
+import { YoutubeDLWrapper } from '@peertube/peertube-server/core/helpers/youtube-dl/youtube-dl-wrapper.js'
 import { CONFIG } from '@peertube/peertube-server/core/initializers/config.js'
 
 describe('YoutubeDLCLI', function () {
@@ -236,6 +241,44 @@ describe('YoutubeDLCLI', function () {
         expect(result).to.not.include('--concurrent-fragments')
       } finally {
         Object.defineProperty(CONFIG.IMPORT.VIDEOS.HTTP.YOUTUBE_DL_RELEASE, 'NAME', originalDescriptor)
+      }
+    })
+  })
+
+  describe('YoutubeDLWrapper', function () {
+    it('Should force an explicit .mp4 output path for yt-dlp downloads', async function () {
+      const originalTmpDirDescriptor = Object.getOwnPropertyDescriptor(CONFIG.STORAGE, 'TMP_DIR')
+      const originalSafeGet = YoutubeDLCLI.safeGet
+
+      const tmpDirectory = await mkdtemp(join(tmpdir(), 'peertube-ytdlp-wrapper-'))
+      let capturedOutput: string | undefined
+
+      Object.defineProperty(CONFIG.STORAGE, 'TMP_DIR', {
+        value: tmpDirectory,
+        configurable: true
+      })
+
+      YoutubeDLCLI.safeGet = (async () => ({
+        download: async (options: { output: string }) => {
+          capturedOutput = options.output
+          await writeFile(options.output, 'test')
+        }
+      })) as unknown as typeof YoutubeDLCLI.safeGet
+
+      try {
+        const wrapper = new YoutubeDLWrapper('https://example.com/master.m3u8', [ 720 ], false)
+        const result = await wrapper.downloadVideo('.mp4', 30_000)
+
+        expect(capturedOutput).to.match(/-import\.mp4$/)
+        expect(result).to.equal(capturedOutput)
+      } finally {
+        YoutubeDLCLI.safeGet = originalSafeGet
+
+        if (originalTmpDirDescriptor) {
+          Object.defineProperty(CONFIG.STORAGE, 'TMP_DIR', originalTmpDirDescriptor)
+        }
+
+        await remove(tmpDirectory).catch(() => {})
       }
     })
   })
