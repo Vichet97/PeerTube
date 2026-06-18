@@ -1,11 +1,18 @@
 import type { S3Client } from '@aws-sdk/client-s3'
 import { logger } from '@server/helpers/logger.js'
-import { getProxyAgent } from '@server/helpers/requests.js'
+import { HttpProxyAgent, HttpsProxyAgent } from '@server/helpers/hpagent.js'
+import { getProxy, isProxyEnabled } from '@server/helpers/proxy.js'
 import { CONFIG } from '@server/initializers/config.js'
+import http from 'http'
+import https from 'https'
 import { lTags } from './logger.js'
 
 let s3ClientPromise: Promise<S3Client>
 let s3ClientResolved: S3Client
+
+const DEFAULT_OBJECT_STORAGE_CONNECTION_TIMEOUT_MS = 10_000
+const DEFAULT_OBJECT_STORAGE_SOCKET_TIMEOUT_MS = 120_000
+
 export function getClient () {
   if (s3ClientPromise !== undefined) return s3ClientPromise
 
@@ -65,15 +72,60 @@ export function getEndpoint () {
 
 async function getProxyRequestHandler () {
   const { NodeHttpHandler } = await import('@smithy/node-http-handler')
+  return new NodeHttpHandler(buildObjectStorageNodeHttpHandlerOptions())
+}
 
-  // Get agents (either from proxy or default)
-  const { agent } = getProxyAgent()
+export function buildObjectStorageNodeHttpHandlerOptions () {
+  const maxSockets = Math.max(
+    16,
+    Math.min(64, Math.max(1, CONFIG.OBJECT_STORAGE.CONCURRENCY) * 3)
+  )
+  const maxFreeSockets = Math.min(16, maxSockets)
+  const socketTimeout = CONFIG.OBJECT_STORAGE.PROXY.REQUEST_TIMEOUT_MS ?? DEFAULT_OBJECT_STORAGE_SOCKET_TIMEOUT_MS
 
-  // Use the existing agents from getProxyAgent
-  // The timeout configuration is handled by the individual S3 request timeouts
-  // in object-storage-helpers.ts (createObjectReadStream function)
-  return new NodeHttpHandler({
-    httpAgent: agent.http,
-    httpsAgent: agent.https
-  })
+  if (isProxyEnabled()) {
+    const proxy = getProxy()
+
+    return {
+      connectionTimeout: DEFAULT_OBJECT_STORAGE_CONNECTION_TIMEOUT_MS,
+      socketTimeout,
+      throwOnRequestTimeout: true,
+      httpAgent: new HttpProxyAgent({
+        keepAlive: true,
+        keepAliveMsecs: 1000,
+        maxSockets,
+        maxFreeSockets,
+        scheduling: 'lifo',
+        proxy
+      }),
+      httpsAgent: new HttpsProxyAgent({
+        keepAlive: true,
+        keepAliveMsecs: 1000,
+        maxSockets,
+        maxFreeSockets,
+        scheduling: 'lifo',
+        proxy
+      })
+    }
+  }
+
+  return {
+    connectionTimeout: DEFAULT_OBJECT_STORAGE_CONNECTION_TIMEOUT_MS,
+    socketTimeout,
+    throwOnRequestTimeout: true,
+    httpAgent: new http.Agent({
+      keepAlive: true,
+      keepAliveMsecs: 1000,
+      maxSockets,
+      maxFreeSockets,
+      scheduling: 'lifo'
+    }),
+    httpsAgent: new https.Agent({
+      keepAlive: true,
+      keepAliveMsecs: 1000,
+      maxSockets,
+      maxFreeSockets,
+      scheduling: 'lifo'
+    })
+  }
 }
