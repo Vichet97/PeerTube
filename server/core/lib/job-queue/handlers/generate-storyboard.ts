@@ -6,14 +6,19 @@ import { logger, loggerTagsFactory } from '@server/helpers/logger.js'
 import { CONFIG } from '@server/initializers/config.js'
 import { STORYBOARD } from '@server/initializers/constants.js'
 import { VideoPathManager } from '@server/lib/video-path-manager.js'
-import { checkObjectStorageReadiness, storeStoryboard } from '@server/lib/object-storage/index.js'
 import { getImageSizeFromWorker } from '@server/lib/worker/parent-process.js'
 import { VideoModel } from '@server/models/video/video.js'
 import { StoryboardModel } from '@server/models/video/storyboard.js'
 import { Job } from 'bullmq'
 import { remove } from 'fs-extra/esm'
 import { join } from 'path'
-import { buildSpriteSize, buildTotalSprites, findGridSize, insertStoryboardInDatabase } from '../../storyboard.js'
+import {
+  buildSpriteSize,
+  buildTotalSprites,
+  findGridSize,
+  insertStoryboardInDatabase,
+  storeStoryboardInObjectStorage
+} from '../../storyboard.js'
 
 const lTagsBase = loggerTagsFactory('storyboard')
 
@@ -106,21 +111,14 @@ export async function processGenerateStoryboard (job: Job): Promise<void> {
       }
 
       if (CONFIG.OBJECT_STORAGE.ENABLED) {
-        await storeStoryboard(destination, filename)
-
-        const isReady = await checkObjectStorageReadiness({
-          key: filename,
-          bucketInfo: CONFIG.OBJECT_STORAGE.STORYBOARDS,
-          maxRetries: 30,
-          retryIntervalMs: 10000
+        await storeStoryboardInObjectStorage({
+          inputPath: destination,
+          filename,
+          lTags
         })
 
-        if (!isReady) {
-          logger.warn(`Storyboard ${filename} not ready in object storage, keeping local file`, lTags)
-        } else {
-          await remove(destination)
-          storage = FileStorage.OBJECT_STORAGE
-        }
+        await remove(destination)
+        storage = FileStorage.OBJECT_STORAGE
       }
 
       await insertStoryboardInDatabase({

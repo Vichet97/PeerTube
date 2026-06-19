@@ -21,7 +21,7 @@ import { P2P_MEDIA_LOADER_PEER_VERSION, REQUEST_TIMEOUTS } from '../initializers
 import { sequelizeTypescript } from '../initializers/database.js'
 import { VideoFileModel } from '../models/video/video-file.js'
 import { VideoStreamingPlaylistModel } from '../models/video/video-streaming-playlist.js'
-import { storeHLSFileFromContent } from './object-storage/index.js'
+import { isTransientObjectStorageError, storeHLSFileFromContent } from './object-storage/index.js'
 import { getHLSFileReadStream } from './object-storage/videos.js'
 import {
   generateHLSMasterPlaylistFilename,
@@ -244,10 +244,13 @@ function updateMasterHLSPlaylist (video: MVideo, playlistArg: MStreamingPlaylist
     await writeFile(masterPlaylistPath, masterPlaylistContent)
 
     if (playlist.storage === FileStorage.OBJECT_STORAGE) {
-      await storeHLSFileFromContent({
-        video,
-        pathOrFilename: playlist.playlistFilename,
-        content: masterPlaylistContent
+      await retryTransientObjectStorageWrite({
+        description: `master playlist ${playlist.playlistFilename} of video ${video.uuid}`,
+        run: () => storeHLSFileFromContent({
+          video,
+          pathOrFilename: playlist.playlistFilename,
+          content: masterPlaylistContent
+        })
       })
 
       logger.info(
@@ -378,10 +381,13 @@ function updateSha256VODSegments (video: MVideo, playlistArg: MStreamingPlaylist
     await outputJSON(outputPath, json)
 
     if (playlist.storage === FileStorage.OBJECT_STORAGE) {
-      await storeHLSFileFromContent({
-        video,
-        pathOrFilename: playlist.segmentsSha256Filename,
-        content: JSON.stringify(json)
+      await retryTransientObjectStorageWrite({
+        description: `HLS SHA256 file ${playlist.segmentsSha256Filename} of video ${video.uuid}`,
+        run: () => storeHLSFileFromContent({
+          video,
+          pathOrFilename: playlist.segmentsSha256Filename,
+          content: JSON.stringify(json)
+        })
       })
     } else {
       logger.debug(`Updated SHA256 segments file ${outputPath} of video ${video.uuid}`, lTags(video.uuid))
@@ -467,6 +473,36 @@ export function downloadPlaylistSegments (playlistUrl: string, destinationDir: s
 
     return uniqify(urls)
   }
+}
+
+async function retryTransientObjectStorageWrite<T> (options: {
+  description: string
+  run: () => Promise<T>
+  maxAttempts?: number
+  delayMs?: number
+}) {
+  const { description, run, maxAttempts = 4, delayMs = 2000 } = options
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await run()
+    } catch (err) {
+      if (attempt >= maxAttempts || !isTransientObjectStorageError(err)) throw err
+
+      logger.warn(
+        'Transient object storage error while updating %s, retrying in %dms (attempt %d/%d).',
+        description,
+        delayMs,
+        attempt,
+        maxAttempts,
+        { err }
+      )
+
+      await new Promise(resolve => setTimeout(resolve, delayMs))
+    }
+  }
+
+  throw new Error(`Object storage update for ${description} failed without throwing a final error.`)
 }
 
 // ---------------------------------------------------------------------------

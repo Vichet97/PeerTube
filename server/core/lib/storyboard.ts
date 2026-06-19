@@ -3,7 +3,9 @@ import { ffprobePromise, getVideoStreamDimensionsInfo } from '@peertube/peertube
 import { retryTransactionWrapper } from '@server/helpers/database-utils.js'
 import { LoggerTags, logger } from '@server/helpers/logger.js'
 import { deleteFileAndCatch } from '@server/helpers/utils.js'
+import { checkObjectStorageReadiness, isTransientObjectStorageError, storeStoryboard } from '@server/lib/object-storage/index.js'
 import { removeStoryboardObjectStorageByFilename } from '@server/lib/object-storage/videos.js'
+import { CONFIG } from '@server/initializers/config.js'
 import { STORYBOARD } from '@server/initializers/constants.js'
 import { sequelizeTypescript } from '@server/initializers/database.js'
 import { StoryboardModel } from '@server/models/video/storyboard.js'
@@ -69,7 +71,18 @@ export async function insertStoryboardInDatabase (options: {
   storage?: FileStorageType
   federate: boolean
 }) {
-  const { videoUUID, lTags, imageSize, spriteHeight, spriteWidth, spriteDuration, destination, filename, federate, storage = FileStorage.FILE_SYSTEM } = options
+  const {
+    videoUUID,
+    lTags,
+    imageSize,
+    spriteHeight,
+    spriteWidth,
+    spriteDuration,
+    destination,
+    filename,
+    federate,
+    storage = FileStorage.FILE_SYSTEM
+  } = options
 
   await retryTransactionWrapper(() => {
     return sequelizeTypescript.transaction(async transaction => {
@@ -79,7 +92,13 @@ export async function insertStoryboardInDatabase (options: {
         deleteFileAndCatch(destination)
         if (storage === FileStorage.OBJECT_STORAGE) {
           removeStoryboardObjectStorageByFilename(filename)
-            .catch(err => logger.warn('Cannot remove orphaned storyboard %s from object storage (video was deleted).', filename, { err, ...lTags }))
+            .catch(err => {
+              logger.warn(
+                'Cannot remove orphaned storyboard %s from object storage (video was deleted).',
+                filename,
+                { err, ...lTags }
+              )
+            })
         }
         return
       }
@@ -104,4 +123,82 @@ export async function insertStoryboardInDatabase (options: {
       }
     })
   })
+}
+
+export async function storeStoryboardInObjectStorageWithDeps (options: {
+  inputPath: string
+  filename: string
+  lTags: LoggerTags
+}, deps: {
+  storeStoryboard: (inputPath: string, filename: string) => Promise<void>
+  checkObjectStorageReadiness: (options: {
+    key: string
+    bucketInfo: typeof CONFIG.OBJECT_STORAGE.STORYBOARDS
+    maxRetries?: number
+    retryIntervalMs?: number
+  }) => Promise<boolean>
+}) {
+  const { inputPath, filename, lTags } = options
+  const { storeStoryboard, checkObjectStorageReadiness } = deps
+
+  await retryTransientStoryboardObjectStorageStep({
+    description: `uploading storyboard ${filename}`,
+    lTags,
+    run: () => storeStoryboard(inputPath, filename)
+  })
+
+  const isReady = await checkObjectStorageReadiness(
+    {
+      key: filename,
+      bucketInfo: CONFIG.OBJECT_STORAGE.STORYBOARDS,
+      maxRetries: 30,
+      retryIntervalMs: 10000
+    } as Parameters<typeof checkObjectStorageReadiness>[0]
+  )
+
+  if (!isReady) {
+    throw new Error(`Storyboard ${filename} did not become ready in object storage after readiness checks.`)
+  }
+}
+
+export function storeStoryboardInObjectStorage (options: {
+  inputPath: string
+  filename: string
+  lTags: LoggerTags
+}) {
+  return storeStoryboardInObjectStorageWithDeps(options, {
+    storeStoryboard,
+    checkObjectStorageReadiness
+  })
+}
+
+async function retryTransientStoryboardObjectStorageStep<T> (options: {
+  description: string
+  lTags: LoggerTags
+  run: () => Promise<T>
+  maxAttempts?: number
+  delayMs?: number
+}) {
+  const { description, lTags, run, maxAttempts = 4, delayMs = 2000 } = options
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await run()
+    } catch (err) {
+      if (attempt >= maxAttempts || !isTransientObjectStorageError(err)) throw err
+
+      logger.warn(
+        'Transient object storage error while %s, retrying in %dms (attempt %d/%d).',
+        description,
+        delayMs,
+        attempt,
+        maxAttempts,
+        { err, ...lTags }
+      )
+
+      await new Promise(resolve => setTimeout(resolve, delayMs))
+    }
+  }
+
+  throw new Error(`Storyboard object storage step ${description} failed without a final error.`)
 }

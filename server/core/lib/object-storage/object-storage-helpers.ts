@@ -316,10 +316,13 @@ function isTransientObjectStorageError (err: unknown) {
     'RequestTimeout',
     'TimeoutError',
     'AbortError',
+    'internalConnectMultipleTimeout',
     'ECONNRESET',
     'ETIMEDOUT',
     'EPIPE',
     'aborted',
+    'socket hang up',
+    'Client network socket disconnected before secure TLS connection was established',
     '500 Internal Server Error',
     '503 Service Unavailable'
   ].some(token => message.includes(token))

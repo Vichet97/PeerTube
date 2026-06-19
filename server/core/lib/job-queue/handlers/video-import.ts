@@ -217,7 +217,7 @@ export function buildVideoImportLocalPipelineBackpressureMaxJobs (options: {
   // Otherwise, normal transcode backlog causes the import API to pin many fresh
   // imports in repeated "Pending / To import" cycles even though the pipeline is
   // still draining and local file retention is now guarded elsewhere.
-  return Math.max(15, transcodingConcurrency * 5 + objectStorageConcurrency + moveDrainHeadroom)
+  return Math.max(15, transcodingConcurrency * 7 + objectStorageConcurrency + moveDrainHeadroom)
 }
 
 export function buildVideoImportLocalPipelineBackpressureDelayMs (options: {

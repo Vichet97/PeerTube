@@ -6,6 +6,12 @@ describe('object-storage-helpers', function () {
   it('should detect transient object storage backend errors', function () {
     expect(isTransientObjectStorageError(new Error('XMinioBackendDown: Object storage backend is unreachable'))).to.be.true
     expect(isTransientObjectStorageError({ $response: { statusCode: 500 } })).to.be.true
+    expect(isTransientObjectStorageError(new Error('socket hang up'))).to.be.true
+    expect(
+      isTransientObjectStorageError(new Error('Client network socket disconnected before secure TLS connection was established'))
+    ).to.be.true
+    expect(isTransientObjectStorageError(new Error('AggregateError: internalConnectMultipleTimeout'))).to.be.true
+    expect(isTransientObjectStorageError(new Error('AggregateError: permanent validation failure'))).to.be.false
     expect(isTransientObjectStorageError({ message: 'NoSuchKey: The specified key does not exist' })).to.be.false
   })
 
