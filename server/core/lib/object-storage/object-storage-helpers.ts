@@ -208,7 +208,9 @@ async function makeAvailable (options: {
   const { key, destination, bucketInfo } = options
   const requestTimeoutMs = CONFIG.OBJECT_STORAGE.PROXY.REQUEST_TIMEOUT_MS
 
-  for (let attempt = 1; attempt <= 2; attempt++) {
+  const maxAttempts = 4
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     let timeoutId: ReturnType<typeof setTimeout> | undefined
     let responseBody: Readable | undefined
     let cleanupStreamTimeout: (() => void) | undefined
@@ -263,13 +265,14 @@ async function makeAvailable (options: {
       file.close()
       return
     } catch (err) {
-      if (attempt < 2 && isTransientObjectStorageError(err)) {
+      if (attempt < maxAttempts && isTransientObjectStorageError(err)) {
         logger.warn(
-          'Transient object storage error while fetching %s%s from bucket %s, retrying in 5s (attempt %d/2)',
+          'Transient object storage error while fetching %s%s from bucket %s, retrying in 5s (attempt %d/%d)',
           bucketInfo.PREFIX,
           key,
           bucketInfo.BUCKET_NAME,
-          attempt
+          attempt,
+          maxAttempts
         )
 
         await new Promise(resolve => setTimeout(resolve, 5000))

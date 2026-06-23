@@ -285,24 +285,35 @@ async function hashVideoRangesFromObjectStorage (
   const requestTimeoutMs = CONFIG.OBJECT_STORAGE.PROXY.REQUEST_TIMEOUT_MS || 10000
 
   // Read resolution playlist from S3
-  const { stream: playlistStream } = await getHLSFileReadStream({
-    video,
-    filename: resolutionPlaylistFilename,
-    requestTimeoutMs
+  const playlistBuffer = await retryTransientObjectStorageRead({
+    description: `HLS resolution playlist ${resolutionPlaylistFilename} of video ${video.uuid}`,
+    run: async () => {
+      const { stream: playlistStream } = await getHLSFileReadStream({
+        video,
+        filename: resolutionPlaylistFilename,
+        requestTimeoutMs
+      })
+
+      return streamToBuffer(playlistStream)
+    }
   })
-  const playlistBuffer = await streamToBuffer(playlistStream)
   const ranges = getRangesFromPlaylist(playlistBuffer.toString('utf8'))
 
   // Read each byte range from S3 and hash
   for (const range of ranges) {
-    const { stream: rangeStream } = await getHLSFileReadStream({
-      video,
-      filename: file.filename,
-      rangeHeader: `bytes=${range.offset}-${range.offset + range.length - 1}`,
-      requestTimeoutMs
-    })
+    const rangeBuffer = await retryTransientObjectStorageRead({
+      description: `HLS byte range ${range.offset}-${range.offset + range.length - 1} of ${file.filename}`,
+      run: async () => {
+        const { stream: rangeStream } = await getHLSFileReadStream({
+          video,
+          filename: file.filename,
+          rangeHeader: `bytes=${range.offset}-${range.offset + range.length - 1}`,
+          requestTimeoutMs
+        })
 
-    const rangeBuffer = await streamToBuffer(rangeStream)
+        return streamToBuffer(rangeStream)
+      }
+    })
     result[`${range.offset}-${range.offset + range.length - 1}`] = sha256(rangeBuffer)
   }
 
@@ -503,6 +514,36 @@ async function retryTransientObjectStorageWrite<T> (options: {
   }
 
   throw new Error(`Object storage update for ${description} failed without throwing a final error.`)
+}
+
+async function retryTransientObjectStorageRead<T> (options: {
+  description: string
+  run: () => Promise<T>
+  maxAttempts?: number
+  delayMs?: number
+}) {
+  const { description, run, maxAttempts = 4, delayMs = 2000 } = options
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await run()
+    } catch (err) {
+      if (attempt >= maxAttempts || !isTransientObjectStorageError(err)) throw err
+
+      logger.warn(
+        'Transient object storage read error while fetching %s, retrying in %dms (attempt %d/%d).',
+        description,
+        delayMs,
+        attempt,
+        maxAttempts,
+        { err }
+      )
+
+      await new Promise(resolve => setTimeout(resolve, delayMs))
+    }
+  }
+
+  throw new Error(`Object storage read for ${description} failed without throwing a final error.`)
 }
 
 // ---------------------------------------------------------------------------

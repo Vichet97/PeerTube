@@ -108,6 +108,8 @@ export {
 type LocalVideoPipelineBacklogSnapshot = {
   total: number
   byType: Partial<Record<string, number>>
+  importRelevantUniqueVideoUUIDTotal?: number
+  importRelevantUniqueVideoUUIDsByType?: Partial<Record<string, number>>
   uniqueVideoUUIDTotal?: number
   uniqueVideoUUIDsByType?: Partial<Record<string, number>>
 }
@@ -241,6 +243,14 @@ export function buildVideoImportLocalPipelineBackpressureDelayMs (options: {
 }
 
 export function getVideoImportLocalPipelineBackpressureTotal (backlog: LocalVideoPipelineBacklogSnapshot) {
+  // Prefer the import-relevant subset when available. This excludes follow-up
+  // published-video object-storage cleanup work that no longer contributes to
+  // fresh import disk pressure, while still counting real new-import/local-file
+  // pipeline work.
+  if (typeof backlog.importRelevantUniqueVideoUUIDTotal === 'number') {
+    return backlog.importRelevantUniqueVideoUUIDTotal
+  }
+
   // Count distinct in-flight videos, not every granular child move job.
   // A single video can fan out to many HLS/caption/object-storage jobs, and
   // counting all of them makes the import backpressure gate trigger far too

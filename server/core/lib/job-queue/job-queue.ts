@@ -13,6 +13,7 @@ import {
   ImportUserArchivePayload,
   JobState,
   JobType,
+  VideoState,
   ManageVideoTorrentPayload,
   MoveStoragePayload,
   MoveVideoFilePayload,
@@ -738,7 +739,9 @@ class JobQueue {
     ]
     const states: JobState[] = [ 'waiting', 'delayed', 'prioritized', 'waiting-children', 'active' ]
     const byType: Partial<Record<JobType, number>> = {}
+    const importRelevantUniqueVideoUUIDsByType: Partial<Record<JobType, number>> = {}
     const uniqueVideoUUIDsByType: Partial<Record<JobType, number>> = {}
+    const importRelevantUniqueVideoUUIDs = new Set<string>()
     const uniqueVideoUUIDs = new Set<string>()
     let total = 0
 
@@ -755,25 +758,87 @@ class JobQueue {
       if (jobType === 'move-caption-to-object-storage') continue
 
       const jobs = await queue.getJobs(states as Parameters<Queue['getJobs']>[0], 0, 10000, true)
+      const importRelevantUUIDsForType = new Set<string>()
       const uuidsForType = new Set<string>()
 
       for (const job of jobs) {
-        const videoUUID = ((job?.data ?? {}) as { videoUUID?: string })?.videoUUID
+        const data = (job?.data ?? {}) as {
+          videoUUID?: string
+          isNewVideo?: boolean
+          previousVideoState?: number
+          moveVideoState?: { isNewVideo?: boolean, previousVideoState?: number }
+          optimizeJob?: { isNewVideo?: boolean }
+          jobs?: { payload?: { isNewVideo?: boolean } }[]
+          sequentialJobs?: { payload?: { isNewVideo?: boolean } }[][]
+        }
+        const videoUUID = data.videoUUID
         if (!videoUUID) continue
 
         uuidsForType.add(videoUUID)
         uniqueVideoUUIDs.add(videoUUID)
+
+        if (this.isImportRelevantLocalPipelineJobData(jobType, data)) {
+          importRelevantUUIDsForType.add(videoUUID)
+          importRelevantUniqueVideoUUIDs.add(videoUUID)
+        }
       }
 
+      if (importRelevantUUIDsForType.size !== 0) importRelevantUniqueVideoUUIDsByType[jobType] = importRelevantUUIDsForType.size
       if (uuidsForType.size !== 0) uniqueVideoUUIDsByType[jobType] = uuidsForType.size
     }
 
     return {
       total,
       byType,
+      importRelevantUniqueVideoUUIDTotal: importRelevantUniqueVideoUUIDs.size,
+      importRelevantUniqueVideoUUIDsByType,
       uniqueVideoUUIDTotal: uniqueVideoUUIDs.size,
       uniqueVideoUUIDsByType
     }
+  }
+
+  // New-import pressure is primarily driven by videos still in their initial
+  // transcode/move pipeline. Published-video follow-up cleanup (for example
+  // late HLS object-storage moves) should not throttle fresh imports as
+  // aggressively.
+  private isImportRelevantLocalPipelineJobData (jobType: JobType, data: {
+    isNewVideo?: boolean
+    previousVideoState?: number
+    moveVideoState?: { isNewVideo?: boolean, previousVideoState?: number }
+    optimizeJob?: { isNewVideo?: boolean }
+    jobs?: { payload?: { isNewVideo?: boolean } }[]
+    sequentialJobs?: { payload?: { isNewVideo?: boolean } }[][]
+  }) {
+    if (jobType === 'generate-video-storyboard') return false
+
+    if (jobType === 'transcoding-job-builder') {
+      if (data.optimizeJob?.isNewVideo === true) return true
+      if (data.jobs?.some(job => job.payload?.isNewVideo === true)) return true
+      if (data.sequentialJobs?.some(group => group.some(job => job.payload?.isNewVideo === true))) return true
+      return false
+    }
+
+    const previousVideoState = data.previousVideoState ?? data.moveVideoState?.previousVideoState
+
+    if (jobType === 'video-transcoding') {
+      return data.isNewVideo === true
+    }
+
+    if (jobType === 'move-to-object-storage') {
+      if (data.isNewVideo === true || data.moveVideoState?.isNewVideo === true) return true
+      return previousVideoState !== undefined && previousVideoState !== VideoState.PUBLISHED
+    }
+
+    if (
+      jobType === 'move-video-file-to-object-storage' ||
+      jobType === 'move-hls-playlist-to-object-storage' ||
+      jobType === 'move-thumbnail-to-object-storage'
+    ) {
+      if (data.isNewVideo === true) return true
+      return previousVideoState !== undefined && previousVideoState !== VideoState.PUBLISHED
+    }
+
+    return false
   }
 
   async getExistingMoveJob (jobType: JobType, videoUUID: string, options?: {

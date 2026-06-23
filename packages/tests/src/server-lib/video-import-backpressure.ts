@@ -94,6 +94,27 @@ describe('video-import local pipeline backpressure', function () {
     })).to.equal(18)
   })
 
+  it('should prefer import-relevant in-flight video counts over all follow-up pipeline work', function () {
+    const getVideoImportLocalPipelineBackpressureTotal =
+      (videoImportBackpressure as any).getVideoImportLocalPipelineBackpressureTotal as (backlog: {
+        total: number
+        byType: Record<string, number>
+        importRelevantUniqueVideoUUIDTotal?: number
+        uniqueVideoUUIDTotal?: number
+      }) => number
+
+    expect(getVideoImportLocalPipelineBackpressureTotal({
+      total: 250,
+      byType: {
+        'video-transcoding': 40,
+        'move-hls-playlist-to-object-storage': 200,
+        'move-caption-to-object-storage': 10
+      },
+      importRelevantUniqueVideoUUIDTotal: 12,
+      uniqueVideoUUIDTotal: 48
+    })).to.equal(12)
+  })
+
   it('should bucket delayed import job IDs so repeated deferrals can be requeued later', function () {
     expect(buildVideoImportBackpressureJobId(42, 1_234_567, 600_000)).to.equal('video-import-backpressure-42-2')
     expect(buildVideoImportBackpressureJobId(42, 1_834_567, 600_000)).to.equal('video-import-backpressure-42-3')
