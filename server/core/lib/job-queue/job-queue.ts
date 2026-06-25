@@ -765,11 +765,12 @@ class JobQueue {
         const data = (job?.data ?? {}) as {
           videoUUID?: string
           isNewVideo?: boolean
+          transcodingPriority?: string
           previousVideoState?: number
           moveVideoState?: { isNewVideo?: boolean, previousVideoState?: number }
           optimizeJob?: { isNewVideo?: boolean }
-          jobs?: { payload?: { isNewVideo?: boolean } }[]
-          sequentialJobs?: { payload?: { isNewVideo?: boolean } }[][]
+          jobs?: { payload?: { isNewVideo?: boolean, transcodingPriority?: string } }[]
+          sequentialJobs?: { payload?: { isNewVideo?: boolean, transcodingPriority?: string } }[][]
         }
         const videoUUID = data.videoUUID
         if (!videoUUID) continue
@@ -803,25 +804,33 @@ class JobQueue {
   // aggressively.
   private isImportRelevantLocalPipelineJobData (jobType: JobType, data: {
     isNewVideo?: boolean
+    transcodingPriority?: string
     previousVideoState?: number
     moveVideoState?: { isNewVideo?: boolean, previousVideoState?: number }
     optimizeJob?: { isNewVideo?: boolean }
-    jobs?: { payload?: { isNewVideo?: boolean } }[]
-    sequentialJobs?: { payload?: { isNewVideo?: boolean } }[][]
+    jobs?: { payload?: { isNewVideo?: boolean, transcodingPriority?: string } }[]
+    sequentialJobs?: { payload?: { isNewVideo?: boolean, transcodingPriority?: string } }[][]
   }) {
+    const isImportRelevantNewVideoTranscodingPayload = (payload?: {
+      isNewVideo?: boolean
+      transcodingPriority?: string
+    }) => {
+      return payload?.isNewVideo === true && payload.transcodingPriority !== 'optional'
+    }
+
     if (jobType === 'generate-video-storyboard') return false
 
     if (jobType === 'transcoding-job-builder') {
       if (data.optimizeJob?.isNewVideo === true) return true
-      if (data.jobs?.some(job => job.payload?.isNewVideo === true)) return true
-      if (data.sequentialJobs?.some(group => group.some(job => job.payload?.isNewVideo === true))) return true
+      if (data.jobs?.some(job => isImportRelevantNewVideoTranscodingPayload(job.payload))) return true
+      if (data.sequentialJobs?.some(group => group.some(job => isImportRelevantNewVideoTranscodingPayload(job.payload)))) return true
       return false
     }
 
     const previousVideoState = data.previousVideoState ?? data.moveVideoState?.previousVideoState
 
     if (jobType === 'video-transcoding') {
-      return data.isNewVideo === true
+      return isImportRelevantNewVideoTranscodingPayload(data)
     }
 
     if (jobType === 'move-to-object-storage') {

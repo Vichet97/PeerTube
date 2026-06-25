@@ -10,7 +10,7 @@ import { lTags } from './logger.js'
 let s3ClientPromise: Promise<S3Client>
 let s3ClientResolved: S3Client
 
-const DEFAULT_OBJECT_STORAGE_CONNECTION_TIMEOUT_MS = 10_000
+const DEFAULT_OBJECT_STORAGE_CONNECTION_TIMEOUT_MS = 30_000
 const DEFAULT_OBJECT_STORAGE_SOCKET_TIMEOUT_MS = 120_000
 
 export function getClient () {
@@ -75,19 +75,28 @@ async function getProxyRequestHandler () {
   return new NodeHttpHandler(buildObjectStorageNodeHttpHandlerOptions())
 }
 
+export function getObjectStorageSocketTimeoutMs () {
+  return CONFIG.OBJECT_STORAGE.PROXY.REQUEST_TIMEOUT_MS ?? DEFAULT_OBJECT_STORAGE_SOCKET_TIMEOUT_MS
+}
+
+export function getObjectStorageConnectionTimeoutMs (socketTimeoutMs = getObjectStorageSocketTimeoutMs()) {
+  return Math.min(socketTimeoutMs, DEFAULT_OBJECT_STORAGE_CONNECTION_TIMEOUT_MS)
+}
+
 export function buildObjectStorageNodeHttpHandlerOptions () {
   const maxSockets = Math.max(
     16,
     Math.min(64, Math.max(1, CONFIG.OBJECT_STORAGE.CONCURRENCY) * 3)
   )
   const maxFreeSockets = Math.min(16, maxSockets)
-  const socketTimeout = CONFIG.OBJECT_STORAGE.PROXY.REQUEST_TIMEOUT_MS ?? DEFAULT_OBJECT_STORAGE_SOCKET_TIMEOUT_MS
+  const socketTimeout = getObjectStorageSocketTimeoutMs()
+  const connectionTimeout = getObjectStorageConnectionTimeoutMs(socketTimeout)
 
   if (isProxyEnabled()) {
     const proxy = getProxy()
 
     return {
-      connectionTimeout: DEFAULT_OBJECT_STORAGE_CONNECTION_TIMEOUT_MS,
+      connectionTimeout,
       socketTimeout,
       throwOnRequestTimeout: true,
       httpAgent: new HttpProxyAgent({
@@ -110,7 +119,7 @@ export function buildObjectStorageNodeHttpHandlerOptions () {
   }
 
   return {
-    connectionTimeout: DEFAULT_OBJECT_STORAGE_CONNECTION_TIMEOUT_MS,
+    connectionTimeout,
     socketTimeout,
     throwOnRequestTimeout: true,
     httpAgent: new http.Agent({

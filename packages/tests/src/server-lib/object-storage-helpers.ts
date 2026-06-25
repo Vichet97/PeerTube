@@ -1,6 +1,10 @@
 /* eslint-disable @typescript-eslint/no-unused-expressions */
 import { expect } from 'chai'
-import { buildKey, isTransientObjectStorageError } from '@peertube/peertube-server/core/lib/object-storage/object-storage-helpers.js'
+import {
+  buildKey,
+  isTransientObjectStorageError,
+  retryTransientObjectStorageOperation
+} from '@peertube/peertube-server/core/lib/object-storage/object-storage-helpers.js'
 
 describe('object-storage-helpers', function () {
   it('should detect transient object storage backend errors', function () {
@@ -25,5 +29,46 @@ describe('object-storage-helpers', function () {
     expect(buildKey('prefix/video.mp4', bucketInfo)).to.equal('prefix/video.mp4')
     expect(buildKey('videos/prefix/video.mp4', bucketInfo)).to.equal('prefix/videos/prefix/video.mp4')
     expect(buildKey('video.mp4', { ...bucketInfo, PREFIX: undefined })).to.equal('video.mp4')
+  })
+
+  it('should retry transient object storage operations before failing', async function () {
+    let attempts = 0
+
+    const result = await retryTransientObjectStorageOperation({
+      description: 'upload test file',
+      delayMs: 0,
+      run: () => {
+        attempts++
+
+        if (attempts < 3) {
+          return Promise.reject(new Error('Client network socket disconnected before secure TLS connection was established'))
+        }
+
+        return Promise.resolve('ok')
+      }
+    })
+
+    expect(result).to.equal('ok')
+    expect(attempts).to.equal(3)
+  })
+
+  it('should not retry permanent object storage errors', async function () {
+    let attempts = 0
+
+    try {
+      await retryTransientObjectStorageOperation({
+        description: 'upload test file',
+        delayMs: 0,
+        run: () => {
+          attempts++
+          return Promise.reject(new Error('NoSuchKey: The specified key does not exist'))
+        }
+      })
+
+      expect.fail('Expected operation to throw')
+    } catch (err) {
+      expect((err as Error).message).to.include('NoSuchKey')
+      expect(attempts).to.equal(1)
+    }
   })
 })

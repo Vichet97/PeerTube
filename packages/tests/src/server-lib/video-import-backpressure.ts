@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-unused-expressions */
 import { expect } from 'chai'
 import * as videoImportBackpressure from '@server/lib/job-queue/handlers/video-import.js'
+import { JobQueue } from '@server/lib/job-queue/job-queue.js'
 import {
   buildVideoImportBackpressureJobId,
   buildVideoImportLocalPipelineBackpressureMaxJobs,
@@ -113,6 +114,44 @@ describe('video-import local pipeline backpressure', function () {
       importRelevantUniqueVideoUUIDTotal: 12,
       uniqueVideoUUIDTotal: 48
     })).to.equal(12)
+  })
+
+  it('should ignore optional follow-up transcodes when computing import-relevant backlog', function () {
+    const isImportRelevantLocalPipelineJobData =
+      (JobQueue.prototype as any).isImportRelevantLocalPipelineJobData as (
+        jobType: string,
+        data: Record<string, any>
+      ) => boolean
+
+    expect(isImportRelevantLocalPipelineJobData.call({}, 'video-transcoding', {
+      isNewVideo: true,
+      transcodingPriority: 'required'
+    })).to.be.true
+
+    expect(isImportRelevantLocalPipelineJobData.call({}, 'video-transcoding', {
+      isNewVideo: true,
+      transcodingPriority: 'optional'
+    })).to.be.false
+
+    expect(isImportRelevantLocalPipelineJobData.call({}, 'transcoding-job-builder', {
+      optimizeJob: { isNewVideo: true }
+    })).to.be.true
+
+    expect(isImportRelevantLocalPipelineJobData.call({}, 'transcoding-job-builder', {
+      sequentialJobs: [
+        [
+          { payload: { isNewVideo: true, transcodingPriority: 'optional' } }
+        ]
+      ]
+    })).to.be.false
+
+    expect(isImportRelevantLocalPipelineJobData.call({}, 'transcoding-job-builder', {
+      sequentialJobs: [
+        [
+          { payload: { isNewVideo: true, transcodingPriority: 'required' } }
+        ]
+      ]
+    })).to.be.true
   })
 
   it('should bucket delayed import job IDs so repeated deferrals can be requeued later', function () {

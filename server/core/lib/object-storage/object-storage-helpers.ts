@@ -7,7 +7,7 @@ import { createReadStream, createWriteStream } from 'fs'
 import { ensureDir } from 'fs-extra/esm'
 import { dirname } from 'path'
 import { Readable } from 'stream'
-import { getClient } from './shared/client.js'
+import { getClient, getObjectStorageConnectionTimeoutMs } from './shared/client.js'
 import { lTags } from './shared/logger.js'
 
 import type { _Object, ObjectCannedACL, PutObjectCommandInput, S3Client } from '@aws-sdk/client-s3'
@@ -60,9 +60,18 @@ async function storeObject (options: {
 
   logger.debug('Uploading file %s to %s%s in bucket %s', inputPath, bucketInfo.PREFIX, objectStorageKey, bucketInfo.BUCKET_NAME, lTags())
 
-  const fileStream = createReadStream(inputPath)
+  return retryTransientObjectStorageOperation({
+    description: `upload ${bucketInfo.PREFIX ?? ''}${objectStorageKey} to bucket ${bucketInfo.BUCKET_NAME}`,
+    run: async () => {
+      const fileStream = createReadStream(inputPath)
 
-  return uploadToStorage({ objectStorageKey, content: fileStream, bucketInfo, isPrivate, contentType })
+      try {
+        return await uploadToStorage({ objectStorageKey, content: fileStream, bucketInfo, isPrivate, contentType })
+      } finally {
+        fileStream.destroy()
+      }
+    }
+  })
 }
 
 async function storeContent (options: {
@@ -76,7 +85,10 @@ async function storeContent (options: {
 
   logger.debug('Uploading %s content to %s%s in bucket %s', content, bucketInfo.PREFIX, objectStorageKey, bucketInfo.BUCKET_NAME, lTags())
 
-  return uploadToStorage({ objectStorageKey, content, bucketInfo, isPrivate, contentType })
+  return retryTransientObjectStorageOperation({
+    description: `upload ${bucketInfo.PREFIX ?? ''}${objectStorageKey} content to bucket ${bucketInfo.BUCKET_NAME}`,
+    run: () => uploadToStorage({ objectStorageKey, content, bucketInfo, isPrivate, contentType })
+  })
 }
 
 async function storeStream (options: {
@@ -325,10 +337,41 @@ function isTransientObjectStorageError (err: unknown) {
     'EPIPE',
     'aborted',
     'socket hang up',
+    'the request socket did not establish a connection with the server within the configured timeout',
     'Client network socket disconnected before secure TLS connection was established',
     '500 Internal Server Error',
     '503 Service Unavailable'
   ].some(token => message.includes(token))
+}
+
+async function retryTransientObjectStorageOperation<T> (options: {
+  description: string
+  run: () => Promise<T>
+  maxAttempts?: number
+  delayMs?: number
+}) {
+  const { description, run, maxAttempts = 4, delayMs = 2000 } = options
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await run()
+    } catch (err) {
+      if (attempt >= maxAttempts || !isTransientObjectStorageError(err)) throw err
+
+      logger.warn(
+        'Transient object storage error while trying to %s, retrying in %dms (attempt %d/%d).',
+        description,
+        delayMs,
+        attempt,
+        maxAttempts,
+        { err }
+      )
+
+      await new Promise(resolve => setTimeout(resolve, delayMs))
+    }
+  }
+
+  throw new Error(`Object storage operation ${description} failed without throwing a final error.`)
 }
 
 // ---------------------------------------------------------------------------
@@ -465,7 +508,7 @@ async function checkObjectStorageReadiness (options: {
   logNotReadyAsDebug?: boolean
 }): Promise<boolean> {
   const { key, bucketInfo, maxRetries = 30, retryIntervalMs = 10000, logNotReadyAsDebug = false } = options
-  const requestTimeoutMs = 10000
+  const requestTimeoutMs = getObjectStorageConnectionTimeoutMs()
   const progressTags = {
     objectStorageKey: key,
     bucket: bucketInfo.BUCKET_NAME,
@@ -561,6 +604,7 @@ export {
   storeContent,
   storeObject,
   storeStream,
+  retryTransientObjectStorageOperation,
   updateObjectACL,
   updatePrefixACL,
   type BucketInfo
