@@ -6,6 +6,7 @@ import { DEFAULT_AUDIO_MERGE_RESOLUTION, DEFAULT_AUDIO_RESOLUTION } from '@serve
 import { Hooks } from '@server/lib/plugins/hooks.js'
 import { MUserId, MVideoFile, MVideoFullLight } from '@server/types/models/index.js'
 import { VideoFileModel } from '@server/models/video/video-file.js'
+import { reassignDeleteWebVideoFilesToLastHLSJob } from './transcoding-cleanup-order.js'
 import { buildOriginalFileResolution, computeResolutionsToTranscode } from '../../transcoding-resolutions.js'
 
 const lTags = loggerTagsFactory('transcoding')
@@ -76,8 +77,6 @@ export abstract class AbstractJobBuilder<P extends { transcodingPriority: Transc
       if (!hasMaxResolutionHLS) {
         children.push([
           this.buildHLSJobPayload({
-            deleteWebVideoFiles: !CONFIG.TRANSCODING.WEB_VIDEOS.ENABLED,
-
             separatedAudio: hasSplitAudioTranscoding,
 
             resolution: maxResolution,
@@ -105,7 +104,6 @@ export abstract class AbstractJobBuilder<P extends { transcodingPriority: Transc
 
         children.push([
           this.buildHLSJobPayload({
-            deleteWebVideoFiles: !CONFIG.TRANSCODING.WEB_VIDEOS.ENABLED,
             separatedAudio: hasSplitAudioTranscoding,
 
             resolution: 0,
@@ -135,6 +133,13 @@ export abstract class AbstractJobBuilder<P extends { transcodingPriority: Transc
     })
 
     children = children.concat(lowerResolutionJobPayloads)
+
+    if (!CONFIG.TRANSCODING.WEB_VIDEOS.ENABLED) {
+      reassignDeleteWebVideoFilesToLastHLSJob(children as unknown as {
+        type?: string
+        deleteWebVideoFiles?: boolean
+      }[][])
+    }
 
     this.reassignCanMoveVideoState(mergeOrOptimizePayload, children.length === 0)
     if (children.length !== 0) {
