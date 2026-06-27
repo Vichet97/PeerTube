@@ -228,7 +228,7 @@ export const JOB_ATTEMPTS: { [id in JobType]: number } = {
   'video-channel-import': 1,
   'video-channel-reset': 1,
   'after-video-channel-import': 1,
-  'move-to-object-storage': 3,
+  'move-to-object-storage': 5,
   'move-to-file-system': 3,
   'move-video-file-to-object-storage': 5,
   'move-hls-playlist-to-object-storage': 5,
