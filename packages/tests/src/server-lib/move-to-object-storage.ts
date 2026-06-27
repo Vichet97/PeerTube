@@ -9,7 +9,8 @@ import { FileStorage, VideoState } from '@peertube/peertube-models'
 import {
   buildRetainedLocalFileCleanupDelay,
   maybeTransitionAfterObjectStorageMove,
-  removeLocalFileAfterMove
+  removeLocalFileAfterMove,
+  shouldWaitForPipelineCompletionBeforeDeletingMovedHLS
 } from '@peertube/peertube-server/core/lib/move-storage/move-to-object-storage.js'
 import { pickCaptionsForMoveBatch } from '@peertube/peertube-server/core/lib/move-storage/shared/move-caption.js'
 import { CONFIG } from '@peertube/peertube-server/core/initializers/config.js'
@@ -173,6 +174,75 @@ describe('move-to-object-storage', function () {
       mtimeMs: 1_000,
       nowMs: 90_000
     })).to.equal(0)
+  })
+
+  it('should keep only HLS seed files until the rest of the pipeline completes', function () {
+    const maxVideoResolution = 1080
+
+    expect(shouldWaitForPipelineCompletionBeforeDeletingMovedHLS({
+      file: {
+        resolution: 1080,
+        hasVideo: () => true
+      } as any,
+      maxVideoResolution
+    })).to.be.true
+
+    expect(shouldWaitForPipelineCompletionBeforeDeletingMovedHLS({
+      file: {
+        resolution: 480,
+        hasVideo: () => true
+      } as any,
+      maxVideoResolution
+    })).to.be.false
+
+    expect(shouldWaitForPipelineCompletionBeforeDeletingMovedHLS({
+      file: {
+        resolution: 0,
+        hasVideo: () => false
+      } as any,
+      maxVideoResolution
+    })).to.be.true
+  })
+
+  it('should allow non-seed moved local files to be deleted even when pipeline counters are still pending', async function () {
+    this.timeout(5_000)
+
+    const originalKeepLocalFileAfterMove = CONFIG.OBJECT_STORAGE.KEEP_LOCAL_FILE_AFTER_MOVE
+    const originalLoadByUUID = VideoJobInfoModel.loadByUUID
+    const originalHasPendingOrActiveLocalFileConsumerJob = JobQueue.Instance.hasPendingOrActiveLocalFileConsumerJob
+
+    const videoUUID = 'video-uuid-non-seed-cleanup'
+    const tmpDirectory = await mkdtemp(join(tmpdir(), 'peertube-retained-non-seed-'))
+    const path = join(tmpDirectory, 'segment.ts')
+
+    CONFIG.OBJECT_STORAGE.KEEP_LOCAL_FILE_AFTER_MOVE = 0
+    VideoJobInfoModel.loadByUUID = (() => Promise.resolve({
+      pendingMove: 10,
+      pendingTranscode: 20,
+      pendingTranscription: 0
+    } as any)) as typeof VideoJobInfoModel.loadByUUID
+    JobQueue.Instance.hasPendingOrActiveLocalFileConsumerJob =
+      (() => Promise.resolve(true)) as typeof JobQueue.Instance.hasPendingOrActiveLocalFileConsumerJob
+
+    try {
+      await writeFile(path, 'test')
+
+      await removeLocalFileAfterMove({
+        path,
+        videoUUID,
+        skipReadinessCheck: true,
+        waitForPipelineCompletion: false
+      })
+
+      await new Promise(resolve => setTimeout(resolve, 300))
+      expect(existsSync(path)).to.be.false
+    } finally {
+      CONFIG.OBJECT_STORAGE.KEEP_LOCAL_FILE_AFTER_MOVE = originalKeepLocalFileAfterMove
+      VideoJobInfoModel.loadByUUID = originalLoadByUUID
+      JobQueue.Instance.hasPendingOrActiveLocalFileConsumerJob = originalHasPendingOrActiveLocalFileConsumerJob
+
+      await remove(tmpDirectory).catch(() => {})
+    }
   })
 
   it('should keep retained local files after unlock while pipeline counters remain pending', async function () {

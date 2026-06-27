@@ -25,6 +25,7 @@ import {
   moveMasterPlaylistToObjectStorage,
   moveThumbnailToObjectStorage,
   removeLocalFileAfterMove,
+  shouldWaitForPipelineCompletionBeforeDeletingMovedHLS,
   moveVideoFileToObjectStorage
 } from '@server/lib/move-storage/move-to-object-storage.js'
 import { checkObjectStorageReadiness, generateHLSObjectStorageKey } from '@server/lib/object-storage/index.js'
@@ -469,13 +470,41 @@ async function processMoveHLSPlaylist (
 
     updateProgress(95)
 
-    const localCleanupPaths = buildHLSCleanupPaths(workingVideo, workingPlaylist, effectiveFileIds)
+    const maxVideoResolution = getMaxHLSCleanupVideoResolution(workingPlaylist)
+    const movedFilesForCleanup = workingPlaylist.VideoFiles.filter(file => effectiveFileIds.includes(file.id))
 
-    for (const path of localCleanupPaths) {
+    for (const file of movedFilesForCleanup) {
       await removeLocalFileAfterMove({
-        path,
+        path: VideoPathManager.Instance.getFSHLSOutputPath(workingVideo, file.filename),
         videoUUID,
-        skipReadinessCheck: true
+        skipReadinessCheck: true,
+        waitForPipelineCompletion: shouldWaitForPipelineCompletionBeforeDeletingMovedHLS({
+          file,
+          maxVideoResolution
+        })
+      })
+
+      await removeLocalFileAfterMove({
+        path: VideoPathManager.Instance.getFSHLSOutputPath(workingVideo, getHLSResolutionPlaylistFilename(file.filename)),
+        videoUUID,
+        skipReadinessCheck: true,
+        waitForPipelineCompletion: false
+      })
+    }
+
+    await removeLocalFileAfterMove({
+      path: VideoPathManager.Instance.getFSHLSOutputPath(workingVideo, workingPlaylist.playlistFilename),
+      videoUUID,
+      skipReadinessCheck: true,
+      waitForPipelineCompletion: false
+    })
+
+    if (workingPlaylist.segmentsSha256Filename) {
+      await removeLocalFileAfterMove({
+        path: VideoPathManager.Instance.getFSHLSOutputPath(workingVideo, workingPlaylist.segmentsSha256Filename),
+        videoUUID,
+        skipReadinessCheck: true,
+        waitForPipelineCompletion: false
       })
     }
 
@@ -599,27 +628,14 @@ async function processCleanupHLSPaths (job: Job, payload: MoveHLSPlaylistPayload
   }
 }
 
-function buildHLSCleanupPaths (
-  video: MVideoWithAllFiles,
-  playlist: MStreamingPlaylistFiles,
-  fileIds: number[]
-) {
-  const paths: string[] = []
+function getMaxHLSCleanupVideoResolution (playlist: MStreamingPlaylistFiles) {
+  const videoResolutions = playlist.VideoFiles
+    .filter(file => file.hasVideo())
+    .map(file => file.resolution)
 
-  const filesToCleanup = playlist.VideoFiles.filter(file => fileIds.includes(file.id))
-  for (const file of filesToCleanup) {
-    paths.push(VideoPathManager.Instance.getFSHLSOutputPath(video, file.filename))
-    paths.push(
-      VideoPathManager.Instance.getFSHLSOutputPath(video, getHLSResolutionPlaylistFilename(file.filename))
-    )
-  }
+  if (videoResolutions.length === 0) return 0
 
-  paths.push(VideoPathManager.Instance.getFSHLSOutputPath(video, playlist.playlistFilename))
-  if (playlist.segmentsSha256Filename) {
-    paths.push(VideoPathManager.Instance.getFSHLSOutputPath(video, playlist.segmentsSha256Filename))
-  }
-
-  return [ ...new Set(paths) ]
+  return Math.max(...videoResolutions)
 }
 
 async function isHLSFileAlreadyReadyOnObjectStorage (video: MVideoWithAllFiles, filename: string) {

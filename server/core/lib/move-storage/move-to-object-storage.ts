@@ -1,4 +1,4 @@
-import { FileStorage, VideoState, VideoStateType } from '@peertube/peertube-models'
+import { FileStorage, VideoResolution, VideoState, VideoStateType } from '@peertube/peertube-models'
 import { logger, LoggerTags, loggerTagsFactory } from '@server/helpers/logger.js'
 import { CONFIG } from '@server/initializers/config.js'
 import { P2P_MEDIA_LOADER_PEER_VERSION } from '@server/initializers/constants.js'
@@ -1125,7 +1125,6 @@ async function finalizeHLSPlaylistObjectStorageState (options: {
   onProgress?: (percent: number) => void
 }) {
   const { video, playlist, movedFiles, onProgress } = options
-  const videoUUID = video.uuid
 
   playlist.storage = FileStorage.OBJECT_STORAGE
 
@@ -1135,22 +1134,6 @@ async function finalizeHLSPlaylistObjectStorageState (options: {
     file.storage = FileStorage.OBJECT_STORAGE
     await updateTorrentMetadata(Object.assign(playlist, { Video: video }), file)
     await file.save()
-
-    // Keep local files available for the rest of the pipeline, then delete after the keep-local delay.
-    await removeLocalFileAfterMove({
-      path: join(getHLSDirectory(video), file.filename),
-      videoUUID,
-      objectStorageKey: generateHLSObjectStorageKey(video, file.filename),
-      bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS,
-      skipReadinessCheck: true
-    })
-    await removeLocalFileAfterMove({
-      path: join(getHLSDirectory(video), getHLSResolutionPlaylistFilename(file.filename)),
-      videoUUID,
-      objectStorageKey: generateHLSObjectStorageKey(video, getHLSResolutionPlaylistFilename(file.filename)),
-      bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS,
-      skipReadinessCheck: true
-    })
 
     // Update progress (20-80% for file processing)
     if (onProgress && totalFiles !== 0) {
@@ -1162,24 +1145,7 @@ async function finalizeHLSPlaylistObjectStorageState (options: {
   await playlist.assignP2PMediaLoaderInfoHashes(video, playlist.VideoFiles)
   playlist.p2pMediaLoaderPeerVersion = P2P_MEDIA_LOADER_PEER_VERSION
   await playlist.save()
-
-  // Remove master playlist files once the whole local processing pipeline is idle.
-  await removeLocalFileAfterMove({
-    path: join(getHLSDirectory(video), playlist.playlistFilename),
-    videoUUID,
-    objectStorageKey: generateHLSObjectStorageKey(video, playlist.playlistFilename),
-    bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS,
-    skipReadinessCheck: true
-  })
-  if (playlist.segmentsSha256Filename) {
-    await removeLocalFileAfterMove({
-      path: join(getHLSDirectory(video), playlist.segmentsSha256Filename),
-      videoUUID,
-      objectStorageKey: generateHLSObjectStorageKey(video, playlist.segmentsSha256Filename),
-      bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS,
-      skipReadinessCheck: true
-    })
-  }
+  await scheduleMovedHLSLocalCleanup({ video, playlist, movedFiles })
 
   if (onProgress) onProgress(90)
 }
@@ -1834,8 +1800,16 @@ export async function removeLocalFileAfterMove (options: {
   objectStorageKey?: string
   bucketInfo?: BucketInfo
   skipReadinessCheck?: boolean
+  waitForPipelineCompletion?: boolean
 }) {
-  const { path, videoUUID, objectStorageKey, bucketInfo, skipReadinessCheck } = options
+  const {
+    path,
+    videoUUID,
+    objectStorageKey,
+    bucketInfo,
+    skipReadinessCheck,
+    waitForPipelineCompletion = true
+  } = options
   const delayMs = CONFIG.OBJECT_STORAGE.KEEP_LOCAL_FILE_AFTER_MOVE
 
   if (objectStorageKey && bucketInfo && !skipReadinessCheck) {
@@ -1843,7 +1817,7 @@ export async function removeLocalFileAfterMove (options: {
   }
 
   if (videoUUID) {
-    scheduleLocalFileRemovalAfterActiveFileWork({ path, videoUUID, delayMs })
+    scheduleLocalFileRemovalAfterActiveFileWork({ path, videoUUID, delayMs, waitForPipelineCompletion })
     return
   }
 
@@ -1873,8 +1847,9 @@ function scheduleLocalFileRemovalAfterActiveFileWork (options: {
   videoUUID: string
   delayMs: number
   readinessCheck?: RetainedLocalFileReadinessCheck
+  waitForPipelineCompletion?: boolean
 }): boolean {
-  const { path, videoUUID, delayMs, readinessCheck } = options
+  const { path, videoUUID, delayMs, readinessCheck, waitForPipelineCompletion = true } = options
   const cleanupKey = `${videoUUID}:${resolve(path)}`
 
   if (scheduledLocalFileRemovals.has(cleanupKey)) {
@@ -1915,12 +1890,14 @@ function scheduleLocalFileRemovalAfterActiveFileWork (options: {
           return
         }
 
-        const jobInfo = await VideoJobInfoModel.loadByUUID(videoUUID)
+        const jobInfo = waitForPipelineCompletion
+          ? await VideoJobInfoModel.loadByUUID(videoUUID)
+          : null
         const pendingMove = jobInfo?.pendingMove ?? 0
         const pendingTranscode = jobInfo?.pendingTranscode ?? 0
         const pendingTranscription = jobInfo?.pendingTranscription ?? 0
 
-        if (pendingMove > 0 || pendingTranscode > 0 || pendingTranscription > 0) {
+        if (waitForPipelineCompletion && (pendingMove > 0 || pendingTranscode > 0 || pendingTranscription > 0)) {
           logger.info(
             'Keeping local file %s for video %s because pipeline counters are still pending ' +
             '(pendingMove=%d, pendingTranscode=%d, pendingTranscription=%d).',
@@ -1936,7 +1913,7 @@ function scheduleLocalFileRemovalAfterActiveFileWork (options: {
           continue
         }
 
-        if (await JobQueue.Instance.hasPendingOrActiveLocalFileConsumerJob(videoUUID)) {
+        if (waitForPipelineCompletion && await JobQueue.Instance.hasPendingOrActiveLocalFileConsumerJob(videoUUID)) {
           logger.info(
             'Keeping local file %s for video %s because queued local file consumer jobs are still pending.',
             path,
@@ -1998,6 +1975,82 @@ function scheduleLocalFileRemovalAfterActiveFileWork (options: {
   })()
 
   return true
+}
+
+export function shouldWaitForPipelineCompletionBeforeDeletingMovedHLS (options: {
+  file: Pick<MVideoFile, 'resolution' | 'hasVideo'>
+  maxVideoResolution: number
+}) {
+  const { file, maxVideoResolution } = options
+
+  if (!file.hasVideo()) return true
+  if (maxVideoResolution === VideoResolution.H_NOVIDEO) return true
+
+  return file.resolution >= maxVideoResolution
+}
+
+function getMaxHLSVideoResolution (files: MVideoFile[]) {
+  const videoResolutions = files
+    .filter(file => file.hasVideo())
+    .map(file => file.resolution)
+
+  if (videoResolutions.length === 0) return VideoResolution.H_NOVIDEO
+
+  return Math.max(...videoResolutions)
+}
+
+async function scheduleMovedHLSLocalCleanup (options: {
+  video: MVideoWithAllFiles
+  playlist: MStreamingPlaylistFiles
+  movedFiles: MVideoFile[]
+}) {
+  const { video, playlist, movedFiles } = options
+  const maxVideoResolution = getMaxHLSVideoResolution(playlist.VideoFiles)
+
+  for (const file of movedFiles) {
+    const waitForPipelineCompletion = shouldWaitForPipelineCompletionBeforeDeletingMovedHLS({
+      file,
+      maxVideoResolution
+    })
+
+    await removeLocalFileAfterMove({
+      path: join(getHLSDirectory(video), file.filename),
+      videoUUID: video.uuid,
+      objectStorageKey: generateHLSObjectStorageKey(video, file.filename),
+      bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS,
+      skipReadinessCheck: true,
+      waitForPipelineCompletion
+    })
+
+    await removeLocalFileAfterMove({
+      path: join(getHLSDirectory(video), getHLSResolutionPlaylistFilename(file.filename)),
+      videoUUID: video.uuid,
+      objectStorageKey: generateHLSObjectStorageKey(video, getHLSResolutionPlaylistFilename(file.filename)),
+      bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS,
+      skipReadinessCheck: true,
+      waitForPipelineCompletion: false
+    })
+  }
+
+  await removeLocalFileAfterMove({
+    path: join(getHLSDirectory(video), playlist.playlistFilename),
+    videoUUID: video.uuid,
+    objectStorageKey: generateHLSObjectStorageKey(video, playlist.playlistFilename),
+    bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS,
+    skipReadinessCheck: true,
+    waitForPipelineCompletion: false
+  })
+
+  if (playlist.segmentsSha256Filename) {
+    await removeLocalFileAfterMove({
+      path: join(getHLSDirectory(video), playlist.segmentsSha256Filename),
+      videoUUID: video.uuid,
+      objectStorageKey: generateHLSObjectStorageKey(video, playlist.segmentsSha256Filename),
+      bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS,
+      skipReadinessCheck: true,
+      waitForPipelineCompletion: false
+    })
+  }
 }
 
 function isRetryableLocalRemovalError (err: unknown) {
