@@ -59,7 +59,7 @@ import { hasVideoResourcesToBeMoved, moveVideoToStorage, onMoveVideoToStorageFai
 
 const lTagsBase = loggerTagsFactory('object-storage', 'move-object-storage')
 const LOCAL_CLEANUP_RETRY_DELAY_MS = 30_000
-const RETAINED_LOCAL_FILES_CLEANUP_START_DELAY_MS = 5 * 60 * 1000
+const RETAINED_LOCAL_FILES_CLEANUP_START_DELAY_MS = 30 * 1000
 const RETAINED_LOCAL_FILES_CLEANUP_INTERVAL_MS = 30 * 60 * 1000
 const RETAINED_LOCAL_FILES_CLEANUP_CONCURRENCY = 5
 const scheduledLocalFileRemovals = new Set<string>()

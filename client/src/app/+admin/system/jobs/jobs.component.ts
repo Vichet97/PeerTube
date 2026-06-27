@@ -16,7 +16,7 @@ import { ButtonComponent } from '../../../shared/shared-main/buttons/button.comp
 import { NumberFormatterPipe } from '../../../shared/shared-main/common/number-formatter.pipe'
 import { TableColumnInfo, TableComponent, TableQueryParams } from '../../../shared/shared-tables/table.component'
 import { AdvancedInputFilterComponent } from '../../../shared/shared-forms/advanced-input-filter.component'
-import { GlobalQueueCleanupStatus, JobService, VideoMaintenanceCounts, VideoSystemResetStatus } from './job.service'
+import { GlobalQueueCleanupStatus, JobService, RetainedLocalFilesCleanupResult, VideoMaintenanceCounts, VideoSystemResetStatus } from './job.service'
 
 type ColumnName = 'select' | 'id' | 'type' | 'priority' | 'state' | 'progress' | 'createdAt' | 'processed'
 
@@ -62,6 +62,7 @@ export class JobsComponent implements OnInit {
   creatingStoryboardJobs = false
   cancellingAllJobs = false
   clearingGlobalQueueBacklog = false
+  cleaningRetainedLocalFiles = false
 
   selectedJobIds = new Set<number>()
   retryingJobIds = new Set<number>()
@@ -456,6 +457,27 @@ export class JobsComponent implements OnInit {
       error: () => {
         this.clearingGlobalQueueBacklog = false
         this.notifier.error($localize`Failed to clear global BullMQ waiting/delayed backlog.`)
+      }
+    })
+  }
+
+  cleanupRetainedLocalFiles () {
+    if (this.cleaningRetainedLocalFiles) return
+
+    this.cleaningRetainedLocalFiles = true
+    this.notifier.info($localize`Scheduling retained local file cleanup...`)
+
+    this.jobsService.cleanupRetainedLocalFiles().subscribe({
+      next: (result: RetainedLocalFilesCleanupResult) => {
+        this.cleaningRetainedLocalFiles = false
+        this.notifier.success(
+          $localize`Scheduled cleanup for ${result.scheduled} retained local file(s). ${result.skippedMissing} already-missing file(s) were skipped.`
+        )
+        this.loadVideoMaintenanceCounts()
+      },
+      error: () => {
+        this.cleaningRetainedLocalFiles = false
+        this.notifier.error($localize`Failed to schedule retained local file cleanup.`)
       }
     })
   }

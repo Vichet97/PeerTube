@@ -107,6 +107,13 @@
           (click)="clearGlobalQueueBacklog()"
           [disabled]="clearingGlobalQueueBacklog"
         ></my-button>
+        <my-button
+          i18n-label
+          label="Cleanup retained local files"
+          icon="delete"
+          (click)="cleanupRetainedLocalFiles()"
+          [disabled]="cleaningRetainedLocalFiles"
+        ></my-button>
         <my-button i18n-label label="Refresh" icon="refresh" (click)="refreshData()"></my-button>
       </div>
 

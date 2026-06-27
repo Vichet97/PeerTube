@@ -45,6 +45,11 @@ export type GlobalQueueCleanupResult = {
   queueJobsCleaned: number
 }
 
+export type RetainedLocalFilesCleanupResult = {
+  scheduled: number
+  skippedMissing: number
+}
+
 export type GlobalQueueCleanupStatus = {
   state: 'idle' | 'running' | 'completed' | 'failed'
   startedAt?: string
@@ -118,6 +123,15 @@ export class JobService {
   getGlobalQueueBacklogCleanupStatus () {
     return this.authHttp.get<GlobalQueueCleanupStatus>(
       JobService.BASE_JOB_URL + '/clear-global-queue-backlog'
+    ).pipe(
+      catchError(err => this.restExtractor.handleError(err))
+    )
+  }
+
+  cleanupRetainedLocalFiles () {
+    return this.authHttp.post<RetainedLocalFilesCleanupResult>(
+      JobService.BASE_JOB_URL + '/cleanup-retained-local-files',
+      {}
     ).pipe(
       catchError(err => this.restExtractor.handleError(err))
     )

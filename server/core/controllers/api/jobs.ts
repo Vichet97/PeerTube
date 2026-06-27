@@ -25,6 +25,7 @@ import { DIRECTORIES } from '../../initializers/constants.js'
 import { sequelizeTypescript } from '../../initializers/database.js'
 import { JobQueue } from '../../lib/job-queue/index.js'
 import { hasVideoResourcesToBeMoved } from '../../lib/move-storage/shared/move-video.js'
+import { cleanupRetainedLocalFilesAfterRestart } from '../../lib/move-storage/move-to-object-storage.js'
 import { getFSTorrentFilePath, getHLSResolutionPlaylistFilename } from '../../lib/paths.js'
 import { Redis } from '../../lib/redis.js'
 import { getUnprocessedOrphanedVideoRepairJobRefs } from './video-repair-job-orphans.js'
@@ -260,6 +261,12 @@ jobsRouter.post('/clear-global-queue-backlog',
   authenticate,
   ensureUserHasRight(UserRight.MANAGE_JOBS),
   asyncMiddleware(clearGlobalQueueBacklog)
+)
+
+jobsRouter.post('/cleanup-retained-local-files',
+  authenticate,
+  ensureUserHasRight(UserRight.MANAGE_JOBS),
+  asyncMiddleware(cleanupRetainedLocalFiles)
 )
 
 jobsRouter.get('/clear-global-queue-backlog',
@@ -611,6 +618,12 @@ async function recheckVideosStatus (req: express.Request, res: express.Response)
   void startVideoSystemResetInBackground(jobType)
 
   return res.json(runningStatus)
+}
+
+async function cleanupRetainedLocalFiles (_req: express.Request, res: express.Response) {
+  const result = await cleanupRetainedLocalFilesAfterRestart()
+
+  return res.json(result)
 }
 
 async function getRecheckVideosStatus (_req: express.Request, res: express.Response) {
