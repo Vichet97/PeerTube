@@ -311,13 +311,18 @@ function isTransientObjectStorageError (err: unknown) {
   if (!err || typeof err !== 'object') return false
 
   const e = err as any
+  const nestedMessages = Array.isArray(e.errors)
+    ? e.errors.map((nested: any) => [ nested?.name, nested?.code, nested?.message, nested?.stack ].filter(Boolean).join(' '))
+    : []
   const message = [
     e.name,
     e.Code,
     e.code,
     e.message,
+    e.stack,
     e.$response?.statusCode,
-    e.$metadata?.httpStatusCode
+    e.$metadata?.httpStatusCode,
+    ...nestedMessages
   ].filter(Boolean).join(' ')
 
   const statusCode = e.$response?.statusCode ?? e.$metadata?.httpStatusCode
@@ -331,9 +336,15 @@ function isTransientObjectStorageError (err: unknown) {
     'RequestTimeout',
     'TimeoutError',
     'AbortError',
+    'AggregateError',
     'internalConnectMultipleTimeout',
+    'internalConnectMultiple',
+    'afterConnectMultiple',
     'ECONNRESET',
+    'ECONNREFUSED',
     'ETIMEDOUT',
+    'ENETUNREACH',
+    'EHOSTUNREACH',
     'EPIPE',
     'aborted',
     'socket hang up',
@@ -350,7 +361,7 @@ async function retryTransientObjectStorageOperation<T> (options: {
   maxAttempts?: number
   delayMs?: number
 }) {
-  const { description, run, maxAttempts = 4, delayMs = 2000 } = options
+  const { description, run, maxAttempts = 6, delayMs = 2000 } = options
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {

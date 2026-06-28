@@ -1813,11 +1813,37 @@ export async function removeLocalFileAfterMove (options: {
   const delayMs = CONFIG.OBJECT_STORAGE.KEEP_LOCAL_FILE_AFTER_MOVE
 
   if (objectStorageKey && bucketInfo && !skipReadinessCheck) {
-    await ensureObjectStorageFileReady({ objectStorageKey, bucketInfo })
+    try {
+      await ensureObjectStorageFileReady({ objectStorageKey, bucketInfo })
+    } catch (err) {
+      if (!videoUUID) throw err
+
+      logger.warn(
+        'Immediate object storage readiness check failed for %s of video %s. ' +
+        'Keeping local file and deferring deletion until a later cleanup pass.',
+        objectStorageKey,
+        videoUUID,
+        { err, ...lTagsBase(videoUUID) }
+      )
+    }
   }
 
   if (videoUUID) {
-    scheduleLocalFileRemovalAfterActiveFileWork({ path, videoUUID, delayMs, waitForPipelineCompletion })
+    scheduleLocalFileRemovalAfterActiveFileWork({
+      path,
+      videoUUID,
+      delayMs,
+      waitForPipelineCompletion,
+      readinessCheck: objectStorageKey && bucketInfo
+        ? {
+            objectStorageKey,
+            bucketInfo,
+            maxRetries: 1,
+            retryIntervalMs: 0,
+            logNotReadyAsDebug: true
+          }
+        : undefined
+    })
     return
   }
 

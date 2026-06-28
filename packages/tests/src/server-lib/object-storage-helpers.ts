@@ -15,6 +15,12 @@ describe('object-storage-helpers', function () {
       isTransientObjectStorageError(new Error('Client network socket disconnected before secure TLS connection was established'))
     ).to.be.true
     expect(isTransientObjectStorageError(new Error('AggregateError: internalConnectMultipleTimeout'))).to.be.true
+    expect(isTransientObjectStorageError({
+      name: 'AggregateError',
+      errors: [
+        { code: 'ECONNREFUSED', message: 'connect ECONNREFUSED 127.0.0.1:443' }
+      ]
+    })).to.be.true
     expect(isTransientObjectStorageError(new Error('AggregateError: permanent validation failure'))).to.be.false
     expect(isTransientObjectStorageError({ message: 'NoSuchKey: The specified key does not exist' })).to.be.false
   })
