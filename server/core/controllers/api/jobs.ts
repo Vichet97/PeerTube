@@ -17,7 +17,7 @@ import { Job as BullJob } from 'bullmq'
 import express from 'express'
 import { readdir } from 'fs/promises'
 import { pathExists, remove } from 'fs-extra/esm'
-import { Op } from 'sequelize'
+import { Op, QueryTypes } from 'sequelize'
 import { isArray } from '../../helpers/custom-validators/misc.js'
 import { logger } from '../../helpers/logger.js'
 import { CONFIG } from '../../initializers/config.js'
@@ -327,6 +327,7 @@ export {
 
 async function createMoveStorageJobs (req: express.Request, res: express.Response) {
   const storage = req.body.storage as 'object-storage' | 'file-system'
+  const scope = (req.body.scope as 'all' | 'disk-relief' | undefined) ?? 'all'
   const targetStorage = storage === 'object-storage' ? FileStorage.OBJECT_STORAGE : FileStorage.FILE_SYSTEM
 
   if (storage === 'object-storage' && !CONFIG.OBJECT_STORAGE.ENABLED) {
@@ -336,7 +337,9 @@ async function createMoveStorageJobs (req: express.Request, res: express.Respons
     })
   }
 
-  const ids = await VideoModel.listLocalIds()
+  const ids = scope === 'disk-relief' && storage === 'object-storage'
+    ? await listLocalIdsWithFileSystemMedia()
+    : await VideoModel.listLocalIds()
   let jobsCreated = 0
 
   for (const id of ids) {
@@ -368,6 +371,55 @@ async function createMoveStorageJobs (req: express.Request, res: express.Respons
   }
 
   return res.json({ jobsCreated })
+}
+
+async function listLocalIdsWithFileSystemMedia () {
+  const rows = await sequelizeTypescript.query<{ id: number }>(`
+    SELECT v."id"
+    FROM "video" v
+    WHERE v."remote" IS FALSE
+      AND (
+        EXISTS (
+          SELECT 1
+          FROM "videoFile" vf
+          WHERE vf."videoId" = v."id" AND vf."storage" = ${FileStorage.FILE_SYSTEM}
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM "videoStreamingPlaylist" vsp
+          JOIN "videoFile" vfhls ON vfhls."videoStreamingPlaylistId" = vsp."id"
+          WHERE vsp."videoId" = v."id" AND vfhls."storage" = ${FileStorage.FILE_SYSTEM}
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM "videoSource" vs
+          WHERE vs."videoId" = v."id" AND vs."storage" = ${FileStorage.FILE_SYSTEM}
+        )
+      )
+    ORDER BY (
+      COALESCE((
+        SELECT SUM(vf."size")
+        FROM "videoFile" vf
+        WHERE vf."videoId" = v."id" AND vf."storage" = ${FileStorage.FILE_SYSTEM}
+      ), 0)
+      + COALESCE((
+        SELECT SUM(vfhls."size")
+        FROM "videoStreamingPlaylist" vsp
+        JOIN "videoFile" vfhls ON vfhls."videoStreamingPlaylistId" = vsp."id"
+        WHERE vsp."videoId" = v."id" AND vfhls."storage" = ${FileStorage.FILE_SYSTEM}
+      ), 0)
+      + COALESCE((
+        SELECT SUM(vs."size")
+        FROM "videoSource" vs
+        WHERE vs."videoId" = v."id" AND vs."storage" = ${FileStorage.FILE_SYSTEM}
+      ), 0)
+    ) DESC,
+    v."createdAt" ASC
+  `, {
+    type: QueryTypes.SELECT
+  })
+
+  return rows.map(row => row.id)
 }
 
 async function createRetryTranscodingJobs (req: express.Request, res: express.Response) {

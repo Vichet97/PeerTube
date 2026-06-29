@@ -32,6 +32,11 @@ const createMoveStorageJobsValidator = [
     .isIn([ 'object-storage', 'file-system' ])
     .withMessage('Storage must be object-storage or file-system'),
 
+  body('scope')
+    .optional()
+    .isIn([ 'all', 'disk-relief' ])
+    .withMessage('Scope must be all or disk-relief'),
+
   (req: express.Request, res: express.Response, next: express.NextFunction) => {
     if (areValidationErrors(req, res, lTags())) return
 

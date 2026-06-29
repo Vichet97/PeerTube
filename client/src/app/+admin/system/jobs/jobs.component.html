@@ -51,6 +51,13 @@
         ></my-button>
         <my-button
           i18n-label
+          label="Create local-media move jobs"
+          icon="upload"
+          (click)="createMoveStorageJobs('object-storage', 'disk-relief')"
+          [disabled]="creatingMoveJobs"
+        ></my-button>
+        <my-button
+          i18n-label
           label="Create jobs to move videos to file system"
           icon="download"
           (click)="createMoveStorageJobs('file-system')"

@@ -262,18 +262,19 @@ export class JobsComponent implements OnInit {
     peertubeLocalStorage.setItem(JobsComponent.LS_TYPE, this.jobType)
   }
 
-  createMoveStorageJobs (storage: 'object-storage' | 'file-system') {
+  createMoveStorageJobs (storage: 'object-storage' | 'file-system', scope: 'all' | 'disk-relief' = 'all') {
     if (this.creatingMoveJobs) return
 
     this.creatingMoveJobs = true
     const target = storage === 'object-storage' ? $localize`object storage` : $localize`file system`
-    this.notifier.info($localize`Creating jobs to move videos to ${target}...`)
+    const scopeLabel = scope === 'disk-relief' ? $localize`local media only` : $localize`all resources`
+    this.notifier.info($localize`Creating jobs to move videos to ${target} (${scopeLabel})...`)
 
     // Fire and forget - don't wait for the API response
-    this.jobsService.createMoveStorageJobs(storage).subscribe({
+    this.jobsService.createMoveStorageJobs(storage, scope).subscribe({
       next: ({ jobsCreated }) => {
         this.creatingMoveJobs = false
-        this.notifier.success($localize`Created ${jobsCreated} job(s) to move videos to ${target}.`)
+        this.notifier.success($localize`Created ${jobsCreated} job(s) to move videos to ${target} (${scopeLabel}).`)
         this.table().loadData()
         this.loadVideoMaintenanceCounts()
       },

@@ -66,10 +66,10 @@ export class JobService {
 
   private static BASE_JOB_URL = environment.apiUrl + '/api/v1/jobs'
 
-  createMoveStorageJobs (storage: 'object-storage' | 'file-system') {
+  createMoveStorageJobs (storage: 'object-storage' | 'file-system', scope: 'all' | 'disk-relief' = 'all') {
     return this.authHttp.post<{ jobsCreated: number }>(
       JobService.BASE_JOB_URL + '/create-move-storage-jobs',
-      { storage }
+      { storage, scope }
     ).pipe(
       catchError(err => this.restExtractor.handleError(err))
     )
