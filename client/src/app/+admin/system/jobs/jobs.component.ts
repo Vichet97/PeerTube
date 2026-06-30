@@ -16,7 +16,7 @@ import { ButtonComponent } from '../../../shared/shared-main/buttons/button.comp
 import { NumberFormatterPipe } from '../../../shared/shared-main/common/number-formatter.pipe'
 import { TableColumnInfo, TableComponent, TableQueryParams } from '../../../shared/shared-tables/table.component'
 import { AdvancedInputFilterComponent } from '../../../shared/shared-forms/advanced-input-filter.component'
-import { GlobalQueueCleanupStatus, JobService, RetainedLocalFilesCleanupResult, VideoMaintenanceCounts, VideoSystemResetStatus } from './job.service'
+import { GlobalQueueCleanupStatus, JobService, RetainedLocalFilesCleanupStatus, VideoMaintenanceCounts, VideoSystemResetStatus } from './job.service'
 
 type ColumnName = 'select' | 'id' | 'type' | 'priority' | 'state' | 'progress' | 'createdAt' | 'processed'
 
@@ -69,6 +69,7 @@ export class JobsComponent implements OnInit {
   recheckingVideosStatus = false
   private resetStatusPollingSub?: Subscription
   private globalQueueCleanupPollingSub?: Subscription
+  private retainedLocalFilesCleanupPollingSub?: Subscription
 
   jobsCount = 0
   videoMaintenanceCounts: VideoMaintenanceCounts = {
@@ -151,6 +152,7 @@ export class JobsComponent implements OnInit {
     this.loadVideoMaintenanceCounts()
     this.resumeResetStatusPollingIfNeeded()
     this.resumeGlobalQueueCleanupPollingIfNeeded()
+    this.resumeRetainedLocalFilesCleanupPollingIfNeeded()
   }
 
   getJobStateClasses (state: JobStateClient): string[] {
@@ -466,19 +468,21 @@ export class JobsComponent implements OnInit {
     if (this.cleaningRetainedLocalFiles) return
 
     this.cleaningRetainedLocalFiles = true
-    this.notifier.info($localize`Scheduling retained local file cleanup...`)
+    this.notifier.info($localize`Starting retained local file cleanup in background...`)
 
     this.jobsService.cleanupRetainedLocalFiles().subscribe({
-      next: (result: RetainedLocalFilesCleanupResult) => {
-        this.cleaningRetainedLocalFiles = false
-        this.notifier.success(
-          $localize`Scheduled cleanup for ${result.scheduled} retained local file(s). ${result.skippedMissing} already-missing file(s) were skipped.`
-        )
-        this.loadVideoMaintenanceCounts()
+      next: status => {
+        if (status.state === 'running') {
+          this.notifier.success($localize`Retained local file cleanup started in background.`)
+          this.startRetainedLocalFilesCleanupPolling()
+          return
+        }
+
+        this.handleRetainedLocalFilesCleanupStatus(status)
       },
       error: () => {
         this.cleaningRetainedLocalFiles = false
-        this.notifier.error($localize`Failed to schedule retained local file cleanup.`)
+        this.notifier.error($localize`Failed to start retained local file cleanup.`)
       }
     })
   }
@@ -564,6 +568,20 @@ export class JobsComponent implements OnInit {
     })
   }
 
+  private resumeRetainedLocalFilesCleanupPollingIfNeeded () {
+    this.jobsService.getCleanupRetainedLocalFilesStatus().subscribe({
+      next: status => {
+        if (status.state === 'running') {
+          this.cleaningRetainedLocalFiles = true
+          this.startRetainedLocalFilesCleanupPolling()
+        }
+      },
+      error: () => {
+        // noop
+      }
+    })
+  }
+
   private startResetStatusPolling () {
     this.resetStatusPollingSub?.unsubscribe()
 
@@ -596,6 +614,24 @@ export class JobsComponent implements OnInit {
           this.globalQueueCleanupPollingSub = undefined
           this.clearingGlobalQueueBacklog = false
           this.notifier.error($localize`Failed to poll global queue scrub status.`)
+        }
+      })
+  }
+
+  private startRetainedLocalFilesCleanupPolling () {
+    this.retainedLocalFilesCleanupPollingSub?.unsubscribe()
+
+    this.retainedLocalFilesCleanupPollingSub = interval(2000)
+      .pipe(
+        switchMap(() => this.jobsService.getCleanupRetainedLocalFilesStatus())
+      )
+      .subscribe({
+        next: status => this.handleRetainedLocalFilesCleanupStatus(status),
+        error: () => {
+          this.retainedLocalFilesCleanupPollingSub?.unsubscribe()
+          this.retainedLocalFilesCleanupPollingSub = undefined
+          this.cleaningRetainedLocalFiles = false
+          this.notifier.error($localize`Failed to poll retained local file cleanup status.`)
         }
       })
   }
@@ -653,6 +689,31 @@ export class JobsComponent implements OnInit {
       $localize`Global queue scrub complete: paused ${result.queuesPaused} queue(s), drained ${result.queueJobsDrained} waiting/delayed job(s), cleaned ${result.queueJobsCleaned} waiting/delayed state record(s).`
     )
     this.table().loadData()
+  }
+
+  private handleRetainedLocalFilesCleanupStatus (status: RetainedLocalFilesCleanupStatus) {
+    if (status.state === 'running' || status.state === 'idle') return
+
+    this.retainedLocalFilesCleanupPollingSub?.unsubscribe()
+    this.retainedLocalFilesCleanupPollingSub = undefined
+    this.cleaningRetainedLocalFiles = false
+
+    if (status.state === 'failed') {
+      this.notifier.error($localize`Retained local file cleanup failed: ${status.error || 'unknown error'}.`)
+      return
+    }
+
+    const result = status.result
+    if (!result) {
+      this.notifier.success($localize`Retained local file cleanup finished.`)
+      this.loadVideoMaintenanceCounts()
+      return
+    }
+
+    this.notifier.success(
+      $localize`Retained local file cleanup complete: scheduled ${result.scheduled} retained local file(s), skipped ${result.skippedMissing} already-missing file(s).`
+    )
+    this.loadVideoMaintenanceCounts()
   }
 
   private loadVideoMaintenanceCounts () {

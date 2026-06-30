@@ -454,6 +454,20 @@ class Redis {
     return this.getObject('global-queue-cleanup-status')
   }
 
+  setRetainedLocalFilesCleanupStatus (value: {
+    state: 'idle' | 'running' | 'completed' | 'failed'
+    startedAt?: string
+    finishedAt?: string
+    error?: string
+    result?: unknown
+  }) {
+    return this.setObject('retained-local-files-cleanup-status', value)
+  }
+
+  getRetainedLocalFilesCleanupStatus () {
+    return this.getObject('retained-local-files-cleanup-status')
+  }
+
   /* ************ AP resource unavailability ************ */
 
   async addAPUnavailability (url: string) {

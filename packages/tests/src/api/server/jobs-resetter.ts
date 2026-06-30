@@ -18,7 +18,7 @@ describe('Test jobs resetter', function () {
   async function waitForServerAuthentication (server: PeerTubeServer) {
     let lastError: unknown
 
-    for (let i = 0; i < 30; i++) {
+    for (let i = 0; i < 120; i++) {
       try {
         server.accessToken = await server.login.getAccessToken()
         return
@@ -48,6 +48,26 @@ describe('Test jobs resetter', function () {
     if (lastError instanceof Error) throw lastError
 
     throw new Error(lastError ? String(lastError) : `Cannot load video ${id}.`)
+  }
+
+  async function waitForRetainedLocalFilesCleanupStatus () {
+    let statusBody: any
+
+    for (let i = 0; i < 240; i++) {
+      const res = await withLocalApiRetry('polling retained local files cleanup status', () => makeGetRequest({
+        url: server.url,
+        path: '/api/v1/jobs/cleanup-retained-local-files',
+        token: server.accessToken,
+        expectedStatus: 200
+      }))
+
+      statusBody = res.body
+      if (statusBody.state !== 'running') return statusBody
+
+      await wait(250)
+    }
+
+    return statusBody
   }
 
   function isRetryableLocalConnectError (err: unknown) {
@@ -157,11 +177,21 @@ describe('Test jobs resetter', function () {
   }
 
   before(async function () {
-    this.timeout(240000)
+    this.timeout(600000)
 
     server = await createSingleServer(1, {
       object_storage: {
         enabled: false
+      },
+      rates_limit: {
+        api: {
+          window: '10 seconds',
+          max: 1000
+        },
+        login: {
+          window: '5 minutes',
+          max: 1000
+        }
       },
       redis: {
         hostname: '127.0.0.1',
@@ -259,6 +289,26 @@ describe('Test jobs resetter', function () {
       expect(total).to.equal(0)
       expect(data).to.have.lengthOf(0)
     }
+  })
+
+  it('Should run retained local file cleanup asynchronously and expose completion status', async function () {
+    this.timeout(120000)
+
+    const startResponse = await withLocalApiRetry('starting retained local file cleanup', () => makePostBodyRequest({
+      url: server.url,
+      path: '/api/v1/jobs/cleanup-retained-local-files',
+      token: server.accessToken,
+      expectedStatus: 200
+    }))
+
+    expect(startResponse.body.state).to.equal('running')
+
+    const statusBody = await waitForRetainedLocalFilesCleanupStatus()
+    expect(statusBody.state, JSON.stringify(statusBody)).to.equal('completed')
+    expect(statusBody.result).to.deep.equal({
+      scheduled: 0,
+      skippedMissing: 0
+    })
   })
 
   after(async function () {

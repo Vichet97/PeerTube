@@ -148,6 +148,19 @@ type GlobalQueueCleanupStatus = {
   result?: GlobalQueueCleanupResult
 }
 
+type RetainedLocalFilesCleanupResult = {
+  scheduled: number
+  skippedMissing: number
+}
+
+type RetainedLocalFilesCleanupStatus = {
+  state: 'idle' | 'running' | 'completed' | 'failed'
+  startedAt?: string
+  finishedAt?: string
+  error?: string
+  result?: RetainedLocalFilesCleanupResult
+}
+
 const VIDEO_REPAIR_JOB_STATES = [ 'waiting', 'delayed', 'prioritized', 'waiting-children', 'active', 'failed' ] as const
 const VIDEO_REPAIR_JOB_TYPES: JobType[] = [
   'video-import',
@@ -267,6 +280,12 @@ jobsRouter.post('/cleanup-retained-local-files',
   authenticate,
   ensureUserHasRight(UserRight.MANAGE_JOBS),
   asyncMiddleware(cleanupRetainedLocalFiles)
+)
+
+jobsRouter.get('/cleanup-retained-local-files',
+  authenticate,
+  ensureUserHasRight(UserRight.MANAGE_JOBS),
+  asyncMiddleware(getCleanupRetainedLocalFilesStatus)
 )
 
 jobsRouter.get('/clear-global-queue-backlog',
@@ -673,17 +692,40 @@ async function recheckVideosStatus (req: express.Request, res: express.Response)
 }
 
 async function cleanupRetainedLocalFiles (_req: express.Request, res: express.Response) {
-  const result = await cleanupRetainedLocalFilesAfterRestart()
+  const currentStatus = await getStoredRetainedLocalFilesCleanupStatus()
+  if (currentStatus.state === 'running') {
+    return res.json(currentStatus)
+  }
 
-  return res.json(result)
+  const startedAt = new Date().toISOString()
+  const runningStatus: RetainedLocalFilesCleanupStatus = {
+    state: 'running',
+    startedAt
+  }
+
+  await Redis.Instance.setRetainedLocalFilesCleanupStatus(runningStatus)
+
+  void startRetainedLocalFilesCleanupInBackground()
+
+  return res.json(runningStatus)
 }
 
 async function getRecheckVideosStatus (_req: express.Request, res: express.Response) {
   return res.json(await getStoredVideoSystemResetStatus())
 }
 
+async function getCleanupRetainedLocalFilesStatus (_req: express.Request, res: express.Response) {
+  return res.json(await getStoredRetainedLocalFilesCleanupStatus())
+}
+
 async function getStoredVideoSystemResetStatus (): Promise<SystemVideoResetStatus> {
   const status = await Redis.Instance.getVideoPipelineSystemResetStatus() as SystemVideoResetStatus | null
+
+  return status || { state: 'idle' }
+}
+
+async function getStoredRetainedLocalFilesCleanupStatus (): Promise<RetainedLocalFilesCleanupStatus> {
+  const status = await Redis.Instance.getRetainedLocalFilesCleanupStatus() as RetainedLocalFilesCleanupStatus | null
 
   return status || { state: 'idle' }
 }
@@ -759,6 +801,32 @@ async function startGlobalQueueCleanupInBackground () {
 
     const currentStatus = await getStoredGlobalQueueCleanupStatus()
     await Redis.Instance.setGlobalQueueCleanupStatus({
+      state: 'failed',
+      startedAt: currentStatus.startedAt,
+      finishedAt: new Date().toISOString(),
+      error: err instanceof Error
+        ? err.message
+        : String(err)
+    })
+  }
+}
+
+async function startRetainedLocalFilesCleanupInBackground () {
+  try {
+    const result = await cleanupRetainedLocalFilesAfterRestart()
+    const currentStatus = await getStoredRetainedLocalFilesCleanupStatus()
+
+    await Redis.Instance.setRetainedLocalFilesCleanupStatus({
+      state: 'completed',
+      startedAt: currentStatus.startedAt,
+      finishedAt: new Date().toISOString(),
+      result
+    })
+  } catch (err) {
+    logger.error('[SYSTEM_RESETTER] Retained local file cleanup failed.', { err })
+
+    const currentStatus = await getStoredRetainedLocalFilesCleanupStatus()
+    await Redis.Instance.setRetainedLocalFilesCleanupStatus({
       state: 'failed',
       startedAt: currentStatus.startedAt,
       finishedAt: new Date().toISOString(),
