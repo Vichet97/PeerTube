@@ -62,8 +62,11 @@ const LOCAL_CLEANUP_RETRY_DELAY_MS = 30_000
 const RETAINED_LOCAL_FILES_CLEANUP_START_DELAY_MS = 30 * 1000
 const RETAINED_LOCAL_FILES_CLEANUP_INTERVAL_MS = 30 * 60 * 1000
 const RETAINED_LOCAL_FILES_CLEANUP_CONCURRENCY = 5
+const RETAINED_LOCAL_FILES_CLEANUP_BATCH_SIZE = 500
 const scheduledLocalFileRemovals = new Set<string>()
 let retainedLocalFilesCleanupScheduled = false
+let retainedLocalFilesCleanupRunPromise: Promise<{ scheduled: number; skippedMissing: number }> | undefined
+const retainedLocalFilesCleanupProgressListeners = new Set<(progress: RetainedLocalFilesCleanupProgress) => void | Promise<void>>()
 
 type RetainedLocalFileCleanupCandidate = {
   path: string
@@ -78,6 +81,15 @@ type RetainedLocalFileReadinessCheck = {
   maxRetries?: number
   retryIntervalMs?: number
   logNotReadyAsDebug?: boolean
+}
+
+type RetainedLocalFilesCleanupProgress = {
+  currentPhase: string
+  processedBatches: number
+  discoveredCandidates: number
+  uniqueCandidates: number
+  scheduled: number
+  skippedMissing: number
 }
 
 export async function maybeTransitionAfterObjectStorageMove (options: {
@@ -1430,17 +1442,457 @@ function scheduleRetainedLocalFilesCleanupTimer (delayMs: number) {
   timer.unref?.()
 }
 
-export async function cleanupRetainedLocalFilesAfterRestart () {
+export async function cleanupRetainedLocalFilesAfterRestart (options: {
+  onProgress?: (progress: RetainedLocalFilesCleanupProgress) => void | Promise<void>
+} = {}) {
   if (!CONFIG.OBJECT_STORAGE.ENABLED) return { scheduled: 0, skippedMissing: 0 }
 
-  const candidates = await listRetainedLocalFileCleanupCandidates()
-  const counts = {
+  if (options.onProgress) {
+    retainedLocalFilesCleanupProgressListeners.add(options.onProgress)
+  }
+
+  try {
+    if (retainedLocalFilesCleanupRunPromise === undefined) {
+      retainedLocalFilesCleanupRunPromise = performRetainedLocalFilesCleanupAfterRestart()
+        .finally(() => {
+          retainedLocalFilesCleanupRunPromise = undefined
+        })
+    }
+
+    return await retainedLocalFilesCleanupRunPromise
+  } finally {
+    if (options.onProgress) {
+      retainedLocalFilesCleanupProgressListeners.delete(options.onProgress)
+    }
+  }
+}
+
+async function performRetainedLocalFilesCleanupAfterRestart () {
+  const counts: RetainedLocalFilesCleanupProgress = {
+    currentPhase: 'starting',
+    processedBatches: 0,
+    discoveredCandidates: 0,
+    uniqueCandidates: 0,
     scheduled: 0,
     skippedMissing: 0
   }
+  const seenCleanupKeys = new Set<string>()
+
+  await emitRetainedLocalFilesCleanupProgress(counts)
+
+  await addRetainedWebVideoFileCandidates(counts, seenCleanupKeys)
+  await addRetainedHLSFileCandidates(counts, seenCleanupKeys)
+  await addRetainedPlaylistFileCandidates(counts, seenCleanupKeys)
+  await addRetainedOriginalFileCandidates(counts, seenCleanupKeys)
+  await addRetainedCaptionFileCandidates(counts, seenCleanupKeys)
+  await addRetainedThumbnailFileCandidates(counts, seenCleanupKeys)
+  await addRetainedStoryboardFileCandidates(counts, seenCleanupKeys)
+
+  counts.currentPhase = 'completed'
+  await emitRetainedLocalFilesCleanupProgress(counts)
+
+  if (counts.scheduled !== 0 || counts.skippedMissing !== 0) {
+    logger.info(
+      'Scheduled cleanup for %d retained local object-storage file(s) after restart ' +
+      '(%d missing already, %d unique candidates discovered across %d batch(es)).',
+      counts.scheduled,
+      counts.skippedMissing,
+      counts.uniqueCandidates,
+      counts.processedBatches,
+      lTagsBase()
+    )
+  }
+
+  return {
+    scheduled: counts.scheduled,
+    skippedMissing: counts.skippedMissing
+  }
+}
+
+async function addRetainedWebVideoFileCandidates (
+  counts: RetainedLocalFilesCleanupProgress,
+  seenCleanupKeys: Set<string>
+) {
+  await processRetainedLocalCandidatesInBatches({
+    currentPhase: 'web-videos',
+    model: VideoFileModel,
+    where: {
+      storage: FileStorage.OBJECT_STORAGE,
+      videoId: { [Op.ne]: null },
+      filename: { [Op.ne]: null }
+    },
+    include: [
+      {
+        model: VideoModel.unscoped(),
+        required: true,
+        where: { remote: false }
+      }
+    ],
+    counts,
+    seenCleanupKeys,
+    buildCandidates: (file: any) => {
+      const video = file.Video
+      if (!video?.uuid) return []
+
+      const candidates: RetainedLocalFileCleanupCandidate[] = [
+        {
+          path: VideoPathManager.Instance.getFSVideoFileOutputPath(video, file),
+          videoUUID: video.uuid,
+          objectStorageKey: generateWebVideoObjectStorageKey(file.filename),
+          bucketInfo: CONFIG.OBJECT_STORAGE.WEB_VIDEOS
+        }
+      ]
+
+      addRetainedTorrentFileCandidate(candidates, file, video.uuid)
+      return candidates
+    }
+  })
+}
+
+async function addRetainedHLSFileCandidates (
+  counts: RetainedLocalFilesCleanupProgress,
+  seenCleanupKeys: Set<string>
+) {
+  await processRetainedLocalCandidatesInBatches({
+    currentPhase: 'hls-files',
+    model: VideoFileModel,
+    where: {
+      storage: FileStorage.OBJECT_STORAGE,
+      videoStreamingPlaylistId: { [Op.ne]: null },
+      filename: { [Op.ne]: null }
+    },
+    include: [
+      {
+        model: VideoStreamingPlaylistModel.unscoped(),
+        required: true,
+        include: [
+          {
+            model: VideoModel.unscoped(),
+            required: true,
+            where: { remote: false }
+          }
+        ]
+      }
+    ],
+    counts,
+    seenCleanupKeys,
+    buildCandidates: (file: any) => {
+      const playlist = file.VideoStreamingPlaylist
+      const video = playlist?.Video
+      if (!video?.uuid) return []
+
+      const resolutionPlaylistFilename = getHLSResolutionPlaylistFilename(file.filename)
+      const candidates: RetainedLocalFileCleanupCandidate[] = [
+        {
+          path: join(getHLSDirectory(video), file.filename),
+          videoUUID: video.uuid,
+          objectStorageKey: generateHLSObjectStorageKey(video, file.filename),
+          bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS
+        },
+        {
+          path: join(getHLSDirectory(video), resolutionPlaylistFilename),
+          videoUUID: video.uuid,
+          objectStorageKey: generateHLSObjectStorageKey(video, resolutionPlaylistFilename),
+          bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS
+        }
+      ]
+
+      addRetainedTorrentFileCandidate(candidates, file, video.uuid)
+      return candidates
+    }
+  })
+}
+
+async function addRetainedPlaylistFileCandidates (
+  counts: RetainedLocalFilesCleanupProgress,
+  seenCleanupKeys: Set<string>
+) {
+  await processRetainedLocalCandidatesInBatches({
+    currentPhase: 'playlist-files',
+    model: VideoStreamingPlaylistModel,
+    where: {
+      storage: FileStorage.OBJECT_STORAGE,
+      playlistFilename: { [Op.ne]: null }
+    },
+    include: [
+      {
+        model: VideoModel.unscoped(),
+        required: true,
+        where: { remote: false }
+      }
+    ],
+    counts,
+    seenCleanupKeys,
+    buildCandidates: (playlist: any) => {
+      const video = playlist.Video
+      if (!video?.uuid) return []
+
+      const candidates: RetainedLocalFileCleanupCandidate[] = [
+        {
+          path: VideoPathManager.Instance.getFSHLSOutputPath(video, playlist.playlistFilename),
+          videoUUID: video.uuid,
+          objectStorageKey: generateHLSObjectStorageKey(video, playlist.playlistFilename),
+          bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS
+        }
+      ]
+
+      const segmentsSha256Filename = getSegmentsSha256FilenameToMove(playlist)
+      if (segmentsSha256Filename) {
+        candidates.push({
+          path: VideoPathManager.Instance.getFSHLSOutputPath(video, segmentsSha256Filename),
+          videoUUID: video.uuid,
+          objectStorageKey: generateHLSObjectStorageKey(video, segmentsSha256Filename),
+          bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS
+        })
+      }
+
+      return candidates
+    }
+  })
+}
+
+async function addRetainedOriginalFileCandidates (
+  counts: RetainedLocalFilesCleanupProgress,
+  seenCleanupKeys: Set<string>
+) {
+  await processRetainedLocalCandidatesInBatches({
+    currentPhase: 'original-files',
+    model: VideoSourceModel,
+    where: {
+      storage: FileStorage.OBJECT_STORAGE,
+      keptOriginalFilename: { [Op.ne]: null }
+    },
+    include: [
+      {
+        model: VideoModel.unscoped(),
+        required: true,
+        where: { remote: false }
+      }
+    ],
+    counts,
+    seenCleanupKeys,
+    buildCandidates: (source: any) => {
+      const video = source.Video
+      if (!video?.uuid) return []
+
+      return [
+        {
+          path: VideoPathManager.Instance.getFSOriginalVideoFilePath(source.keptOriginalFilename),
+          videoUUID: video.uuid,
+          objectStorageKey: generateOriginalVideoObjectStorageKey(source.keptOriginalFilename),
+          bucketInfo: CONFIG.OBJECT_STORAGE.ORIGINAL_VIDEO_FILES
+        }
+      ]
+    }
+  })
+}
+
+async function addRetainedCaptionFileCandidates (
+  counts: RetainedLocalFilesCleanupProgress,
+  seenCleanupKeys: Set<string>
+) {
+  await processRetainedLocalCandidatesInBatches({
+    currentPhase: 'captions',
+    model: VideoCaptionModel,
+    where: {
+      storage: FileStorage.OBJECT_STORAGE,
+      cached: false,
+      filename: { [Op.ne]: null }
+    },
+    include: [
+      {
+        model: VideoModel.unscoped(),
+        required: true,
+        where: { remote: false }
+      }
+    ],
+    counts,
+    seenCleanupKeys,
+    buildCandidates: (caption: any) => {
+      const video = caption.Video
+      if (!video?.uuid) return []
+
+      const candidates: RetainedLocalFileCleanupCandidate[] = [
+        {
+          path: caption.getFSFilePath(),
+          videoUUID: video.uuid,
+          objectStorageKey: generateCaptionObjectStorageKey(caption.filename),
+          bucketInfo: CONFIG.OBJECT_STORAGE.CAPTIONS
+        }
+      ]
+
+      if (caption.m3u8Filename) {
+        candidates.push({
+          path: VideoPathManager.Instance.getFSHLSOutputPath(video, caption.m3u8Filename),
+          videoUUID: video.uuid,
+          objectStorageKey: generateHLSObjectStorageKey(video, caption.m3u8Filename),
+          bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS
+        })
+      }
+
+      return candidates
+    }
+  })
+}
+
+async function addRetainedThumbnailFileCandidates (
+  counts: RetainedLocalFilesCleanupProgress,
+  seenCleanupKeys: Set<string>
+) {
+  await processRetainedLocalCandidatesInBatches({
+    currentPhase: 'thumbnails',
+    model: ThumbnailModel,
+    where: {
+      storage: FileStorage.OBJECT_STORAGE,
+      cached: false,
+      videoId: { [Op.ne]: null },
+      filename: { [Op.ne]: null }
+    },
+    include: [
+      {
+        model: VideoModel.unscoped(),
+        required: true,
+        where: { remote: false }
+      }
+    ],
+    counts,
+    seenCleanupKeys,
+    buildCandidates: (thumbnail: any) => {
+      const video = thumbnail.Video
+      if (!video?.uuid) return []
+
+      return [
+        {
+          path: thumbnail.getFSPath(),
+          videoUUID: video.uuid,
+          objectStorageKey: generateThumbnailObjectStorageKey(thumbnail.filename),
+          bucketInfo: CONFIG.OBJECT_STORAGE.THUMBNAILS
+        }
+      ]
+    }
+  })
+}
+
+async function addRetainedStoryboardFileCandidates (
+  counts: RetainedLocalFilesCleanupProgress,
+  seenCleanupKeys: Set<string>
+) {
+  await processRetainedLocalCandidatesInBatches({
+    currentPhase: 'storyboards',
+    model: StoryboardModel,
+    where: {
+      storage: FileStorage.OBJECT_STORAGE,
+      cached: false,
+      filename: { [Op.ne]: null }
+    },
+    include: [
+      {
+        model: VideoModel.unscoped(),
+        required: true,
+        where: { remote: false }
+      }
+    ],
+    counts,
+    seenCleanupKeys,
+    buildCandidates: (storyboard: any) => {
+      const video = storyboard.Video
+      if (!video?.uuid) return []
+
+      return [
+        {
+          path: storyboard.getFSPath(),
+          videoUUID: video.uuid,
+          objectStorageKey: generateStoryboardObjectStorageKey(storyboard.filename),
+          bucketInfo: CONFIG.OBJECT_STORAGE.STORYBOARDS
+        }
+      ]
+    }
+  })
+}
+
+function addRetainedTorrentFileCandidate (
+  candidates: RetainedLocalFileCleanupCandidate[],
+  file: { torrentFilename?: string },
+  videoUUID: string
+) {
+  if (!file.torrentFilename) return
+
+  candidates.push({
+    path: getFSTorrentFilePath(file as MVideoFile),
+    videoUUID,
+    objectStorageKey: generateTorrentObjectStorageKey(file.torrentFilename),
+    bucketInfo: CONFIG.OBJECT_STORAGE.TORRENTS
+  })
+}
+
+async function processRetainedLocalCandidatesInBatches (options: {
+  currentPhase: string
+  model: any
+  where: Record<string, any>
+  include: any[]
+  counts: RetainedLocalFilesCleanupProgress
+  seenCleanupKeys: Set<string>
+  buildCandidates: (row: any) => RetainedLocalFileCleanupCandidate[]
+}) {
+  let lastId = 0
+
+  while (true) {
+    const rows = await options.model.unscoped().findAll({
+      where: {
+        ...options.where,
+        id: { [Op.gt]: lastId }
+      },
+      include: options.include,
+      order: [ [ 'id', 'ASC' ] ],
+      limit: RETAINED_LOCAL_FILES_CLEANUP_BATCH_SIZE
+    })
+
+    if (rows.length === 0) return
+
+    const candidates: RetainedLocalFileCleanupCandidate[] = []
+    for (const row of rows as any[]) {
+      candidates.push(...options.buildCandidates(row))
+    }
+
+    options.counts.currentPhase = options.currentPhase
+    await processRetainedLocalFileCleanupCandidateBatch({
+      candidates,
+      counts: options.counts,
+      seenCleanupKeys: options.seenCleanupKeys
+    })
+
+    options.counts.processedBatches++
+    await emitRetainedLocalFilesCleanupProgress(options.counts)
+
+    lastId = rows[rows.length - 1].id
+  }
+}
+
+async function processRetainedLocalFileCleanupCandidateBatch (options: {
+  candidates: RetainedLocalFileCleanupCandidate[]
+  counts: RetainedLocalFilesCleanupProgress
+  seenCleanupKeys: Set<string>
+}) {
+  const { candidates, counts, seenCleanupKeys } = options
+  const uniqueCandidates: RetainedLocalFileCleanupCandidate[] = []
+
+  for (const candidate of candidates) {
+    counts.discoveredCandidates++
+
+    if (!candidate.path || !candidate.videoUUID || !candidate.objectStorageKey) continue
+
+    const cleanupKey = `${candidate.videoUUID}:${resolve(candidate.path)}`
+    if (seenCleanupKeys.has(cleanupKey)) continue
+
+    seenCleanupKeys.add(cleanupKey)
+    counts.uniqueCandidates++
+    uniqueCandidates.push(candidate)
+  }
+
+  if (uniqueCandidates.length === 0) return
 
   const queue = new PQueue({ concurrency: RETAINED_LOCAL_FILES_CLEANUP_CONCURRENCY })
-  await queue.addAll(candidates.map(candidate => async () => {
+  await queue.addAll(uniqueCandidates.map(candidate => async () => {
     const delayMs = await getRemainingRetainedLocalFileCleanupDelay(candidate.path)
     if (delayMs === undefined) {
       counts.skippedMissing++
@@ -1462,301 +1914,19 @@ export async function cleanupRetainedLocalFilesAfterRestart () {
 
     if (scheduled) counts.scheduled++
   }))
-
-  if (counts.scheduled !== 0) {
-    logger.info(
-      'Scheduled cleanup for %d retained local object-storage file(s) after restart (%d missing already).',
-      counts.scheduled,
-      counts.skippedMissing,
-      lTagsBase()
-    )
-  }
-
-  return counts
 }
 
-async function listRetainedLocalFileCleanupCandidates (): Promise<RetainedLocalFileCleanupCandidate[]> {
-  const candidates: RetainedLocalFileCleanupCandidate[] = []
+async function emitRetainedLocalFilesCleanupProgress (progress: RetainedLocalFilesCleanupProgress) {
+  if (retainedLocalFilesCleanupProgressListeners.size === 0) return
 
-  await Promise.all([
-    addRetainedWebVideoFileCandidates(candidates),
-    addRetainedHLSFileCandidates(candidates),
-    addRetainedPlaylistFileCandidates(candidates),
-    addRetainedOriginalFileCandidates(candidates),
-    addRetainedCaptionFileCandidates(candidates),
-    addRetainedThumbnailFileCandidates(candidates),
-    addRetainedStoryboardFileCandidates(candidates)
-  ])
-
-  return deduplicateRetainedLocalFileCleanupCandidates(candidates)
-}
-
-async function addRetainedWebVideoFileCandidates (candidates: RetainedLocalFileCleanupCandidate[]) {
-  const files = await VideoFileModel.unscoped().findAll({
-    where: {
-      storage: FileStorage.OBJECT_STORAGE,
-      videoId: { [Op.ne]: null },
-      filename: { [Op.ne]: null }
-    },
-    include: [
-      {
-        model: VideoModel.unscoped(),
-        required: true,
-        where: { remote: false }
-      }
-    ]
-  })
-
-  for (const file of files as any[]) {
-    const video = file.Video
-    if (!video?.uuid) continue
-
-    candidates.push({
-      path: VideoPathManager.Instance.getFSVideoFileOutputPath(video, file),
-      videoUUID: video.uuid,
-      objectStorageKey: generateWebVideoObjectStorageKey(file.filename),
-      bucketInfo: CONFIG.OBJECT_STORAGE.WEB_VIDEOS
-    })
-
-    addRetainedTorrentFileCandidate(candidates, file, video.uuid)
-  }
-}
-
-async function addRetainedHLSFileCandidates (candidates: RetainedLocalFileCleanupCandidate[]) {
-  const files = await VideoFileModel.unscoped().findAll({
-    where: {
-      storage: FileStorage.OBJECT_STORAGE,
-      videoStreamingPlaylistId: { [Op.ne]: null },
-      filename: { [Op.ne]: null }
-    },
-    include: [
-      {
-        model: VideoStreamingPlaylistModel.unscoped(),
-        required: true,
-        include: [
-          {
-            model: VideoModel.unscoped(),
-            required: true,
-            where: { remote: false }
-          }
-        ]
-      }
-    ]
-  })
-
-  for (const file of files as any[]) {
-    const playlist = file.VideoStreamingPlaylist
-    const video = playlist?.Video
-    if (!video?.uuid) continue
-
-    candidates.push({
-      path: join(getHLSDirectory(video), file.filename),
-      videoUUID: video.uuid,
-      objectStorageKey: generateHLSObjectStorageKey(video, file.filename),
-      bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS
-    })
-
-    const resolutionPlaylistFilename = getHLSResolutionPlaylistFilename(file.filename)
-    candidates.push({
-      path: join(getHLSDirectory(video), resolutionPlaylistFilename),
-      videoUUID: video.uuid,
-      objectStorageKey: generateHLSObjectStorageKey(video, resolutionPlaylistFilename),
-      bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS
-    })
-
-    addRetainedTorrentFileCandidate(candidates, file, video.uuid)
-  }
-}
-
-async function addRetainedPlaylistFileCandidates (candidates: RetainedLocalFileCleanupCandidate[]) {
-  const playlists = await VideoStreamingPlaylistModel.unscoped().findAll({
-    where: {
-      storage: FileStorage.OBJECT_STORAGE,
-      playlistFilename: { [Op.ne]: null }
-    },
-    include: [
-      {
-        model: VideoModel.unscoped(),
-        required: true,
-        where: { remote: false }
-      }
-    ]
-  })
-
-  for (const playlist of playlists as any[]) {
-    const video = playlist.Video
-    if (!video?.uuid) continue
-
-    candidates.push({
-      path: VideoPathManager.Instance.getFSHLSOutputPath(video, playlist.playlistFilename),
-      videoUUID: video.uuid,
-      objectStorageKey: generateHLSObjectStorageKey(video, playlist.playlistFilename),
-      bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS
-    })
-
-    const segmentsSha256Filename = getSegmentsSha256FilenameToMove(playlist)
-    if (segmentsSha256Filename) {
-      candidates.push({
-        path: VideoPathManager.Instance.getFSHLSOutputPath(video, segmentsSha256Filename),
-        videoUUID: video.uuid,
-        objectStorageKey: generateHLSObjectStorageKey(video, segmentsSha256Filename),
-        bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS
-      })
+  const snapshot = { ...progress }
+  for (const listener of retainedLocalFilesCleanupProgressListeners) {
+    try {
+      await listener(snapshot)
+    } catch (err) {
+      logger.warn('Cannot report retained local file cleanup progress.', { err, ...lTagsBase() })
     }
   }
-}
-
-async function addRetainedOriginalFileCandidates (candidates: RetainedLocalFileCleanupCandidate[]) {
-  const sources = await VideoSourceModel.unscoped().findAll({
-    where: {
-      storage: FileStorage.OBJECT_STORAGE,
-      keptOriginalFilename: { [Op.ne]: null }
-    },
-    include: [
-      {
-        model: VideoModel.unscoped(),
-        required: true,
-        where: { remote: false }
-      }
-    ]
-  })
-
-  for (const source of sources as any[]) {
-    const video = source.Video
-    if (!video?.uuid) continue
-
-    candidates.push({
-      path: VideoPathManager.Instance.getFSOriginalVideoFilePath(source.keptOriginalFilename),
-      videoUUID: video.uuid,
-      objectStorageKey: generateOriginalVideoObjectStorageKey(source.keptOriginalFilename),
-      bucketInfo: CONFIG.OBJECT_STORAGE.ORIGINAL_VIDEO_FILES
-    })
-  }
-}
-
-async function addRetainedCaptionFileCandidates (candidates: RetainedLocalFileCleanupCandidate[]) {
-  const captions = await VideoCaptionModel.unscoped().findAll({
-    where: {
-      storage: FileStorage.OBJECT_STORAGE,
-      cached: false,
-      filename: { [Op.ne]: null }
-    },
-    include: [
-      {
-        model: VideoModel.unscoped(),
-        required: true,
-        where: { remote: false }
-      }
-    ]
-  })
-
-  for (const caption of captions as any[]) {
-    const video = caption.Video
-    if (!video?.uuid) continue
-
-    candidates.push({
-      path: caption.getFSFilePath(),
-      videoUUID: video.uuid,
-      objectStorageKey: generateCaptionObjectStorageKey(caption.filename),
-      bucketInfo: CONFIG.OBJECT_STORAGE.CAPTIONS
-    })
-
-    if (caption.m3u8Filename) {
-      candidates.push({
-        path: VideoPathManager.Instance.getFSHLSOutputPath(video, caption.m3u8Filename),
-        videoUUID: video.uuid,
-        objectStorageKey: generateHLSObjectStorageKey(video, caption.m3u8Filename),
-        bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS
-      })
-    }
-  }
-}
-
-async function addRetainedThumbnailFileCandidates (candidates: RetainedLocalFileCleanupCandidate[]) {
-  const thumbnails = await ThumbnailModel.unscoped().findAll({
-    where: {
-      storage: FileStorage.OBJECT_STORAGE,
-      cached: false,
-      videoId: { [Op.ne]: null },
-      filename: { [Op.ne]: null }
-    },
-    include: [
-      {
-        model: VideoModel.unscoped(),
-        required: true,
-        where: { remote: false }
-      }
-    ]
-  })
-
-  for (const thumbnail of thumbnails as any[]) {
-    const video = thumbnail.Video
-    if (!video?.uuid) continue
-
-    candidates.push({
-      path: thumbnail.getFSPath(),
-      videoUUID: video.uuid,
-      objectStorageKey: generateThumbnailObjectStorageKey(thumbnail.filename),
-      bucketInfo: CONFIG.OBJECT_STORAGE.THUMBNAILS
-    })
-  }
-}
-
-async function addRetainedStoryboardFileCandidates (candidates: RetainedLocalFileCleanupCandidate[]) {
-  const storyboards = await StoryboardModel.unscoped().findAll({
-    where: {
-      storage: FileStorage.OBJECT_STORAGE,
-      cached: false,
-      filename: { [Op.ne]: null }
-    },
-    include: [
-      {
-        model: VideoModel.unscoped(),
-        required: true,
-        where: { remote: false }
-      }
-    ]
-  })
-
-  for (const storyboard of storyboards as any[]) {
-    const video = storyboard.Video
-    if (!video?.uuid) continue
-
-    candidates.push({
-      path: storyboard.getFSPath(),
-      videoUUID: video.uuid,
-      objectStorageKey: generateStoryboardObjectStorageKey(storyboard.filename),
-      bucketInfo: CONFIG.OBJECT_STORAGE.STORYBOARDS
-    })
-  }
-}
-
-function addRetainedTorrentFileCandidate (
-  candidates: RetainedLocalFileCleanupCandidate[],
-  file: { torrentFilename?: string },
-  videoUUID: string
-) {
-  if (!file.torrentFilename) return
-
-  candidates.push({
-    path: getFSTorrentFilePath(file as MVideoFile),
-    videoUUID,
-    objectStorageKey: generateTorrentObjectStorageKey(file.torrentFilename),
-    bucketInfo: CONFIG.OBJECT_STORAGE.TORRENTS
-  })
-}
-
-function deduplicateRetainedLocalFileCleanupCandidates (candidates: RetainedLocalFileCleanupCandidate[]) {
-  const byPath = new Map<string, RetainedLocalFileCleanupCandidate>()
-
-  for (const candidate of candidates) {
-    if (!candidate.path || !candidate.videoUUID || !candidate.objectStorageKey) continue
-
-    const key = `${candidate.videoUUID}:${resolve(candidate.path)}`
-    if (!byPath.has(key)) byPath.set(key, candidate)
-  }
-
-  return Array.from(byPath.values())
 }
 
 async function getRemainingRetainedLocalFileCleanupDelay (path: string) {

@@ -48,12 +48,17 @@ export type GlobalQueueCleanupResult = {
 export type RetainedLocalFilesCleanupResult = {
   scheduled: number
   skippedMissing: number
+  currentPhase?: string
+  processedBatches?: number
+  discoveredCandidates?: number
+  uniqueCandidates?: number
 }
 
 export type RetainedLocalFilesCleanupStatus = {
   state: 'idle' | 'running' | 'completed' | 'failed'
   startedAt?: string
   finishedAt?: string
+  updatedAt?: string
   error?: string
   result?: RetainedLocalFilesCleanupResult
 }

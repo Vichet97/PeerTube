@@ -458,6 +458,7 @@ class Redis {
     state: 'idle' | 'running' | 'completed' | 'failed'
     startedAt?: string
     finishedAt?: string
+    updatedAt?: string
     error?: string
     result?: unknown
   }) {
