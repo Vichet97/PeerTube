@@ -1902,14 +1902,7 @@ async function processRetainedLocalFileCleanupCandidateBatch (options: {
     const scheduled = scheduleLocalFileRemovalAfterActiveFileWork({
       path: candidate.path,
       videoUUID: candidate.videoUUID,
-      delayMs,
-      readinessCheck: {
-        objectStorageKey: candidate.objectStorageKey,
-        bucketInfo: candidate.bucketInfo,
-        maxRetries: 1,
-        retryIntervalMs: 0,
-        logNotReadyAsDebug: true
-      }
+      delayMs
     })
 
     if (scheduled) counts.scheduled++
@@ -1975,44 +1968,16 @@ export async function removeLocalFileAfterMove (options: {
   const {
     path,
     videoUUID,
-    objectStorageKey,
-    bucketInfo,
-    skipReadinessCheck,
     waitForPipelineCompletion = true
   } = options
   const delayMs = CONFIG.OBJECT_STORAGE.KEEP_LOCAL_FILE_AFTER_MOVE
-
-  if (objectStorageKey && bucketInfo && !skipReadinessCheck) {
-    try {
-      await ensureObjectStorageFileReady({ objectStorageKey, bucketInfo })
-    } catch (err) {
-      if (!videoUUID) throw err
-
-      logger.warn(
-        'Immediate object storage readiness check failed for %s of video %s. ' +
-        'Keeping local file and deferring deletion until a later cleanup pass.',
-        objectStorageKey,
-        videoUUID,
-        { err, ...lTagsBase(videoUUID) }
-      )
-    }
-  }
 
   if (videoUUID) {
     scheduleLocalFileRemovalAfterActiveFileWork({
       path,
       videoUUID,
       delayMs,
-      waitForPipelineCompletion,
-      readinessCheck: objectStorageKey && bucketInfo
-        ? {
-            objectStorageKey,
-            bucketInfo,
-            maxRetries: 1,
-            retryIntervalMs: 0,
-            logNotReadyAsDebug: true
-          }
-        : undefined
+      waitForPipelineCompletion
     })
     return
   }
@@ -2042,10 +2007,9 @@ function scheduleLocalFileRemovalAfterActiveFileWork (options: {
   path: string
   videoUUID: string
   delayMs: number
-  readinessCheck?: RetainedLocalFileReadinessCheck
   waitForPipelineCompletion?: boolean
 }): boolean {
-  const { path, videoUUID, delayMs, readinessCheck, waitForPipelineCompletion = true } = options
+  const { path, videoUUID, delayMs, waitForPipelineCompletion = true } = options
   const cleanupKey = `${videoUUID}:${resolve(path)}`
 
   if (scheduledLocalFileRemovals.has(cleanupKey)) {
@@ -2073,17 +2037,6 @@ function scheduleLocalFileRemovalAfterActiveFileWork (options: {
           )
 
           await wait(delayMs)
-        }
-
-        if (readinessCheck && !await isObjectStorageFileReady(readinessCheck)) {
-          logger.info(
-            'Keeping retained local file %s for video %s because object storage file %s is not ready.',
-            path,
-            videoUUID,
-            readinessCheck.objectStorageKey,
-            lTagsBase(videoUUID)
-          )
-          return
         }
 
         const jobInfo = waitForPipelineCompletion
