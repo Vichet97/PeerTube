@@ -75,14 +75,6 @@ type RetainedLocalFileCleanupCandidate = {
   bucketInfo: BucketInfo
 }
 
-type RetainedLocalFileReadinessCheck = {
-  objectStorageKey: string
-  bucketInfo: BucketInfo
-  maxRetries?: number
-  retryIntervalMs?: number
-  logNotReadyAsDebug?: boolean
-}
-
 type RetainedLocalFilesCleanupProgress = {
   currentPhase: string
   processedBatches: number
@@ -402,10 +394,6 @@ export async function moveHLSSegmentFilesToObjectStorage (
         ...lTagsBase()
       })
       await storeHLSFileFromFilename(video, fragmentFilename)
-      await ensureObjectStorageFileReady({
-        objectStorageKey: fragmentDestKey,
-        bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS
-      })
       logger.info('[GRANULAR_MOVE] HLS fragment %s uploaded to object storage', fragmentFilename, { ...lTagsBase() })
     }
 
@@ -419,10 +407,6 @@ export async function moveHLSSegmentFilesToObjectStorage (
         ...lTagsBase()
       })
       await storeHLSFileFromFilename(video, playlistFilename)
-      await ensureObjectStorageFileReady({
-        objectStorageKey: playlistDestKey,
-        bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS
-      })
       logger.info('[GRANULAR_MOVE] HLS resolution playlist %s uploaded to object storage', playlistFilename, { ...lTagsBase() })
     }
 
@@ -503,18 +487,6 @@ export async function moveMasterPlaylistToObjectStorage (videoUUID: string, play
   await storeHLSFileFromFilename(video, masterPlaylistFilename)
   if (segmentsSha256Filename) {
     await storeHLSFileFromFilename(video, segmentsSha256Filename)
-  }
-
-  await ensureObjectStorageFileReady({
-    objectStorageKey: generateHLSObjectStorageKey(video, masterPlaylistFilename),
-    bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS
-  })
-
-  if (segmentsSha256Filename) {
-    await ensureObjectStorageFileReady({
-      objectStorageKey: generateHLSObjectStorageKey(video, segmentsSha256Filename),
-      bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS
-    })
   }
 
   // Note: playlist.storage is already set to OBJECT_STORAGE by the caller before regenerating
@@ -863,15 +835,6 @@ async function moveHLSFiles (video: MVideoWithAllFiles, options?: {
       const fragmentObjectStorageKey = generateHLSObjectStorageKey(video, file.filename)
       const resolutionPlaylistObjectStorageKey = generateHLSObjectStorageKey(video, playlistFilename)
 
-      await ensureObjectStorageFileReady({
-        objectStorageKey: fragmentObjectStorageKey,
-        bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS
-      })
-      await ensureObjectStorageFileReady({
-        objectStorageKey: resolutionPlaylistObjectStorageKey,
-        bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS
-      })
-
       if (playlist.storage === FileStorage.FILE_SYSTEM) {
         return {
           file,
@@ -933,26 +896,6 @@ async function moveHLSFiles (video: MVideoWithAllFiles, options?: {
       await storeHLSFileFromFilename(video, playlist.playlistFilename)
       if (segmentsSha256Filename) {
         await storeHLSFileFromFilename(video, segmentsSha256Filename)
-      }
-
-      const playlistObjectStorageKey = generateHLSObjectStorageKey(video, playlist.playlistFilename)
-      const isPlaylistReady = await checkObjectStorageReadiness({
-        key: playlistObjectStorageKey,
-        bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS,
-        maxRetries: 30,
-        retryIntervalMs: 10000
-      })
-
-      if (!isPlaylistReady) {
-        throw new Error(`HLS playlist ${playlist.playlistFilename} did not become ready in object storage`)
-      }
-
-      if (segmentsSha256Filename) {
-        const segmentsSha256ObjectStorageKey = generateHLSObjectStorageKey(video, segmentsSha256Filename)
-        await ensureObjectStorageFileReady({
-          objectStorageKey: segmentsSha256ObjectStorageKey,
-          bucketInfo: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS
-        })
       }
       const cutoverFileIds = movedFiles.map(moved => moved.file.id)
 
@@ -1383,33 +1326,6 @@ async function moveTorrentFiles (video: MVideoWithAllFiles) {
       logger.warn(`Cannot move torrent file ${torrentPath} to object storage`, { err, ...lTagsBase() })
     }
   }))
-}
-
-async function isObjectStorageFileReady (options: RetainedLocalFileReadinessCheck) {
-  const { objectStorageKey, bucketInfo, maxRetries = 30, retryIntervalMs = 10000, logNotReadyAsDebug = false } = options
-
-  return checkObjectStorageReadiness({
-    key: objectStorageKey,
-    bucketInfo,
-    maxRetries,
-    retryIntervalMs,
-    logNotReadyAsDebug
-  })
-}
-
-async function ensureObjectStorageFileReady (options: RetainedLocalFileReadinessCheck) {
-  const { objectStorageKey, logNotReadyAsDebug = false } = options
-
-  const isReady = await isObjectStorageFileReady(options)
-
-  if (!isReady) {
-    logger[logNotReadyAsDebug ? 'debug' : 'error'](
-      'Object storage file %s is not ready after max retries, keeping local file.',
-      objectStorageKey,
-      lTagsBase()
-    )
-    throw new Error(`Object storage file ${objectStorageKey} is not ready after max retries`)
-  }
 }
 
 function getSegmentsSha256FilenameToMove (playlist: { segmentsSha256Filename?: string }) {
