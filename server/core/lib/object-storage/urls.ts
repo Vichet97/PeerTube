@@ -25,7 +25,15 @@ export async function buildObjectStoragePublicFileUrl (options: {
     if (fileType === 'streaming-playlists' && (key.endsWith('.m3u8') || key.endsWith('.mp4'))) {
       return buildPresignedProxyUrl(fileType, key)
     }
-    return await generatePresignedUrlFromFileType(key, fileType || 'thumbnails')
+
+    const directFileType = fileType || 'thumbnails'
+
+    // Do not reuse playback URLs or URLs signed by rotating credentials.
+    if (directFileType === 'web-videos' || !CONFIG.OBJECT_STORAGE.CREDENTIALS.ACCESS_KEY_ID) {
+      return generatePresignedUrlFromFileType(key, directFileType)
+    }
+
+    return generateCachedPresignedUrlFromFileType(key, directFileType)
   }
 
   return buildBaseUrl(bucket) + buildKey(key, bucket)
@@ -57,6 +65,44 @@ function buildPresignedProxyUrl (fileType: ObjectStoragePublicFileType, key: str
     'captions': OBJECT_STORAGE_PROXY_PATHS.PUBLIC.CAPTIONS
   }
   return `${WEBSERVER.URL}${pathMap[fileType]}${encodedKey}?expires=${token}`
+}
+
+const presignedPublicUrlCache = new Map<string, { expiresAt: number, promise: Promise<string> }>()
+const PRESIGNED_PUBLIC_URL_CACHE_MAX_ITEMS = 20_000
+
+function generateCachedPresignedUrlFromFileType (key: string, fileType: ObjectStoragePublicFileType): Promise<string> {
+  const cacheKey = `${fileType}:${key}`
+  const now = Date.now()
+  const cached = presignedPublicUrlCache.get(cacheKey)
+
+  if (cached && cached.expiresAt > now) return cached.promise
+  if (cached) presignedPublicUrlCache.delete(cacheKey)
+
+  const expiresInMs = 3600 * CONFIG.OBJECT_STORAGE.PRESIGNED_PUBLIC_URLS_EXPIRATION_HOURS * 1000
+  const expiresAt = now + Math.max(0, Math.floor(expiresInMs / 2))
+
+  const promise: Promise<string> = generatePresignedUrlFromFileType(key, fileType)
+    .catch(err => {
+      if (presignedPublicUrlCache.get(cacheKey)?.promise === promise) {
+        presignedPublicUrlCache.delete(cacheKey)
+      }
+
+      throw err
+    })
+
+  presignedPublicUrlCache.set(cacheKey, { expiresAt, promise })
+  prunePresignedPublicUrlCache()
+
+  return promise
+}
+
+function prunePresignedPublicUrlCache () {
+  while (presignedPublicUrlCache.size > PRESIGNED_PUBLIC_URL_CACHE_MAX_ITEMS) {
+    const oldestCacheKey = presignedPublicUrlCache.keys().next().value
+    if (!oldestCacheKey) return
+
+    presignedPublicUrlCache.delete(oldestCacheKey)
+  }
 }
 
 // Generates S3 presigned URL

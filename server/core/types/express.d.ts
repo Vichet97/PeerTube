@@ -33,6 +33,7 @@ import {
   MVideoPlaylistFull,
   MVideoPlaylistFullSummary,
   MVideoThumbnailBlacklist,
+  MVideoWithRights,
   MWatchedWordsList
 } from '@server/types/models/index.js'
 import { MOAuthToken, MOAuthTokenUser } from '@server/types/models/oauth/oauth-token.js'
@@ -150,6 +151,7 @@ declare module 'express' {
       videoAll?: MVideoFullLight
       onlyImmutableVideo?: MVideoImmutable
       onlyVideo?: MVideoThumbnailBlacklist
+      videoWithRights?: MVideoWithRights
       videoId?: MVideoId
 
       videoLive?: MVideoLiveWithSettingSchedules

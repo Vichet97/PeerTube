@@ -1,4 +1,4 @@
-import { forceNumber } from '@peertube/peertube-core-utils'
+import { forceNumber, getAllPrivacies } from '@peertube/peertube-core-utils'
 import {
   VideoChannelCollaboratorState,
   VideoInclude,
@@ -109,7 +109,7 @@ export class VideosIdListQueryBuilder extends AbstractRunQuery {
   protected replacements: any = {}
 
   private attributes: string[]
-  private joins: string[] = []
+  private readonly joins: string[] = []
 
   private readonly and: string[] = []
 
@@ -124,6 +124,7 @@ export class VideosIdListQueryBuilder extends AbstractRunQuery {
   private offset = ''
 
   private builtChannelJoin = false
+  private builtAccountActorJoin = false
 
   constructor (protected readonly sequelize: Sequelize) {
     super(sequelize)
@@ -168,11 +169,7 @@ export class VideosIdListQueryBuilder extends AbstractRunQuery {
       sortDirection = direction
     }
 
-    this.joins = this.joins.concat([
-      'INNER JOIN "videoChannel" ON "videoChannel"."id" = "video"."channelId"',
-      'INNER JOIN "account" ON "account"."id" = "videoChannel"."accountId"',
-      'INNER JOIN "actor" "accountActor" ON "account"."id" = "accountActor"."accountId"'
-    ])
+    this.joins.push('INNER JOIN "videoChannel" ON "videoChannel"."id" = "video"."channelId"')
 
     if (!(options.include & VideoInclude.BLACKLISTED)) {
       this.whereNotBlacklisted()
@@ -395,6 +392,13 @@ export class VideosIdListQueryBuilder extends AbstractRunQuery {
     this.joins.push('INNER JOIN "actor" "channelActor" ON "videoChannel"."id" = "channelActor"."videoChannelId"')
   }
 
+  private joinAccountActor () {
+    if (this.builtAccountActorJoin) return
+    this.builtAccountActorJoin = true
+
+    this.joins.push('INNER JOIN "actor" "accountActor" ON "videoChannel"."accountId" = "accountActor"."accountId"')
+  }
+
   private whereStateAvailable (options: {
     includeScheduledLive: boolean
   }) {
@@ -429,6 +433,8 @@ export class VideosIdListQueryBuilder extends AbstractRunQuery {
   }
 
   private whereHost (host: string) {
+    this.joinAccountActor()
+
     // Local instance
     if (host === WEBSERVER.HOST) {
       this.and.push('"accountActor"."serverId" IS NULL')
@@ -446,19 +452,20 @@ export class VideosIdListQueryBuilder extends AbstractRunQuery {
     includeCollaborations: boolean
   }) {
     if (options.includeCollaborations !== true) {
-      this.and.push('"account"."id" = :accountId')
+      this.and.push('"videoChannel"."accountId" = :accountId')
       this.replacements.accountId = options.accountId
       return
     }
 
-    this.joins.push(
-      'LEFT JOIN "videoChannelCollaborator" ON "videoChannelCollaborator"."channelId" = "videoChannel".id ' +
-        'AND "videoChannelCollaborator"."state" = :channelCollaboratorState ' +
-        // Ensure we join with max 1 collaborator to not duplicate rows
-        'AND "videoChannelCollaborator"."accountId" = :accountId'
+    this.and.push(
+      '"video"."channelId" IN (' +
+        'SELECT "id" FROM "videoChannel" WHERE "videoChannel"."accountId" = :accountId ' +
+        'UNION ALL ' +
+        'SELECT "channelId" FROM "videoChannelCollaborator" ' +
+        'WHERE "videoChannelCollaborator"."accountId" = :accountId ' +
+        'AND "videoChannelCollaborator"."state" = :channelCollaboratorState' +
+      ')'
     )
-
-    this.and.push('("account"."id" = :accountId OR "videoChannelCollaborator"."accountId" = :accountId)')
 
     this.replacements.accountId = options.accountId
     this.replacements.channelCollaboratorState = VideoChannelCollaboratorState.ACCEPTED
@@ -515,6 +522,7 @@ export class VideosIdListQueryBuilder extends AbstractRunQuery {
 
       this.joins.push('INNER JOIN "videoCandidates" ON "video"."id" = "videoCandidates"."videoId"')
     } else {
+      this.joinAccountActor()
       this.joinChannel()
 
       let query = ''
@@ -621,6 +629,11 @@ export class VideosIdListQueryBuilder extends AbstractRunQuery {
   }
 
   private wherePrivacyOneOf (privacyOneOf: VideoPrivacyType[]) {
+    const includedPrivacies = new Set(privacyOneOf)
+
+    // Avoid an always-true predicate so PostgreSQL can use index-only scans for counts.
+    if (getAllPrivacies().every(privacy => includedPrivacies.has(privacy))) return
+
     this.and.push('"video"."privacy" IN (:privacyOneOf)')
     this.replacements.privacyOneOf = privacyOneOf
   }
@@ -706,6 +719,8 @@ export class VideosIdListQueryBuilder extends AbstractRunQuery {
   }
 
   private whereNotBlocked (serverAccountId: number, user?: MUserAccountId) {
+    this.joinAccountActor()
+
     const blockerIds = [ serverAccountId ]
     if (user) blockerIds.push(user.Account.id)
 
@@ -715,7 +730,7 @@ export class VideosIdListQueryBuilder extends AbstractRunQuery {
       'NOT EXISTS (' +
         '  SELECT 1 FROM "accountBlocklist" ' +
         '  WHERE "accountBlocklist"."accountId" IN (' + inClause + ') ' +
-        '  AND "accountBlocklist"."targetAccountId" = "account"."id" ' +
+        '  AND "accountBlocklist"."targetAccountId" = "videoChannel"."accountId" ' +
         ')' +
         'AND NOT EXISTS (' +
         '  SELECT 1 FROM "serverBlocklist" WHERE "serverBlocklist"."accountId" IN (' + inClause + ') ' +

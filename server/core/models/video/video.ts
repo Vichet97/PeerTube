@@ -111,6 +111,7 @@ import {
   MVideoThumbnailBlacklist,
   MVideoWithAllFiles,
   MVideoWithFile,
+  MVideoWithRights,
   type MVideo,
   type MVideoAccountLight
 } from '../../types/models/index.js'
@@ -874,11 +875,17 @@ export class VideoModel extends SequelizeModel<VideoModel> {
       // DB CASCADE may not trigger model hooks, so we ensure cleanup here.
       const thumbnails = await instance.$get('Thumbnails', { transaction: options.transaction })
       for (const t of thumbnails) {
-        tasks.push(withRetry(() => t.removeFile().then(() => {})).catch(err => logger.error('Cannot remove thumbnail file %s.', t.filename, { err })))
+        tasks.push(
+          withRetry(() => t.removeFile().then(() => {}))
+            .catch(err => logger.error('Cannot remove thumbnail file %s.', t.filename, { err }))
+        )
       }
       const storyboard = await StoryboardModel.loadByVideo(instance.id, options.transaction)
       if (storyboard) {
-        tasks.push(withRetry(() => storyboard.removeFile().then(() => {})).catch(err => logger.error('Cannot remove storyboard file %s.', storyboard.filename, { err })))
+        tasks.push(
+          withRetry(() => storyboard.removeFile().then(() => {}))
+            .catch(err => logger.error('Cannot remove storyboard file %s.', storyboard.filename, { err }))
+        )
       }
 
       if (!Array.isArray(instance.VideoFiles)) {
@@ -1408,6 +1415,12 @@ export class VideoModel extends SequelizeModel<VideoModel> {
     const queryBuilder = new VideoModelGetQueryBuilder(VideoModel.sequelize)
 
     return queryBuilder.queryVideo({ id, transaction, type: 'thumbnails-blacklist' })
+  }
+
+  static loadWithBlacklistRights (id: number | string, transaction?: Transaction): Promise<MVideoWithRights> {
+    const queryBuilder = new VideoModelGetQueryBuilder(VideoModel.sequelize)
+
+    return queryBuilder.queryVideo({ id, transaction, type: 'blacklist-rights' })
   }
 
   static loadForSEO (id: number | string, transaction?: Transaction): Promise<MVideoSeo> {

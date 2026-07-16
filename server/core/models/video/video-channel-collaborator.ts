@@ -22,6 +22,13 @@ enum ScopeNames {
     {
       fields: [ 'channelId', 'accountId' ],
       unique: true
+    },
+    {
+      name: 'video_channel_collaborator_account_channel_accepted',
+      fields: [ 'accountId', 'channelId' ],
+      where: {
+        state: VideoChannelCollaboratorState.ACCEPTED
+      }
     }
   ]
 })

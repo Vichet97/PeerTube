@@ -6,27 +6,36 @@ import {
   MVideoFullLight,
   MVideoId,
   MVideoImmutable,
-  MVideoThumbnailBlacklist
+  MVideoThumbnailBlacklist,
+  MVideoWithRights
 } from '@server/types/models/index.js'
 import { getOrCreateAPVideo } from '../activitypub/videos/get.js'
 
-type VideoLoadType = 'for-api' | 'all' | 'only-video-and-blacklist' | 'id' | 'none' | 'unsafe-only-immutable-attributes'
+type VideoLoadType =
+  | 'for-api'
+  | 'all'
+  | 'only-video-and-blacklist'
+  | 'only-video-and-blacklist-rights'
+  | 'id'
+  | 'none'
+  | 'unsafe-only-immutable-attributes'
 
 function loadVideo (id: number | string, fetchType: 'for-api', userId?: number): Promise<MVideoFormattableDetails>
 function loadVideo (id: number | string, fetchType: 'all', userId?: number): Promise<MVideoFullLight>
 function loadVideo (id: number | string, fetchType: 'unsafe-only-immutable-attributes'): Promise<MVideoImmutable>
 function loadVideo (id: number | string, fetchType: 'only-video-and-blacklist', userId?: number): Promise<MVideoThumbnailBlacklist>
+function loadVideo (id: number | string, fetchType: 'only-video-and-blacklist-rights', userId?: number): Promise<MVideoWithRights>
 function loadVideo (id: number | string, fetchType: 'id' | 'none', userId?: number): Promise<MVideoId>
 function loadVideo (
   id: number | string,
   fetchType: VideoLoadType,
   userId?: number
-): Promise<MVideoFullLight | MVideoThumbnailBlacklist | MVideoId | MVideoImmutable>
+): Promise<MVideoFullLight | MVideoThumbnailBlacklist | MVideoWithRights | MVideoId | MVideoImmutable>
 function loadVideo (
   id: number | string,
   fetchType: VideoLoadType,
   userId?: number
-): Promise<MVideoFullLight | MVideoThumbnailBlacklist | MVideoId | MVideoImmutable> {
+): Promise<MVideoFullLight | MVideoThumbnailBlacklist | MVideoWithRights | MVideoId | MVideoImmutable> {
 
   if (fetchType === 'for-api') return VideoModel.loadForGetAPI({ id, userId })
 
@@ -35,6 +44,8 @@ function loadVideo (
   if (fetchType === 'unsafe-only-immutable-attributes') return VideoModel.loadImmutableAttributes(id)
 
   if (fetchType === 'only-video-and-blacklist') return VideoModel.loadWithBlacklist(id)
+
+  if (fetchType === 'only-video-and-blacklist-rights') return VideoModel.loadWithBlacklistRights(id)
 
   if (fetchType === 'id' || fetchType === 'none') return VideoModel.loadOnlyId(id)
 }

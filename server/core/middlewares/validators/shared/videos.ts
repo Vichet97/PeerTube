@@ -58,6 +58,10 @@ export async function doesVideoExist (id: number | string, res: Response, fetchT
     case 'only-video-and-blacklist':
       res.locals.onlyVideo = video as MVideoThumbnailBlacklist
       break
+
+    case 'only-video-and-blacklist-rights':
+      res.locals.videoWithRights = video as MVideoWithRights
+      break
   }
 
   return true
@@ -127,6 +131,7 @@ async function checkCanSeeUserAuthVideo (options: {
   }
 
   const videoWithRights = await getVideoWithRights(video as MVideoWithRights)
+  if (!videoWithRights) return failVideoNotFound(req, res)
 
   const privacy = videoWithRights.privacy
 
@@ -160,6 +165,7 @@ async function checkCanSeePasswordProtectedVideo (options: {
   const { req, res, video, hasVideoFileToken } = options
 
   const videoWithRights = await getVideoWithRights(video as MVideoWithRights)
+  if (!videoWithRights) return failVideoNotFound(req, res)
 
   const videoPassword = req.header('x-peertube-video-password')
 
@@ -216,12 +222,21 @@ async function canUserManageProtectedVideo (options: {
   })
 }
 
-async function getVideoWithRights (video: MVideoWithRights): Promise<MVideoWithRights> {
+async function getVideoWithRights (video: MVideoWithRights): Promise<MVideoWithRights | null> {
   const channel = video.VideoChannel
 
   if (channel?.id && channel?.Account?.userId && channel?.Account?.id) return video
 
   return VideoModel.loadFull(video.id)
+}
+
+function failVideoNotFound (req: Request, res: Response) {
+  res.fail({
+    status: HttpStatusCode.NOT_FOUND_404,
+    message: req.t('Video not found')
+  })
+
+  return false
 }
 
 /**
@@ -236,6 +251,8 @@ export async function canUserSeeVideoForWatchPage (options: {
   const { user, video, req } = options
 
   const videoWithRights = await getVideoWithRights(video as MVideoWithRights)
+  if (!videoWithRights) return false
+
   const privacy = videoWithRights.privacy
 
   if (privacy === VideoPrivacy.INTERNAL) {

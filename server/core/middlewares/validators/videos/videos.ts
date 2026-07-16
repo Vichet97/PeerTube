@@ -282,7 +282,7 @@ export const videosUpdateValidator = getCommonVideoEditAttributes().concat([
 ])
 
 export async function checkVideoFollowConstraints (req: express.Request, res: express.Response, next: express.NextFunction) {
-  const video = getVideoWithAttributes(res)
+  const video = res.locals.videoWithRights || getVideoWithAttributes(res)
 
   // Anybody can watch local videos
   if (video.isLocal() === true) return next()
@@ -309,7 +309,10 @@ export async function checkVideoFollowConstraints (req: express.Request, res: ex
   })
 }
 
-type FetchType = Extract<VideoLoadType, 'for-api' | 'all' | 'only-video-and-blacklist' | 'unsafe-only-immutable-attributes'>
+type FetchType = Extract<
+  VideoLoadType,
+  'for-api' | 'all' | 'only-video-and-blacklist' | 'only-video-and-blacklist-rights' | 'unsafe-only-immutable-attributes'
+>
 export const videosCustomGetValidator = (fetchType: FetchType) => {
   return [
     isValidVideoIdParam('id'),
@@ -323,7 +326,9 @@ export const videosCustomGetValidator = (fetchType: FetchType) => {
       // Controllers does not need to check video rights
       if (fetchType === 'unsafe-only-immutable-attributes') return next()
 
-      const video = getVideoWithAttributes(res) as MVideoFullLight
+      const video = fetchType === 'only-video-and-blacklist-rights'
+        ? res.locals.videoWithRights
+        : getVideoWithAttributes(res) as MVideoFullLight
 
       if (!await checkCanSeeVideo({ req, res, video, paramId: req.params.id })) return
 

@@ -101,7 +101,7 @@ videosRouter.get(
   '/:id/processing-progress',
   openapiOperationDoc({ operationId: 'getVideoProcessingProgress' }),
   optionalAuthenticate,
-  asyncMiddleware(videosCustomGetValidator('for-api')),
+  asyncMiddleware(videosCustomGetValidator('only-video-and-blacklist-rights')),
   asyncMiddleware(checkVideoFollowConstraints),
   asyncMiddleware(getVideoProcessingProgress)
 )
@@ -148,7 +148,7 @@ function listVideoPrivacies (_req: express.Request, res: express.Response) {
 }
 
 async function getVideoProcessingProgress (req: express.Request, res: express.Response) {
-  const video = res.locals.videoAPI
+  const video = res.locals.videoWithRights
 
   if (!video.isLocal()) {
     return res.sendStatus(HttpStatusCode.NOT_FOUND_404)
