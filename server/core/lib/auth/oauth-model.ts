@@ -49,11 +49,16 @@ async function getAccessToken (bearerToken: string) {
   if (!bearerToken) return undefined
 
   let tokenModel: MOAuthTokenUser
+  const isApiToken = UserApiTokenModel.isApiToken(bearerToken)
 
-  if (TokensCache.Instance.hasToken(bearerToken)) {
+  if (isApiToken && TokensCache.Instance.hasApiToken(bearerToken)) {
+    tokenModel = TokensCache.Instance.getApiToken(bearerToken)
+  } else if (!isApiToken && TokensCache.Instance.hasToken(bearerToken)) {
     tokenModel = TokensCache.Instance.getByToken(bearerToken)
   } else {
-    tokenModel = await OAuthTokenModel.getByTokenAndPopulateUser(bearerToken)
+    tokenModel = isApiToken
+      ? undefined
+      : await OAuthTokenModel.getByTokenAndPopulateUser(bearerToken)
 
     if (tokenModel) {
       TokensCache.Instance.setToken(tokenModel)
@@ -61,7 +66,9 @@ async function getAccessToken (bearerToken: string) {
       const apiTokenModel = await UserApiTokenModel.getByToken(bearerToken)
       if (apiTokenModel) {
         tokenModel = buildApiTokenAsOAuthToken(bearerToken, apiTokenModel)
-        // Do not cache API tokens so revocation takes effect immediately
+        // Cache API tokens briefly to avoid DB auth reads/writes on every API request.
+        // Revocation/scope/user changes take effect after this short TTL at worst.
+        if (tokenModel) TokensCache.Instance.setApiToken(tokenModel)
       }
     }
   }
@@ -77,7 +84,10 @@ async function getAccessToken (bearerToken: string) {
   return tokenModel
 }
 
-function buildApiTokenAsOAuthToken (bearerToken: string, apiToken: Awaited<ReturnType<typeof UserApiTokenModel.getByToken>>): MOAuthTokenUser | undefined {
+function buildApiTokenAsOAuthToken (
+  bearerToken: string,
+  apiToken: Awaited<ReturnType<typeof UserApiTokenModel.getByToken>>
+): MOAuthTokenUser | undefined {
   if (!apiToken) return undefined
 
   const { User, scopes } = apiToken

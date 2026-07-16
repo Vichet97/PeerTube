@@ -83,8 +83,12 @@ export class UserApiTokenModel extends SequelizeModel<UserApiTokenModel> {
     return sha256(rawToken, 'hex')
   }
 
+  static isApiToken (rawToken: string) {
+    return !!rawToken && rawToken.startsWith(API_TOKEN_PREFIX)
+  }
+
   static async getByToken (bearerToken: string) {
-    if (!bearerToken || !bearerToken.startsWith(API_TOKEN_PREFIX)) return null
+    if (!UserApiTokenModel.isApiToken(bearerToken)) return null
 
     const tokenHash = UserApiTokenModel.hashToken(bearerToken)
     return UserApiTokenModel.findOne({

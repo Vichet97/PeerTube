@@ -21,12 +21,17 @@ export async function buildObjectStoragePublicFileUrl (options: {
   if (CONFIG.OBJECT_STORAGE.USE_PRESIGNED_PUBLIC_URLS) {
     // When presigned URLs are required:
     // - streaming-playlists m3u8 files: use proxy URL (will be transformed)
-    // - All other files: use direct S3 presigned URLs
+    // - static public assets: use compact PeerTube redirect URLs to avoid embedding many long S3 signatures in API responses
+    // - playback URLs: use direct S3 presigned URLs
     if (fileType === 'streaming-playlists' && (key.endsWith('.m3u8') || key.endsWith('.mp4'))) {
       return buildPresignedProxyUrl(fileType, key)
     }
 
     const directFileType = fileType || 'thumbnails'
+
+    if (shouldUsePublicStaticRedirectUrl(directFileType)) {
+      return buildPublicStaticRedirectUrl(directFileType, key)
+    }
 
     // Do not reuse playback URLs or URLs signed by rotating credentials.
     if (directFileType === 'web-videos' || !CONFIG.OBJECT_STORAGE.CREDENTIALS.ACCESS_KEY_ID) {
@@ -65,6 +70,23 @@ function buildPresignedProxyUrl (fileType: ObjectStoragePublicFileType, key: str
     'captions': OBJECT_STORAGE_PROXY_PATHS.PUBLIC.CAPTIONS
   }
   return `${WEBSERVER.URL}${pathMap[fileType]}${encodedKey}?expires=${token}`
+}
+
+function shouldUsePublicStaticRedirectUrl (fileType: ObjectStoragePublicFileType) {
+  return fileType === 'thumbnails' ||
+    fileType === 'storyboards' ||
+    fileType === 'captions'
+}
+
+function buildPublicStaticRedirectUrl (fileType: 'thumbnails' | 'storyboards' | 'captions', key: string) {
+  const encodedKey = encodeURIComponent(key)
+  const pathMap: Record<typeof fileType, string> = {
+    thumbnails: OBJECT_STORAGE_PROXY_PATHS.PUBLIC.THUMBNAILS,
+    storyboards: OBJECT_STORAGE_PROXY_PATHS.PUBLIC.STORYBOARDS,
+    captions: OBJECT_STORAGE_PROXY_PATHS.PUBLIC.CAPTIONS
+  }
+
+  return `${WEBSERVER.URL}${pathMap[fileType]}${encodedKey}`
 }
 
 const presignedPublicUrlCache = new Map<string, { expiresAt: number, promise: Promise<string> }>()
