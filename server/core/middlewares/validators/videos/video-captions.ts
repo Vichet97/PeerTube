@@ -161,9 +161,11 @@ export const listVideoCaptionsValidator = [
 
   async (req: express.Request, res: express.Response, next: express.NextFunction) => {
     if (areValidationErrors(req, res)) return
-    if (!await doesVideoExist(req.params.videoId, res, 'only-video-and-blacklist')) return
+    // Caption listing only needs video visibility metadata. Load owner rights upfront so
+    // private/internal videos do not trigger a second loadFull() query in checkCanSeeVideo().
+    if (!await doesVideoExist(req.params.videoId, res, 'only-video-and-blacklist-rights')) return
 
-    const video = res.locals.onlyVideo
+    const video = res.locals.videoWithRights
     if (!await checkCanSeeVideo({ req, res, video, paramId: req.params.videoId })) return
 
     return next()

@@ -59,10 +59,12 @@ import { hasVideoResourcesToBeMoved, moveVideoToStorage, onMoveVideoToStorageFai
 
 const lTagsBase = loggerTagsFactory('object-storage', 'move-object-storage')
 const LOCAL_CLEANUP_RETRY_DELAY_MS = 30_000
-const RETAINED_LOCAL_FILES_CLEANUP_START_DELAY_MS = 30 * 1000
+const RETAINED_LOCAL_FILES_CLEANUP_START_DELAY_MS = 10 * 60 * 1000
 const RETAINED_LOCAL_FILES_CLEANUP_INTERVAL_MS = 30 * 60 * 1000
-const RETAINED_LOCAL_FILES_CLEANUP_CONCURRENCY = 5
-const RETAINED_LOCAL_FILES_CLEANUP_BATCH_SIZE = 500
+const RETAINED_LOCAL_FILES_CLEANUP_CONCURRENCY = 2
+const RETAINED_LOCAL_FILES_CLEANUP_BATCH_SIZE = 100
+const RETAINED_VIDEO_ATTRIBUTES = [ 'id', 'uuid', 'privacy' ]
+const RETAINED_VIDEO_FILE_ATTRIBUTES = [ 'id', 'filename', 'torrentFilename', 'videoId', 'videoStreamingPlaylistId' ]
 const scheduledLocalFileRemovals = new Set<string>()
 let retainedLocalFilesCleanupScheduled = false
 let retainedLocalFilesCleanupRunPromise: Promise<{ scheduled: number; skippedMissing: number }> | undefined
@@ -1432,6 +1434,7 @@ async function addRetainedWebVideoFileCandidates (
   await processRetainedLocalCandidatesInBatches({
     currentPhase: 'web-videos',
     model: VideoFileModel,
+    attributes: RETAINED_VIDEO_FILE_ATTRIBUTES,
     where: {
       storage: FileStorage.OBJECT_STORAGE,
       videoId: { [Op.ne]: null },
@@ -1439,6 +1442,7 @@ async function addRetainedWebVideoFileCandidates (
     },
     include: [
       {
+        attributes: RETAINED_VIDEO_ATTRIBUTES,
         model: VideoModel.unscoped(),
         required: true,
         where: { remote: false }
@@ -1472,6 +1476,7 @@ async function addRetainedHLSFileCandidates (
   await processRetainedLocalCandidatesInBatches({
     currentPhase: 'hls-files',
     model: VideoFileModel,
+    attributes: RETAINED_VIDEO_FILE_ATTRIBUTES,
     where: {
       storage: FileStorage.OBJECT_STORAGE,
       videoStreamingPlaylistId: { [Op.ne]: null },
@@ -1479,10 +1484,12 @@ async function addRetainedHLSFileCandidates (
     },
     include: [
       {
+        attributes: [ 'id', 'videoId' ],
         model: VideoStreamingPlaylistModel.unscoped(),
         required: true,
         include: [
           {
+            attributes: RETAINED_VIDEO_ATTRIBUTES,
             model: VideoModel.unscoped(),
             required: true,
             where: { remote: false }
@@ -1526,12 +1533,14 @@ async function addRetainedPlaylistFileCandidates (
   await processRetainedLocalCandidatesInBatches({
     currentPhase: 'playlist-files',
     model: VideoStreamingPlaylistModel,
+    attributes: [ 'id', 'playlistFilename', 'segmentsSha256Filename', 'videoId' ],
     where: {
       storage: FileStorage.OBJECT_STORAGE,
       playlistFilename: { [Op.ne]: null }
     },
     include: [
       {
+        attributes: RETAINED_VIDEO_ATTRIBUTES,
         model: VideoModel.unscoped(),
         required: true,
         where: { remote: false }
@@ -1574,12 +1583,14 @@ async function addRetainedOriginalFileCandidates (
   await processRetainedLocalCandidatesInBatches({
     currentPhase: 'original-files',
     model: VideoSourceModel,
+    attributes: [ 'id', 'keptOriginalFilename', 'videoId' ],
     where: {
       storage: FileStorage.OBJECT_STORAGE,
       keptOriginalFilename: { [Op.ne]: null }
     },
     include: [
       {
+        attributes: RETAINED_VIDEO_ATTRIBUTES,
         model: VideoModel.unscoped(),
         required: true,
         where: { remote: false }
@@ -1610,6 +1621,7 @@ async function addRetainedCaptionFileCandidates (
   await processRetainedLocalCandidatesInBatches({
     currentPhase: 'captions',
     model: VideoCaptionModel,
+    attributes: [ 'id', 'filename', 'm3u8Filename', 'videoId' ],
     where: {
       storage: FileStorage.OBJECT_STORAGE,
       cached: false,
@@ -1617,6 +1629,7 @@ async function addRetainedCaptionFileCandidates (
     },
     include: [
       {
+        attributes: RETAINED_VIDEO_ATTRIBUTES,
         model: VideoModel.unscoped(),
         required: true,
         where: { remote: false }
@@ -1658,6 +1671,7 @@ async function addRetainedThumbnailFileCandidates (
   await processRetainedLocalCandidatesInBatches({
     currentPhase: 'thumbnails',
     model: ThumbnailModel,
+    attributes: [ 'id', 'filename', 'videoId' ],
     where: {
       storage: FileStorage.OBJECT_STORAGE,
       cached: false,
@@ -1666,6 +1680,7 @@ async function addRetainedThumbnailFileCandidates (
     },
     include: [
       {
+        attributes: RETAINED_VIDEO_ATTRIBUTES,
         model: VideoModel.unscoped(),
         required: true,
         where: { remote: false }
@@ -1696,6 +1711,7 @@ async function addRetainedStoryboardFileCandidates (
   await processRetainedLocalCandidatesInBatches({
     currentPhase: 'storyboards',
     model: StoryboardModel,
+    attributes: [ 'id', 'filename', 'videoId' ],
     where: {
       storage: FileStorage.OBJECT_STORAGE,
       cached: false,
@@ -1703,6 +1719,7 @@ async function addRetainedStoryboardFileCandidates (
     },
     include: [
       {
+        attributes: RETAINED_VIDEO_ATTRIBUTES,
         model: VideoModel.unscoped(),
         required: true,
         where: { remote: false }
@@ -1744,6 +1761,7 @@ function addRetainedTorrentFileCandidate (
 async function processRetainedLocalCandidatesInBatches (options: {
   currentPhase: string
   model: any
+  attributes: string[]
   where: Record<string, any>
   include: any[]
   counts: RetainedLocalFilesCleanupProgress
@@ -1754,6 +1772,7 @@ async function processRetainedLocalCandidatesInBatches (options: {
 
   while (true) {
     const rows = await options.model.unscoped().findAll({
+      attributes: options.attributes,
       where: {
         ...options.where,
         id: { [Op.gt]: lastId }

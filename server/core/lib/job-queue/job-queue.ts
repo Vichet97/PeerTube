@@ -222,6 +222,9 @@ const jobTypes: JobType[] = [
 
 const silentFailure = new Set<JobType>([ 'activitypub-http-unicast' ])
 
+const MAX_STORED_JOB_ERROR_MESSAGE_LENGTH = 8000
+const MAX_STORED_JOB_ERROR_STACK_LENGTH = 16000
+
 const CANCELLED_REASON = 'Video was deleted - transcoding job cancelled'
 const VIDEO_PIPELINE_JOB_TYPES_ON_RESET_HOLD = new Set<JobType>([
   'video-import',
@@ -323,12 +326,22 @@ class JobQueue {
     }
 
     const handler = function (job: Job) {
-      const timeout = JOB_TTL[handlerName]
-      const p = handlers[handlerName](job)
+      try {
+        const timeout = JOB_TTL[handlerName]
+        const p = handlers[handlerName](job)
 
-      if (!timeout) return p
+        if (!timeout) {
+          return p.catch(err => {
+            throw sanitizeJobErrorForStorage(err)
+          })
+        }
 
-      return timeoutPromise(p, timeout)
+        return timeoutPromise(p, timeout).catch(err => {
+          throw sanitizeJobErrorForStorage(err)
+        })
+      } catch (err) {
+        throw sanitizeJobErrorForStorage(err)
+      }
     }
 
     const processor = async (jobArg: Job) => {
@@ -1521,6 +1534,27 @@ class JobQueue {
   getQueues () {
     return this.queues
   }
+}
+
+// ---------------------------------------------------------------------------
+
+function sanitizeJobErrorForStorage (err: unknown) {
+  const error = err instanceof Error
+    ? err
+    : new Error(typeof err === 'string' ? err : JSON.stringify(err))
+
+  if (error.message.length > MAX_STORED_JOB_ERROR_MESSAGE_LENGTH) {
+    const originalLength = error.message.length
+    error.message = error.message.slice(0, MAX_STORED_JOB_ERROR_MESSAGE_LENGTH) +
+      `... [truncated ${originalLength - MAX_STORED_JOB_ERROR_MESSAGE_LENGTH} chars from job error]`
+  }
+
+  if (error.stack && error.stack.length > MAX_STORED_JOB_ERROR_STACK_LENGTH) {
+    error.stack = error.stack.slice(0, MAX_STORED_JOB_ERROR_STACK_LENGTH) +
+      `... [truncated ${error.stack.length - MAX_STORED_JOB_ERROR_STACK_LENGTH} chars from job stack]`
+  }
+
+  return error
 }
 
 // ---------------------------------------------------------------------------
