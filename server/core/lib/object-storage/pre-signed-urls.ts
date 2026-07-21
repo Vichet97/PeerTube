@@ -8,7 +8,7 @@ import {
   generateWebVideoObjectStorageKey
 } from './keys.js'
 import { keepSignedQueryEncoded } from './presigned-redirect.js'
-import { buildKey, getClient } from './shared/index.js'
+import { buildKey, getReadClient } from './shared/index.js'
 
 export async function generateWebVideoPresignedUrl (options: {
   file: MVideoFile
@@ -91,7 +91,7 @@ async function generatePresignedUrl (options: {
     ResponseContentDisposition: `attachment; filename="${encodeURI(downloadFilename)}"`
   })
 
-  const signedUrl = await getSignedUrl(await getClient(), command, { expiresIn: 3600 * 24 })
+  const signedUrl = await getSignedUrl(await getReadClient(), command, { expiresIn: 3600 * 24 })
   return keepSignedQueryEncoded(signedUrl)
 }
 

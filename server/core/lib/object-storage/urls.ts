@@ -2,7 +2,7 @@ import { logger } from '@server/helpers/logger.js'
 import { CONFIG } from '@server/initializers/config.js'
 import { OBJECT_STORAGE_PROXY_PATHS, WEBSERVER } from '@server/initializers/constants.js'
 import { MVideoUUID } from '@server/types/models/index.js'
-import { buildKey, getClient, getEndpoint, lTags } from './shared/index.js'
+import { buildKey, getEndpoint, getReadClient, getReadEndpoint, lTags } from './shared/index.js'
 import { ObjectStoragePublicFileType, generateProxyToken, keepSignedQueryEncoded } from './presigned-redirect.js'
 
 // ---------------------------------------------------------------------------
@@ -41,7 +41,7 @@ export async function buildObjectStoragePublicFileUrl (options: {
     return generateCachedPresignedUrlFromFileType(key, directFileType)
   }
 
-  return buildBaseUrl(bucket) + buildKey(key, bucket)
+  return buildBaseUrl(bucket, 'read') + buildKey(key, bucket)
 }
 
 // ---------------------------------------------------------------------------
@@ -141,7 +141,7 @@ async function generatePresignedUrlFromFileType (key: string, fileType: ObjectSt
   })
 
   const signedUrl = await getSignedUrl(
-    await getClient(),
+    await getReadClient(),
     command,
     { expiresIn: 3600 * CONFIG.OBJECT_STORAGE.PRESIGNED_PUBLIC_URLS_EXPIRATION_HOURS }
   )
@@ -192,15 +192,15 @@ export function buildObjectStorageCaptionPrivateFileUrl (video: MVideoUUID, file
 
 // Returns the raw storage URL regardless of presigned mode (for logging/internal use only)
 export function buildObjectStorageRawUrl (bucket: BucketInfo, key: string): string {
-  return buildBaseUrl(bucket) + buildKey(key, bucket)
+  return buildBaseUrl(bucket, 'write') + buildKey(key, bucket)
 }
 
 // ---------------------------------------------------------------------------
 // Private
 // ---------------------------------------------------------------------------
 
-function buildBaseUrl (bucketInfo: BucketInfo) {
-  const endpointParsed = getEndpointParsed()
+function buildBaseUrl (bucketInfo: BucketInfo, endpointType: 'read' | 'write') {
+  const endpointParsed = getEndpointParsed(endpointType)
   if (!endpointParsed) return ''
 
   let baseUrlConfig = bucketInfo.BASE_URL
@@ -217,25 +217,31 @@ function buildBaseUrl (bucketInfo: BucketInfo) {
   return `${endpointParsed.protocol}//${bucketInfo.BUCKET_NAME}.${endpointParsed.host}/`
 }
 
-let endpointParsed: URL
+const parsedEndpointCache = new Map<'read' | 'write', { endpoint: string, parsed: URL }>()
 
-function getEndpointParsed () {
-  if (!endpointParsed) {
-    try {
-      endpointParsed = new URL(getEndpoint())
-    } catch (error) {
-      logger.error(
-        `Invalid object storage endpoint URL: ${getEndpoint()}. ` +
-          `If you enabled object storage, ensure object_storage.endpoint is correctly configured. ` +
-          `Otherwise, check that you have correctly moved all your videos to your local filesystem.`,
-        lTags()
-      )
+function getEndpointParsed (endpointType: 'read' | 'write') {
+  const endpoint = endpointType === 'read' ? getReadEndpoint() : getEndpoint()
+  const cached = parsedEndpointCache.get(endpointType)
+  if (cached?.endpoint === endpoint) return cached.parsed
 
-      return undefined
-    }
+  try {
+    const parsed = new URL(endpoint)
+    parsedEndpointCache.set(endpointType, { endpoint, parsed })
+    return parsed
+  } catch (error) {
+    const configKey = endpointType === 'read'
+      ? 'object_storage.read_endpoint'
+      : 'object_storage.endpoint'
+
+    logger.error(
+      `Invalid object storage ${endpointType} endpoint URL: ${endpoint}. ` +
+        `If you enabled object storage, ensure ${configKey} is correctly configured. ` +
+        `Otherwise, check that you have correctly moved all your videos to your local filesystem.`,
+      lTags()
+    )
+
+    return undefined
   }
-
-  return endpointParsed
 }
 
 interface BucketInfo {

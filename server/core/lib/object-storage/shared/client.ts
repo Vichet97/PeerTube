@@ -7,63 +7,91 @@ import http from 'http'
 import https from 'https'
 import { lTags } from './logger.js'
 
-let s3ClientPromise: Promise<S3Client>
-let s3ClientResolved: S3Client
+let writeS3ClientPromise: Promise<S3Client>
+let writeS3ClientResolved: S3Client
+let writeS3ClientEndpoint: string
+
+let readS3ClientPromise: Promise<S3Client>
+let readS3ClientEndpoint: string
 
 const DEFAULT_OBJECT_STORAGE_CONNECTION_TIMEOUT_MS = 30_000
 const DEFAULT_OBJECT_STORAGE_SOCKET_TIMEOUT_MS = 120_000
 
 export function getClient () {
-  if (s3ClientPromise !== undefined) return s3ClientPromise
+  const endpoint = getEndpoint()
+  if (writeS3ClientPromise !== undefined && writeS3ClientEndpoint === endpoint) return writeS3ClientPromise
 
-  s3ClientPromise = (async () => {
-    const OBJECT_STORAGE = CONFIG.OBJECT_STORAGE
-
-    const { S3Client } = await import('@aws-sdk/client-s3')
-
-    const requestHandler = await getProxyRequestHandler()
-
-    s3ClientResolved = new S3Client({
-      endpoint: getEndpoint(),
-      region: OBJECT_STORAGE.REGION,
-      credentials: OBJECT_STORAGE.CREDENTIALS.ACCESS_KEY_ID
-        ? {
-          accessKeyId: OBJECT_STORAGE.CREDENTIALS.ACCESS_KEY_ID,
-          secretAccessKey: OBJECT_STORAGE.CREDENTIALS.SECRET_ACCESS_KEY
-        }
-        : undefined,
-      requestHandler,
-      maxAttempts: CONFIG.OBJECT_STORAGE.MAX_REQUEST_ATTEMPTS,
-      forcePathStyle: OBJECT_STORAGE.FORCE_PATH_STYLE,
-
-      // Default behaviour has incompatibilities with some S3 providers: https://github.com/aws/aws-sdk-js-v3/issues/6810
-      requestChecksumCalculation: 'WHEN_REQUIRED',
-      responseChecksumValidation: 'WHEN_REQUIRED'
+  writeS3ClientEndpoint = endpoint
+  writeS3ClientPromise = buildClient(endpoint)
+    .then(client => {
+      writeS3ClientResolved = client
+      return client
     })
 
-    logger.info('Initialized S3 client %s with region %s.', getEndpoint(), OBJECT_STORAGE.REGION, lTags())
+  return writeS3ClientPromise
+}
 
-    return s3ClientResolved
-  })()
+export function getReadClient () {
+  const endpoint = getReadEndpoint()
 
-  return s3ClientPromise
+  if (endpoint === getEndpoint()) return getClient()
+  if (readS3ClientPromise !== undefined && readS3ClientEndpoint === endpoint) return readS3ClientPromise
+
+  readS3ClientEndpoint = endpoint
+  readS3ClientPromise = buildClient(endpoint)
+    .then(client => client)
+
+  return readS3ClientPromise
 }
 
 // Synchronous access to cached client (only available after first getClient() call completes)
 export function getClientSync (): S3Client | undefined {
-  return s3ClientResolved
+  return writeS3ClientResolved
 }
 
-let endpoint: string
 export function getEndpoint () {
-  if (endpoint) return endpoint
+  return normalizeEndpoint(CONFIG.OBJECT_STORAGE.ENDPOINT)
+}
 
-  const endpointConfig = CONFIG.OBJECT_STORAGE.ENDPOINT
-  endpoint = endpointConfig.startsWith('http://') || endpointConfig.startsWith('https://')
-    ? CONFIG.OBJECT_STORAGE.ENDPOINT
-    : 'https://' + CONFIG.OBJECT_STORAGE.ENDPOINT
+export function getReadEndpoint () {
+  const endpointConfig = CONFIG.OBJECT_STORAGE.READ_ENDPOINT || CONFIG.OBJECT_STORAGE.ENDPOINT
+  return normalizeEndpoint(endpointConfig)
+}
 
-  return endpoint
+function normalizeEndpoint (endpointConfig: string) {
+  return endpointConfig.startsWith('http://') || endpointConfig.startsWith('https://')
+    ? endpointConfig
+    : 'https://' + endpointConfig
+}
+
+async function buildClient (endpoint: string) {
+  const OBJECT_STORAGE = CONFIG.OBJECT_STORAGE
+
+  const { S3Client } = await import('@aws-sdk/client-s3')
+
+  const requestHandler = await getProxyRequestHandler()
+
+  const client = new S3Client({
+    endpoint,
+    region: OBJECT_STORAGE.REGION,
+    credentials: OBJECT_STORAGE.CREDENTIALS.ACCESS_KEY_ID
+      ? {
+        accessKeyId: OBJECT_STORAGE.CREDENTIALS.ACCESS_KEY_ID,
+        secretAccessKey: OBJECT_STORAGE.CREDENTIALS.SECRET_ACCESS_KEY
+      }
+      : undefined,
+    requestHandler,
+    maxAttempts: CONFIG.OBJECT_STORAGE.MAX_REQUEST_ATTEMPTS,
+    forcePathStyle: OBJECT_STORAGE.FORCE_PATH_STYLE,
+
+    // Default behaviour has incompatibilities with some S3 providers: https://github.com/aws/aws-sdk-js-v3/issues/6810
+    requestChecksumCalculation: 'WHEN_REQUIRED',
+    responseChecksumValidation: 'WHEN_REQUIRED'
+  })
+
+  logger.info('Initialized S3 client %s with region %s.', endpoint, OBJECT_STORAGE.REGION, lTags())
+
+  return client
 }
 
 // ---------------------------------------------------------------------------

@@ -2,7 +2,7 @@ import type express from 'express'
 import { createHmac, timingSafeEqual } from 'node:crypto'
 import { CONFIG } from '@server/initializers/config.js'
 import { OBJECT_STORAGE_PROXY_PATHS } from '@server/initializers/constants.js'
-import { getClient, buildKey, lTags } from './shared/index.js'
+import { getClient, getReadClient, buildKey, lTags } from './shared/index.js'
 import { logger } from '@server/helpers/logger.js'
 
 export type ObjectStoragePublicFileType = 'thumbnails' | 'storyboards' | 'web-videos' | 'streaming-playlists' | 'torrents' | 'captions'
@@ -94,7 +94,7 @@ export async function generatePresignedRedirect (options: {
     })
 
     const presignedUrl = await getSignedUrl(
-      await getClient(),
+      await getReadClient(),
       command,
       { expiresIn: 3600 * CONFIG.OBJECT_STORAGE.PRESIGNED_PUBLIC_URLS_EXPIRATION_HOURS }
     )
@@ -123,7 +123,7 @@ export async function generatePresignedUrl (options: {
   })
 
   const signedUrl = await getSignedUrl(
-    await getClient(),
+    await getReadClient(),
     command,
     { expiresIn: 3600 * CONFIG.OBJECT_STORAGE.PRESIGNED_PUBLIC_URLS_EXPIRATION_HOURS }
   )
@@ -163,7 +163,7 @@ export async function getObjectContent (options: {
     }
 
     const chunks: Buffer[] = []
-    for await (const chunk of response.Body as any) {
+    for await (const chunk of response.Body) {
       chunks.push(chunk)
     }
     return Buffer.concat(chunks)
@@ -314,7 +314,7 @@ async function buildSegmentPresignedUrl (key: string, fileType: ObjectStoragePub
   })
 
   const signedUrl = await getSignedUrl(
-    await getClient(),
+    await getReadClient(),
     command,
     { expiresIn: 3600 * CONFIG.OBJECT_STORAGE.PRESIGNED_PUBLIC_URLS_EXPIRATION_HOURS }
   )

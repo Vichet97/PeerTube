@@ -284,6 +284,9 @@ const CONFIG = {
     MAX_UPLOAD_PART: bytes.parse(config.get<string>('object_storage.max_upload_part')),
     MAX_REQUEST_ATTEMPTS: config.get<number>('object_storage.max_request_attempts'),
     ENDPOINT: config.get<string>('object_storage.endpoint'),
+    READ_ENDPOINT: config.has('object_storage.read_endpoint')
+      ? config.get<string>('object_storage.read_endpoint')
+      : undefined,
     REGION: config.get<string>('object_storage.region'),
     FORCE_PATH_STYLE: config.get<boolean>('object_storage.force_path_style'),
     USE_PRESIGNED_PUBLIC_URLS: config.get<boolean>('object_storage.use_presigned_public_urls'),

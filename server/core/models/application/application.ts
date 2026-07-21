@@ -25,7 +25,7 @@ export const getServerActor = memoizee(async function () {
   return actor
 }, { promise: true })
 
-type ConfigPart = PickDeep<typeof CONFIG, 'OBJECT_STORAGE.STREAMING_PLAYLISTS'>
+type ConfigPart = PickDeep<typeof CONFIG, 'OBJECT_STORAGE.STREAMING_PLAYLISTS' | 'OBJECT_STORAGE.READ_ENDPOINT'>
 
 @DefaultScope(() => ({
   include: [
@@ -93,7 +93,8 @@ export class ApplicationModel extends SequelizeModel<ApplicationModel> {
     const application = await this.load()
     const configPart = this.lastRunConfigPart || application.configPart
 
-    return configPart?.OBJECT_STORAGE.STREAMING_PLAYLISTS.BASE_URL !== CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS.BASE_URL
+    return configPart?.OBJECT_STORAGE.STREAMING_PLAYLISTS.BASE_URL !== CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS.BASE_URL ||
+      configPart?.OBJECT_STORAGE.READ_ENDPOINT !== CONFIG.OBJECT_STORAGE.READ_ENDPOINT
   }
 
   static async updateNodeVersionsOrConfig () {
@@ -107,6 +108,7 @@ export class ApplicationModel extends SequelizeModel<ApplicationModel> {
 
     application.configPart = {
       OBJECT_STORAGE: {
+        READ_ENDPOINT: CONFIG.OBJECT_STORAGE.READ_ENDPOINT,
         STREAMING_PLAYLISTS: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS
       }
     }
