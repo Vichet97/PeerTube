@@ -9,6 +9,7 @@ import {
 } from './keys.js'
 import { keepSignedQueryEncoded } from './presigned-redirect.js'
 import { buildKey, getReadClient } from './shared/index.js'
+import { applyReadBucketNameReplacement, getReadBucketNameForSigning } from './read-url.js'
 
 export async function generateWebVideoPresignedUrl (options: {
   file: MVideoFile
@@ -22,7 +23,10 @@ export async function generateWebVideoPresignedUrl (options: {
     downloadFilename
   })
 
-  return replaceByBaseUrl(url, CONFIG.OBJECT_STORAGE.WEB_VIDEOS)
+  return applyReadBucketNameReplacement(
+    replaceByBaseUrl(url, CONFIG.OBJECT_STORAGE.WEB_VIDEOS),
+    CONFIG.OBJECT_STORAGE.WEB_VIDEOS.BUCKET_NAME
+  )
 }
 
 export async function generateHLSFilePresignedUrl (options: {
@@ -38,7 +42,10 @@ export async function generateHLSFilePresignedUrl (options: {
     downloadFilename
   })
 
-  return replaceByBaseUrl(url, CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS)
+  return applyReadBucketNameReplacement(
+    replaceByBaseUrl(url, CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS),
+    CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS.BUCKET_NAME
+  )
 }
 
 export async function generateUserExportPresignedUrl (options: {
@@ -53,7 +60,10 @@ export async function generateUserExportPresignedUrl (options: {
     downloadFilename
   })
 
-  return replaceByBaseUrl(url, CONFIG.OBJECT_STORAGE.USER_EXPORTS)
+  return applyReadBucketNameReplacement(
+    replaceByBaseUrl(url, CONFIG.OBJECT_STORAGE.USER_EXPORTS),
+    CONFIG.OBJECT_STORAGE.USER_EXPORTS.BUCKET_NAME
+  )
 }
 
 export async function generateOriginalFilePresignedUrl (options: {
@@ -68,7 +78,10 @@ export async function generateOriginalFilePresignedUrl (options: {
     downloadFilename
   })
 
-  return replaceByBaseUrl(url, CONFIG.OBJECT_STORAGE.ORIGINAL_VIDEO_FILES)
+  return applyReadBucketNameReplacement(
+    replaceByBaseUrl(url, CONFIG.OBJECT_STORAGE.ORIGINAL_VIDEO_FILES),
+    CONFIG.OBJECT_STORAGE.ORIGINAL_VIDEO_FILES.BUCKET_NAME
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -86,7 +99,7 @@ async function generatePresignedUrl (options: {
   const { getSignedUrl } = await import('@aws-sdk/s3-request-presigner')
 
   const command = new GetObjectCommand({
-    Bucket: bucket,
+    Bucket: getReadBucketNameForSigning(bucket),
     Key: key,
     ResponseContentDisposition: `attachment; filename="${encodeURI(downloadFilename)}"`
   })

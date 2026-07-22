@@ -4,6 +4,7 @@ import { CONFIG } from '@server/initializers/config.js'
 import { OBJECT_STORAGE_PROXY_PATHS } from '@server/initializers/constants.js'
 import { getClient, getReadClient, buildKey, lTags } from './shared/index.js'
 import { logger } from '@server/helpers/logger.js'
+import { applyReadBucketNameReplacement, getReadBucketNameForSigning } from './read-url.js'
 
 export type ObjectStoragePublicFileType = 'thumbnails' | 'storyboards' | 'web-videos' | 'streaming-playlists' | 'torrents' | 'captions'
 
@@ -89,7 +90,7 @@ export async function generatePresignedRedirect (options: {
     const { getSignedUrl } = await import('@aws-sdk/s3-request-presigner')
 
     const command = new GetObjectCommand({
-      Bucket: bucketInfo.BUCKET_NAME,
+      Bucket: getReadBucketNameForSigning(bucketInfo.BUCKET_NAME),
       Key: fullKey
     })
 
@@ -99,7 +100,7 @@ export async function generatePresignedRedirect (options: {
       { expiresIn: 3600 * CONFIG.OBJECT_STORAGE.PRESIGNED_PUBLIC_URLS_EXPIRATION_HOURS }
     )
 
-    return res.redirect(keepSignedQueryEncoded(presignedUrl))
+    return res.redirect(applyReadBucketNameReplacement(keepSignedQueryEncoded(presignedUrl), bucketInfo.BUCKET_NAME))
   } catch (err) {
     return res.status(500).json({ error: 'Failed to generate presigned URL' })
   }
@@ -118,7 +119,7 @@ export async function generatePresignedUrl (options: {
   const { getSignedUrl } = await import('@aws-sdk/s3-request-presigner')
 
   const command = new GetObjectCommand({
-    Bucket: bucketInfo.BUCKET_NAME,
+    Bucket: getReadBucketNameForSigning(bucketInfo.BUCKET_NAME),
     Key: fullKey
   })
 
@@ -128,7 +129,7 @@ export async function generatePresignedUrl (options: {
     { expiresIn: 3600 * CONFIG.OBJECT_STORAGE.PRESIGNED_PUBLIC_URLS_EXPIRATION_HOURS }
   )
 
-  return keepSignedQueryEncoded(signedUrl)
+  return applyReadBucketNameReplacement(keepSignedQueryEncoded(signedUrl), bucketInfo.BUCKET_NAME)
 }
 
 export async function getObjectContent (options: {
@@ -309,7 +310,7 @@ async function buildSegmentPresignedUrl (key: string, fileType: ObjectStoragePub
   const { getSignedUrl } = await import('@aws-sdk/s3-request-presigner')
 
   const command = new GetObjectCommand({
-    Bucket: bucketInfo.BUCKET_NAME,
+    Bucket: getReadBucketNameForSigning(bucketInfo.BUCKET_NAME),
     Key: fullKey
   })
 
@@ -319,7 +320,7 @@ async function buildSegmentPresignedUrl (key: string, fileType: ObjectStoragePub
     { expiresIn: 3600 * CONFIG.OBJECT_STORAGE.PRESIGNED_PUBLIC_URLS_EXPIRATION_HOURS }
   )
 
-  return keepSignedQueryEncoded(signedUrl)
+  return applyReadBucketNameReplacement(keepSignedQueryEncoded(signedUrl), bucketInfo.BUCKET_NAME)
 }
 
 function getM3U8BaseDir (key: string): string {

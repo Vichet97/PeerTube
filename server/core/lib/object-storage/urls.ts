@@ -4,6 +4,7 @@ import { OBJECT_STORAGE_PROXY_PATHS, WEBSERVER } from '@server/initializers/cons
 import { MVideoUUID } from '@server/types/models/index.js'
 import { buildKey, getEndpoint, getReadClient, getReadEndpoint, lTags } from './shared/index.js'
 import { ObjectStoragePublicFileType, generateProxyToken, keepSignedQueryEncoded } from './presigned-redirect.js'
+import { applyReadBucketNameReplacement, getReadBucketNameForSigning, getReadForcePathStyle } from './read-url.js'
 
 // ---------------------------------------------------------------------------
 
@@ -41,7 +42,7 @@ export async function buildObjectStoragePublicFileUrl (options: {
     return generateCachedPresignedUrlFromFileType(key, directFileType)
   }
 
-  return buildBaseUrl(bucket, 'read') + buildKey(key, bucket)
+  return applyReadBucketNameReplacement(buildBaseUrl(bucket, 'read') + buildKey(key, bucket), bucket.BUCKET_NAME)
 }
 
 // ---------------------------------------------------------------------------
@@ -136,7 +137,7 @@ async function generatePresignedUrlFromFileType (key: string, fileType: ObjectSt
   const { getSignedUrl } = await import('@aws-sdk/s3-request-presigner')
 
   const command = new GetObjectCommand({
-    Bucket: bucketInfo.BUCKET_NAME,
+    Bucket: getReadBucketNameForSigning(bucketInfo.BUCKET_NAME),
     Key: fullKey
   })
 
@@ -146,7 +147,7 @@ async function generatePresignedUrlFromFileType (key: string, fileType: ObjectSt
     { expiresIn: 3600 * CONFIG.OBJECT_STORAGE.PRESIGNED_PUBLIC_URLS_EXPIRATION_HOURS }
   )
 
-  return keepSignedQueryEncoded(signedUrl)
+  return applyReadBucketNameReplacement(keepSignedQueryEncoded(signedUrl), bucketInfo.BUCKET_NAME)
 }
 
 function getBucketInfoForFileType (fileType: ObjectStoragePublicFileType) {
@@ -206,7 +207,9 @@ function buildBaseUrl (bucketInfo: BucketInfo, endpointType: 'read' | 'write') {
   let baseUrlConfig = bucketInfo.BASE_URL
   if (baseUrlConfig && !baseUrlConfig.endsWith('/')) baseUrlConfig += '/'
 
-  if (CONFIG.OBJECT_STORAGE.FORCE_PATH_STYLE) {
+  if (endpointType === 'read'
+    ? getReadForcePathStyle()
+    : CONFIG.OBJECT_STORAGE.FORCE_PATH_STYLE) {
     const baseUrl = baseUrlConfig || `${endpointParsed.protocol}//${endpointParsed.host}/`
 
     return baseUrl + `${bucketInfo.BUCKET_NAME}/`

@@ -25,7 +25,13 @@ export const getServerActor = memoizee(async function () {
   return actor
 }, { promise: true })
 
-type ConfigPart = PickDeep<typeof CONFIG, 'OBJECT_STORAGE.STREAMING_PLAYLISTS' | 'OBJECT_STORAGE.READ_ENDPOINT'>
+type ConfigPart = PickDeep<
+  typeof CONFIG,
+  'OBJECT_STORAGE.STREAMING_PLAYLISTS' |
+  'OBJECT_STORAGE.READ_ENDPOINT' |
+  'OBJECT_STORAGE.READ_FORCE_PATH_STYLE' |
+  'OBJECT_STORAGE.REPLACE_READ_BUCKET_NAME'
+>
 
 @DefaultScope(() => ({
   include: [
@@ -94,7 +100,9 @@ export class ApplicationModel extends SequelizeModel<ApplicationModel> {
     const configPart = this.lastRunConfigPart || application.configPart
 
     return configPart?.OBJECT_STORAGE.STREAMING_PLAYLISTS.BASE_URL !== CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS.BASE_URL ||
-      configPart?.OBJECT_STORAGE.READ_ENDPOINT !== CONFIG.OBJECT_STORAGE.READ_ENDPOINT
+      configPart?.OBJECT_STORAGE.READ_ENDPOINT !== CONFIG.OBJECT_STORAGE.READ_ENDPOINT ||
+      configPart?.OBJECT_STORAGE.READ_FORCE_PATH_STYLE !== CONFIG.OBJECT_STORAGE.READ_FORCE_PATH_STYLE ||
+      configPart?.OBJECT_STORAGE.REPLACE_READ_BUCKET_NAME !== CONFIG.OBJECT_STORAGE.REPLACE_READ_BUCKET_NAME
   }
 
   static async updateNodeVersionsOrConfig () {
@@ -109,6 +117,8 @@ export class ApplicationModel extends SequelizeModel<ApplicationModel> {
     application.configPart = {
       OBJECT_STORAGE: {
         READ_ENDPOINT: CONFIG.OBJECT_STORAGE.READ_ENDPOINT,
+        READ_FORCE_PATH_STYLE: CONFIG.OBJECT_STORAGE.READ_FORCE_PATH_STYLE,
+        REPLACE_READ_BUCKET_NAME: CONFIG.OBJECT_STORAGE.REPLACE_READ_BUCKET_NAME,
         STREAMING_PLAYLISTS: CONFIG.OBJECT_STORAGE.STREAMING_PLAYLISTS
       }
     }

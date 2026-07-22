@@ -6,6 +6,7 @@ import { CONFIG } from '@server/initializers/config.js'
 import http from 'http'
 import https from 'https'
 import { lTags } from './logger.js'
+import { getReadForcePathStyle } from '../read-url.js'
 
 let writeS3ClientPromise: Promise<S3Client>
 let writeS3ClientResolved: S3Client
@@ -33,12 +34,13 @@ export function getClient () {
 
 export function getReadClient () {
   const endpoint = getReadEndpoint()
+  const forcePathStyle = getReadForcePathStyle()
 
-  if (endpoint === getEndpoint()) return getClient()
-  if (readS3ClientPromise !== undefined && readS3ClientEndpoint === endpoint) return readS3ClientPromise
+  if (endpoint === getEndpoint() && forcePathStyle === CONFIG.OBJECT_STORAGE.FORCE_PATH_STYLE) return getClient()
+  if (readS3ClientPromise !== undefined && readS3ClientEndpoint === `${endpoint}|${forcePathStyle}`) return readS3ClientPromise
 
-  readS3ClientEndpoint = endpoint
-  readS3ClientPromise = buildClient(endpoint)
+  readS3ClientEndpoint = `${endpoint}|${forcePathStyle}`
+  readS3ClientPromise = buildClient(endpoint, forcePathStyle)
     .then(client => client)
 
   return readS3ClientPromise
@@ -64,7 +66,7 @@ function normalizeEndpoint (endpointConfig: string) {
     : 'https://' + endpointConfig
 }
 
-async function buildClient (endpoint: string) {
+async function buildClient (endpoint: string, forcePathStyle = CONFIG.OBJECT_STORAGE.FORCE_PATH_STYLE) {
   const OBJECT_STORAGE = CONFIG.OBJECT_STORAGE
 
   const { S3Client } = await import('@aws-sdk/client-s3')
@@ -82,7 +84,7 @@ async function buildClient (endpoint: string) {
       : undefined,
     requestHandler,
     maxAttempts: CONFIG.OBJECT_STORAGE.MAX_REQUEST_ATTEMPTS,
-    forcePathStyle: OBJECT_STORAGE.FORCE_PATH_STYLE,
+    forcePathStyle,
 
     // Default behaviour has incompatibilities with some S3 providers: https://github.com/aws/aws-sdk-js-v3/issues/6810
     requestChecksumCalculation: 'WHEN_REQUIRED',

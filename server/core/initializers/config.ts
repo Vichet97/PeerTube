@@ -287,6 +287,12 @@ const CONFIG = {
     READ_ENDPOINT: config.has('object_storage.read_endpoint')
       ? config.get<string>('object_storage.read_endpoint')
       : undefined,
+    READ_FORCE_PATH_STYLE: config.has('object_storage.read_force_path_style')
+      ? config.get<boolean>('object_storage.read_force_path_style')
+      : undefined,
+    REPLACE_READ_BUCKET_NAME: config.has('object_storage.replace_read_bucket_name')
+      ? config.get<string>('object_storage.replace_read_bucket_name')
+      : undefined,
     REGION: config.get<string>('object_storage.region'),
     FORCE_PATH_STYLE: config.get<boolean>('object_storage.force_path_style'),
     USE_PRESIGNED_PUBLIC_URLS: config.get<boolean>('object_storage.use_presigned_public_urls'),
