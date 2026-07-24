@@ -274,7 +274,9 @@ async function reconcileStaleTranscoding (options: {
 
   const job = await JobQueue.Instance.createJob({
     type: 'transcoding-job-builder',
-    customJobId: `reconcile-transcoding:${video.uuid}`,
+    // BullMQ reserves ':' for its internal Redis key format, so custom IDs
+    // must use a safe separator.
+    customJobId: `reconcile-transcoding-${video.uuid}`,
     payload: {
       videoUUID: video.uuid,
       optimizeJob: { isNewVideo: false }

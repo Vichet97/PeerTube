@@ -198,6 +198,7 @@ describe('Test jobs resetter', function () {
 
   function seedAndReadStalePipelineCounters (options: {
     videoUUID: string
+    state?: 'published' | 'to-transcode'
     readOnly?: boolean
   }) {
     const seedScript = `
@@ -215,7 +216,9 @@ describe('Test jobs resetter', function () {
       if (!video) throw new Error('Seed video was not found')
 
       if (!input.readOnly) {
-        video.state = VideoState.PUBLISHED
+        video.state = input.state === 'to-transcode'
+          ? VideoState.TO_TRANSCODE
+          : VideoState.PUBLISHED
         video.waitTranscoding = false
         await video.save()
         await VideoJobInfoModel.increaseOrCreate(video.uuid, 'pendingMove', 2)
@@ -312,7 +315,7 @@ describe('Test jobs resetter', function () {
       expectedStatus: 200
     }))
 
-    const before = seedAndReadStalePipelineCounters({ videoUUID: created.uuid })
+    const before = seedAndReadStalePipelineCounters({ videoUUID: created.uuid, state: 'to-transcode' })
     expect(before).to.deep.equal({ pendingMove: 2, pendingTranscode: 3, pendingTranscription: 1 })
 
     const startResponse = await withLocalApiRetry('starting video pipeline reconciliation', () => makePostBodyRequest({
@@ -326,6 +329,7 @@ describe('Test jobs resetter', function () {
     const status = await waitForVideoPipelineReconciliationStatus()
     expect(status.state, JSON.stringify(status)).to.equal('completed')
     expect(status.result?.countersCleared).to.be.at.least(6)
+    expect(status.result?.jobsRecreated).to.be.at.least(1)
 
     const video = await waitForVideo(created.uuid)
     expect(video.uuid).to.equal(created.uuid)
