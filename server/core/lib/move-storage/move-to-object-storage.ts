@@ -86,6 +86,13 @@ type RetainedLocalFilesCleanupProgress = {
   skippedMissing: number
 }
 
+type RetainedLocalFilesCleanupContext = {
+  seenCleanupKeys: Set<string>
+  pendingLocalFileConsumerVideoUUIDs: Set<string>
+  pipelinePendingByVideoUUID: Map<string, Promise<boolean>>
+  deferredVideoUUIDs: Set<string>
+}
+
 export async function maybeTransitionAfterObjectStorageMove (options: {
   videoUUID: string
   moveVideoState: {
@@ -1394,17 +1401,24 @@ async function performRetainedLocalFilesCleanupAfterRestart () {
     scheduled: 0,
     skippedMissing: 0
   }
-  const seenCleanupKeys = new Set<string>()
+  const context: RetainedLocalFilesCleanupContext = {
+    seenCleanupKeys: new Set<string>(),
+    pendingLocalFileConsumerVideoUUIDs: new Set<string>(),
+    pipelinePendingByVideoUUID: new Map<string, Promise<boolean>>(),
+    deferredVideoUUIDs: new Set<string>()
+  }
 
   await emitRetainedLocalFilesCleanupProgress(counts)
 
-  await addRetainedWebVideoFileCandidates(counts, seenCleanupKeys)
-  await addRetainedHLSFileCandidates(counts, seenCleanupKeys)
-  await addRetainedPlaylistFileCandidates(counts, seenCleanupKeys)
-  await addRetainedOriginalFileCandidates(counts, seenCleanupKeys)
-  await addRetainedCaptionFileCandidates(counts, seenCleanupKeys)
-  await addRetainedThumbnailFileCandidates(counts, seenCleanupKeys)
-  await addRetainedStoryboardFileCandidates(counts, seenCleanupKeys)
+  context.pendingLocalFileConsumerVideoUUIDs = await JobQueue.Instance.listVideoUUIDsWithPendingLocalFileConsumerJobs()
+
+  await addRetainedWebVideoFileCandidates(counts, context)
+  await addRetainedHLSFileCandidates(counts, context)
+  await addRetainedPlaylistFileCandidates(counts, context)
+  await addRetainedOriginalFileCandidates(counts, context)
+  await addRetainedCaptionFileCandidates(counts, context)
+  await addRetainedThumbnailFileCandidates(counts, context)
+  await addRetainedStoryboardFileCandidates(counts, context)
 
   counts.currentPhase = 'completed'
   await emitRetainedLocalFilesCleanupProgress(counts)
@@ -1421,6 +1435,14 @@ async function performRetainedLocalFilesCleanupAfterRestart () {
     )
   }
 
+  if (context.deferredVideoUUIDs.size !== 0) {
+    logger.info(
+      'Deferred retained local file cleanup for %d video(s) because pipeline counters or local file consumer jobs are still pending.',
+      context.deferredVideoUUIDs.size,
+      lTagsBase()
+    )
+  }
+
   return {
     scheduled: counts.scheduled,
     skippedMissing: counts.skippedMissing
@@ -1429,7 +1451,7 @@ async function performRetainedLocalFilesCleanupAfterRestart () {
 
 async function addRetainedWebVideoFileCandidates (
   counts: RetainedLocalFilesCleanupProgress,
-  seenCleanupKeys: Set<string>
+  context: RetainedLocalFilesCleanupContext
 ) {
   await processRetainedLocalCandidatesInBatches({
     currentPhase: 'web-videos',
@@ -1449,7 +1471,7 @@ async function addRetainedWebVideoFileCandidates (
       }
     ],
     counts,
-    seenCleanupKeys,
+    context,
     buildCandidates: (file: any) => {
       const video = file.Video
       if (!video?.uuid) return []
@@ -1471,7 +1493,7 @@ async function addRetainedWebVideoFileCandidates (
 
 async function addRetainedHLSFileCandidates (
   counts: RetainedLocalFilesCleanupProgress,
-  seenCleanupKeys: Set<string>
+  context: RetainedLocalFilesCleanupContext
 ) {
   await processRetainedLocalCandidatesInBatches({
     currentPhase: 'hls-files',
@@ -1498,7 +1520,7 @@ async function addRetainedHLSFileCandidates (
       }
     ],
     counts,
-    seenCleanupKeys,
+    context,
     buildCandidates: (file: any) => {
       const playlist = file.VideoStreamingPlaylist
       const video = playlist?.Video
@@ -1528,7 +1550,7 @@ async function addRetainedHLSFileCandidates (
 
 async function addRetainedPlaylistFileCandidates (
   counts: RetainedLocalFilesCleanupProgress,
-  seenCleanupKeys: Set<string>
+  context: RetainedLocalFilesCleanupContext
 ) {
   await processRetainedLocalCandidatesInBatches({
     currentPhase: 'playlist-files',
@@ -1547,7 +1569,7 @@ async function addRetainedPlaylistFileCandidates (
       }
     ],
     counts,
-    seenCleanupKeys,
+    context,
     buildCandidates: (playlist: any) => {
       const video = playlist.Video
       if (!video?.uuid) return []
@@ -1578,7 +1600,7 @@ async function addRetainedPlaylistFileCandidates (
 
 async function addRetainedOriginalFileCandidates (
   counts: RetainedLocalFilesCleanupProgress,
-  seenCleanupKeys: Set<string>
+  context: RetainedLocalFilesCleanupContext
 ) {
   await processRetainedLocalCandidatesInBatches({
     currentPhase: 'original-files',
@@ -1597,7 +1619,7 @@ async function addRetainedOriginalFileCandidates (
       }
     ],
     counts,
-    seenCleanupKeys,
+    context,
     buildCandidates: (source: any) => {
       const video = source.Video
       if (!video?.uuid) return []
@@ -1616,7 +1638,7 @@ async function addRetainedOriginalFileCandidates (
 
 async function addRetainedCaptionFileCandidates (
   counts: RetainedLocalFilesCleanupProgress,
-  seenCleanupKeys: Set<string>
+  context: RetainedLocalFilesCleanupContext
 ) {
   await processRetainedLocalCandidatesInBatches({
     currentPhase: 'captions',
@@ -1636,7 +1658,7 @@ async function addRetainedCaptionFileCandidates (
       }
     ],
     counts,
-    seenCleanupKeys,
+    context,
     buildCandidates: (caption: any) => {
       const video = caption.Video
       if (!video?.uuid) return []
@@ -1666,7 +1688,7 @@ async function addRetainedCaptionFileCandidates (
 
 async function addRetainedThumbnailFileCandidates (
   counts: RetainedLocalFilesCleanupProgress,
-  seenCleanupKeys: Set<string>
+  context: RetainedLocalFilesCleanupContext
 ) {
   await processRetainedLocalCandidatesInBatches({
     currentPhase: 'thumbnails',
@@ -1687,7 +1709,7 @@ async function addRetainedThumbnailFileCandidates (
       }
     ],
     counts,
-    seenCleanupKeys,
+    context,
     buildCandidates: (thumbnail: any) => {
       const video = thumbnail.Video
       if (!video?.uuid) return []
@@ -1706,7 +1728,7 @@ async function addRetainedThumbnailFileCandidates (
 
 async function addRetainedStoryboardFileCandidates (
   counts: RetainedLocalFilesCleanupProgress,
-  seenCleanupKeys: Set<string>
+  context: RetainedLocalFilesCleanupContext
 ) {
   await processRetainedLocalCandidatesInBatches({
     currentPhase: 'storyboards',
@@ -1726,7 +1748,7 @@ async function addRetainedStoryboardFileCandidates (
       }
     ],
     counts,
-    seenCleanupKeys,
+    context,
     buildCandidates: (storyboard: any) => {
       const video = storyboard.Video
       if (!video?.uuid) return []
@@ -1765,7 +1787,7 @@ async function processRetainedLocalCandidatesInBatches (options: {
   where: Record<string, any>
   include: any[]
   counts: RetainedLocalFilesCleanupProgress
-  seenCleanupKeys: Set<string>
+  context: RetainedLocalFilesCleanupContext
   buildCandidates: (row: any) => RetainedLocalFileCleanupCandidate[]
 }) {
   let lastId = 0
@@ -1793,7 +1815,7 @@ async function processRetainedLocalCandidatesInBatches (options: {
     await processRetainedLocalFileCleanupCandidateBatch({
       candidates,
       counts: options.counts,
-      seenCleanupKeys: options.seenCleanupKeys
+      context: options.context
     })
 
     options.counts.processedBatches++
@@ -1806,9 +1828,9 @@ async function processRetainedLocalCandidatesInBatches (options: {
 async function processRetainedLocalFileCleanupCandidateBatch (options: {
   candidates: RetainedLocalFileCleanupCandidate[]
   counts: RetainedLocalFilesCleanupProgress
-  seenCleanupKeys: Set<string>
+  context: RetainedLocalFilesCleanupContext
 }) {
-  const { candidates, counts, seenCleanupKeys } = options
+  const { candidates, counts, context } = options
   const uniqueCandidates: RetainedLocalFileCleanupCandidate[] = []
 
   for (const candidate of candidates) {
@@ -1817,9 +1839,9 @@ async function processRetainedLocalFileCleanupCandidateBatch (options: {
     if (!candidate.path || !candidate.videoUUID || !candidate.objectStorageKey) continue
 
     const cleanupKey = `${candidate.videoUUID}:${resolve(candidate.path)}`
-    if (seenCleanupKeys.has(cleanupKey)) continue
+    if (context.seenCleanupKeys.has(cleanupKey)) continue
 
-    seenCleanupKeys.add(cleanupKey)
+    context.seenCleanupKeys.add(cleanupKey)
     counts.uniqueCandidates++
     uniqueCandidates.push(candidate)
   }
@@ -1834,6 +1856,16 @@ async function processRetainedLocalFileCleanupCandidateBatch (options: {
       return
     }
 
+    if (await shouldDeferRetainedLocalFileCleanup(candidate.videoUUID, context)) {
+      context.deferredVideoUUIDs.add(candidate.videoUUID)
+      return
+    }
+
+    if (delayMs === 0) {
+      if (await removeRetainedLocalFileCandidateNow(candidate)) counts.scheduled++
+      return
+    }
+
     const scheduled = scheduleLocalFileRemovalAfterActiveFileWork({
       path: candidate.path,
       videoUUID: candidate.videoUUID,
@@ -1842,6 +1874,66 @@ async function processRetainedLocalFileCleanupCandidateBatch (options: {
 
     if (scheduled) counts.scheduled++
   }))
+}
+
+async function shouldDeferRetainedLocalFileCleanup (
+  videoUUID: string,
+  context: RetainedLocalFilesCleanupContext
+) {
+  if (context.pendingLocalFileConsumerVideoUUIDs.has(videoUUID)) return true
+
+  let pendingPromise = context.pipelinePendingByVideoUUID.get(videoUUID)
+  if (pendingPromise === undefined) {
+    pendingPromise = VideoJobInfoModel.loadByUUID(videoUUID)
+      .then(info => !!info && (
+        info.pendingMove > 0 ||
+        info.pendingTranscode > 0 ||
+        info.pendingTranscription > 0
+      ))
+
+    context.pipelinePendingByVideoUUID.set(videoUUID, pendingPromise)
+  }
+
+  return pendingPromise
+}
+
+async function removeRetainedLocalFileCandidateNow (candidate: RetainedLocalFileCleanupCandidate) {
+  const cleanupKey = `${candidate.videoUUID}:${resolve(candidate.path)}`
+  if (scheduledLocalFileRemovals.has(cleanupKey)) return false
+
+  scheduledLocalFileRemovals.add(cleanupKey)
+  let releaser: (() => void) | undefined
+  let retryRemoval = false
+  try {
+    releaser = await VideoPathManager.Instance.lockFiles(candidate.videoUUID)
+    try {
+      await removeLocalPathNow(candidate.path)
+    } catch (err) {
+      if (!isRetryableLocalRemovalError(err)) throw err
+
+      retryRemoval = true
+      logger.warn(
+        'Cannot remove retained local file %s yet (%s). Will retry after delay.',
+        candidate.path,
+        (err as { code?: string }).code,
+        { err, ...lTagsBase(candidate.videoUUID) }
+      )
+    }
+  } finally {
+    releaser?.()
+    scheduledLocalFileRemovals.delete(cleanupKey)
+  }
+
+  if (retryRemoval) {
+    return scheduleLocalFileRemovalAfterActiveFileWork({
+      path: candidate.path,
+      videoUUID: candidate.videoUUID,
+      delayMs: LOCAL_CLEANUP_RETRY_DELAY_MS,
+      waitForPipelineCompletion: false
+    })
+  }
+
+  return true
 }
 
 async function emitRetainedLocalFilesCleanupProgress (progress: RetainedLocalFilesCleanupProgress) {

@@ -95,7 +95,20 @@ import { processVideosViewsStats } from './handlers/video-views-stats.js'
 import { Op } from 'sequelize'
 import { Redis as IORedis } from 'ioredis'
 
-const TRANSCODING_PROGRESS_CACHE_TTL_MS = 1000
+const TRANSCODING_PROGRESS_CACHE_TTL_MS = 5000
+
+const LOCAL_FILE_CONSUMER_JOB_TYPES: JobType[] = [
+  'transcoding-job-builder',
+  'video-transcoding',
+  'video-transcription',
+  'generate-video-storyboard',
+  'video-studio-edition',
+  'move-to-object-storage',
+  'move-video-file-to-object-storage',
+  'move-hls-playlist-to-object-storage',
+  'move-thumbnail-to-object-storage',
+  'move-caption-to-object-storage'
+]
 
 export type CreateJobArgument =
   | { type: 'activitypub-http-broadcast', payload: ActivitypubHttpBroadcastPayload }
@@ -259,6 +272,7 @@ class JobQueue {
     expiresAt: number
     values: Map<string, number>
   }
+  private transcodingProgressRefreshPromise?: Promise<Map<string, number>>
 
   private constructor () {
   }
@@ -721,19 +735,7 @@ class JobQueue {
   }
 
   async hasPendingOrActiveLocalFileConsumerJob (videoUUID: string): Promise<boolean> {
-    const jobTypes: JobType[] = [
-      'transcoding-job-builder',
-      'video-transcoding',
-      'video-transcription',
-      'generate-video-storyboard',
-      'video-studio-edition',
-      'move-to-object-storage',
-      'move-video-file-to-object-storage',
-      'move-hls-playlist-to-object-storage',
-      'move-thumbnail-to-object-storage'
-    ]
-
-    for (const jobType of jobTypes) {
+    for (const jobType of LOCAL_FILE_CONSUMER_JOB_TYPES) {
       if (await this.hasPendingOrActiveJob(jobType, videoUUID)) return true
     }
 
@@ -1313,6 +1315,33 @@ class JobQueue {
       return this.transcodingProgressCache.values
     }
 
+    if (this.transcodingProgressCache) {
+      void this.refreshTranscodingProgressSnapshot()
+        .catch(err => logger.warn('Cannot refresh transcoding progress snapshot.', { err }))
+
+      return this.transcodingProgressCache.values
+    }
+
+    return this.refreshTranscodingProgressSnapshot()
+  }
+
+  private async refreshTranscodingProgressSnapshot () {
+    if (this.transcodingProgressRefreshPromise !== undefined) return this.transcodingProgressRefreshPromise
+
+    const promise = this.buildTranscodingProgressSnapshot()
+    this.transcodingProgressRefreshPromise = promise
+
+    try {
+      return await promise
+    } finally {
+      if (this.transcodingProgressRefreshPromise === promise) {
+        this.transcodingProgressRefreshPromise = undefined
+      }
+    }
+  }
+
+  private async buildTranscodingProgressSnapshot () {
+
     const states: ('waiting' | 'delayed' | 'prioritized' | 'waiting-children' | 'active')[] = [
       'waiting',
       'delayed',
@@ -1323,9 +1352,13 @@ class JobQueue {
     const values = new Map<string, number>()
 
     const queue = this.queues['video-transcoding']
-    if (queue) {
-      const jobs = await queue.getJobs(states, 0, 10000, true)
+    const builderQueue = this.queues['transcoding-job-builder']
+    const [ jobs, builderJobs ] = await Promise.all([
+      queue ? queue.getJobs(states, 0, 10000, true) : Promise.resolve([]),
+      builderQueue ? builderQueue.getJobs(states, 0, 10000, true) : Promise.resolve([])
+    ])
 
+    if (queue) {
       const progressesByUUID = new Map<string, number[]>()
       for (const job of jobs) {
         const uuid = (job.data as { videoUUID?: string }).videoUUID
@@ -1348,9 +1381,7 @@ class JobQueue {
       }
     }
 
-    const builderQueue = this.queues['transcoding-job-builder']
     if (builderQueue) {
-      const builderJobs = await builderQueue.getJobs(states, 0, 10000, true)
       for (const job of builderJobs) {
         const uuid = (job.data as { videoUUID?: string }).videoUUID
         if (uuid && !values.has(uuid)) values.set(uuid, 0)
@@ -1373,21 +1404,31 @@ class JobQueue {
     return this.listVideoUUIDsWithPendingVideoJobs([ 'video-transcription' ])
   }
 
+  async listVideoUUIDsWithPendingLocalFileConsumerJobs (): Promise<Set<string>> {
+    return this.listVideoUUIDsWithPendingVideoJobs(LOCAL_FILE_CONSUMER_JOB_TYPES)
+  }
+
   private async listVideoUUIDsWithPendingVideoJobs (queueNames: JobType[]): Promise<Set<string>> {
-    const states = [ 'waiting', 'delayed', 'prioritized', 'waiting-children', 'active' ] as const
+    const states: ('waiting' | 'delayed' | 'prioritized' | 'waiting-children' | 'active')[] = [
+      'waiting',
+      'delayed',
+      'prioritized',
+      'waiting-children',
+      'active'
+    ]
     const uuids = new Set<string>()
 
-    for (const queueName of queueNames) {
+    const jobGroups = await Promise.all(queueNames.map(async queueName => {
       const queue = this.queues[queueName]
-      if (!queue) continue
+      if (!queue) return []
 
-      for (const state of states) {
-        const jobs = await queue.getJobs([ state ], 0, 10000, true)
+      return queue.getJobs(states, 0, 10000, true)
+    }))
 
-        for (const job of jobs) {
-          const videoUUID = (job.data as { videoUUID?: string })?.videoUUID
-          if (videoUUID) uuids.add(videoUUID)
-        }
+    for (const jobs of jobGroups) {
+      for (const job of jobs) {
+        const videoUUID = (job?.data as { videoUUID?: string })?.videoUUID
+        if (videoUUID) uuids.add(videoUUID)
       }
     }
 

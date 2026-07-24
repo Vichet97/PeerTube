@@ -8,6 +8,7 @@ import { join } from 'path'
 import { FileStorage, VideoState } from '@peertube/peertube-models'
 import {
   buildRetainedLocalFileCleanupDelay,
+  cleanupRetainedLocalFilesAfterRestart,
   maybeTransitionAfterObjectStorageMove,
   removeLocalFileAfterMove,
   shouldWaitForPipelineCompletionBeforeDeletingMovedHLS
@@ -19,6 +20,12 @@ import { VideoModel } from '@peertube/peertube-server/core/models/video/video.js
 import { buildCaptionMoveJob, createPendingMoveJobs } from '@peertube/peertube-server/core/lib/video-jobs.js'
 import { JobQueue } from '@peertube/peertube-server/core/lib/job-queue/index.js'
 import { VideoJobInfoModel } from '@peertube/peertube-server/core/models/video/video-job-info.js'
+import { VideoFileModel } from '@peertube/peertube-server/core/models/video/video-file.js'
+import { VideoStreamingPlaylistModel } from '@peertube/peertube-server/core/models/video/video-streaming-playlist.js'
+import { VideoSourceModel } from '@peertube/peertube-server/core/models/video/video-source.js'
+import { VideoCaptionModel } from '@peertube/peertube-server/core/models/video/video-caption.js'
+import { ThumbnailModel } from '@peertube/peertube-server/core/models/video/thumbnail.js'
+import { StoryboardModel } from '@peertube/peertube-server/core/models/video/storyboard.js'
 
 describe('move-to-object-storage', function () {
   it('should skip stale move completion when the video is back in TO_TRANSCODE', async function () {
@@ -176,6 +183,92 @@ describe('move-to-object-storage', function () {
     })).to.equal(0)
   })
 
+  it('should defer restart cleanup once per video instead of creating per-file polling loops', async function () {
+    this.timeout(5_000)
+
+    const originalEnabled = CONFIG.OBJECT_STORAGE.ENABLED
+    const originalMoveFileDelay = CONFIG.OBJECT_STORAGE.MOVE_FILE_DELAY
+    const originalListPendingConsumers = JobQueue.Instance.listVideoUUIDsWithPendingLocalFileConsumerJobs
+    const originalLoadByUUID = VideoJobInfoModel.loadByUUID
+    const originalGetFSVideoFileOutputPath = VideoPathManager.Instance.getFSVideoFileOutputPath
+    const modelClasses = [
+      VideoFileModel,
+      VideoStreamingPlaylistModel,
+      VideoSourceModel,
+      VideoCaptionModel,
+      ThumbnailModel,
+      StoryboardModel,
+      VideoModel
+    ] as any[]
+    const originalUnscoped = new Map<any, any>(modelClasses.map(model => [ model, model.unscoped ]))
+
+    const videoUUID = 'video-uuid-restart-cleanup-pending'
+    const tmpDirectory = await mkdtemp(join(tmpdir(), 'peertube-retained-restart-'))
+    const path = join(tmpDirectory, 'video.mp4')
+    let videoFileBatchReturned = false
+    let loadCount = 0
+
+    CONFIG.OBJECT_STORAGE.ENABLED = true
+    CONFIG.OBJECT_STORAGE.MOVE_FILE_DELAY = 20
+    JobQueue.Instance.listVideoUUIDsWithPendingLocalFileConsumerJobs =
+      (() => Promise.resolve(new Set<string>())) as typeof JobQueue.Instance.listVideoUUIDsWithPendingLocalFileConsumerJobs
+    VideoJobInfoModel.loadByUUID = (() => {
+      loadCount++
+
+      return Promise.resolve({
+        pendingMove: 0,
+        pendingTranscode: 1,
+        pendingTranscription: 0
+      } as any)
+    }) as typeof VideoJobInfoModel.loadByUUID
+    VideoPathManager.Instance.getFSVideoFileOutputPath =
+      (() => path) as typeof VideoPathManager.Instance.getFSVideoFileOutputPath
+
+    VideoFileModel.unscoped = (() => ({
+      findAll: (options: any) => {
+        if (options.where.videoStreamingPlaylistId) return Promise.resolve([])
+        if (videoFileBatchReturned) return Promise.resolve([])
+
+        videoFileBatchReturned = true
+        return Promise.resolve([ {
+          id: 1,
+          filename: 'video.mp4',
+          torrentFilename: null,
+          videoId: 1,
+          videoStreamingPlaylistId: null,
+          Video: { id: 1, uuid: videoUUID, privacy: 1 }
+        } ])
+      }
+    })) as typeof VideoFileModel.unscoped
+
+    for (const model of modelClasses.filter(model => model !== VideoFileModel)) {
+      model.unscoped = () => ({ findAll: () => Promise.resolve([]) })
+    }
+
+    try {
+      await writeFile(path, 'test')
+
+      const result = await cleanupRetainedLocalFilesAfterRestart()
+
+      expect(result.scheduled).to.equal(0)
+      expect(existsSync(path)).to.be.true
+      expect(loadCount).to.equal(1)
+
+      await new Promise(resolve => setTimeout(resolve, 100))
+      expect(loadCount).to.equal(1)
+    } finally {
+      CONFIG.OBJECT_STORAGE.ENABLED = originalEnabled
+      CONFIG.OBJECT_STORAGE.MOVE_FILE_DELAY = originalMoveFileDelay
+      JobQueue.Instance.listVideoUUIDsWithPendingLocalFileConsumerJobs = originalListPendingConsumers
+      VideoJobInfoModel.loadByUUID = originalLoadByUUID
+      VideoPathManager.Instance.getFSVideoFileOutputPath = originalGetFSVideoFileOutputPath
+
+      for (const [ model, unscoped ] of originalUnscoped) model.unscoped = unscoped
+
+      await remove(tmpDirectory).catch(() => {})
+    }
+  })
+
   it('should keep only HLS seed files until the rest of the pipeline completes', function () {
     const maxVideoResolution = 1080
 
@@ -280,7 +373,6 @@ describe('move-to-object-storage', function () {
       await new Promise(resolve => setTimeout(resolve, 500))
       expect(existsSync(path)).to.be.true
     } finally {
-      expect(existsSync(path)).to.be.false
       releaser()
 
       CONFIG.OBJECT_STORAGE.KEEP_LOCAL_FILE_AFTER_MOVE = originalKeepLocalFileAfterMove
