@@ -1,5 +1,6 @@
 import { VideoTranscriptionPayload } from '@peertube/peertube-models'
 import { generateSubtitle } from '@server/lib/video-captions.js'
+import { VideoJobInfoModel } from '@server/models/video/video-job-info.js'
 import { Job } from 'bullmq'
 import { logger, loggerTagsFactory } from '../../../helpers/logger.js'
 import { VideoModel } from '../../../models/video/video.js'
@@ -13,9 +14,30 @@ export async function processVideoTranscription (job: Job) {
 
   const video = await VideoModel.load(payload.videoUUID)
   if (!video) {
-    logger.info('Transcription job %s cancelled: video %s does not exist (video was deleted).', job.id, payload.videoUUID, lTags(payload.videoUUID))
+    logger.info(
+      'Transcription job %s cancelled: video %s does not exist (video was deleted).',
+      job.id,
+      payload.videoUUID,
+      lTags(payload.videoUUID)
+    )
     throw new Error('Video was deleted - transcoding job cancelled')
   }
 
   return generateSubtitle({ video })
+}
+
+export async function onVideoTranscriptionFailure (job: Job, err: any) {
+  const maxAttempts = job.opts?.attempts ?? 1
+  if (job.attemptsMade < maxAttempts) return
+
+  const payload = job.data as VideoTranscriptionPayload
+  if (!payload.videoUUID) return
+
+  const pending = await VideoJobInfoModel.decrease(payload.videoUUID, 'pendingTranscription')
+  logger.warn(
+    'Final transcription failure for video %s decremented pendingTranscription to %d.',
+    payload.videoUUID,
+    pending,
+    { err, ...lTags(payload.videoUUID) }
+  )
 }

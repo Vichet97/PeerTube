@@ -159,8 +159,21 @@ export abstract class AbstractJobHandler<C, U extends RunnerJobUpdatePayload, S 
     } catch (err) {
       logger.error('Cannot complete runner job', { err, ...this.lTags(runnerJob.id, runnerJob.type) })
 
+      try {
+        await this.specificError({
+          runnerJob,
+          message: err instanceof Error ? err.message : String(err),
+          nextState: RunnerJobState.ERRORED
+        })
+      } catch (cleanupErr) {
+        logger.error('Cannot apply terminal cleanup after runner completion failure', {
+          err: cleanupErr,
+          ...this.lTags(runnerJob.id, runnerJob.type)
+        })
+      }
+
       runnerJob.state = RunnerJobState.ERRORED
-      runnerJob.error = err.message
+      runnerJob.error = err instanceof Error ? err.message : String(err)
     }
 
     runnerJob.progress = null

@@ -146,4 +146,50 @@ export class VideoJobInfoModel extends SequelizeModel<VideoJobInfoModel> {
       options
     )
   }
+
+  /**
+   * Atomically replace pipeline counters only when they still match the
+   * snapshot inspected by a reconciler. Queue state lives in Redis, so this
+   * compare-and-set prevents a concurrently-created job from being erased by
+   * a stale database repair.
+   */
+  static async replaceCountersIfUnchanged (options: {
+    videoUUID: string
+    expected: Record<VideoJobInfoColumnType, number>
+    next: Record<VideoJobInfoColumnType, number>
+  }): Promise<boolean> {
+    const { videoUUID, expected, next } = options
+    const result = await VideoJobInfoModel.sequelize.query(
+      `
+        UPDATE "videoJobInfo"
+        SET
+          "pendingMove" = $nextPendingMove,
+          "pendingTranscode" = $nextPendingTranscode,
+          "pendingTranscription" = $nextPendingTranscription,
+          "updatedAt" = NOW()
+        FROM "video"
+        WHERE
+          "video"."id" = "videoJobInfo"."videoId"
+          AND "video"."uuid" = $videoUUID
+          AND "videoJobInfo"."pendingMove" = $expectedPendingMove
+          AND "videoJobInfo"."pendingTranscode" = $expectedPendingTranscode
+          AND "videoJobInfo"."pendingTranscription" = $expectedPendingTranscription
+        RETURNING "videoJobInfo"."videoId";
+      `,
+      {
+        type: QueryTypes.SELECT,
+        bind: {
+          videoUUID,
+          expectedPendingMove: expected.pendingMove,
+          expectedPendingTranscode: expected.pendingTranscode,
+          expectedPendingTranscription: expected.pendingTranscription,
+          nextPendingMove: next.pendingMove,
+          nextPendingTranscode: next.pendingTranscode,
+          nextPendingTranscription: next.pendingTranscription
+        }
+      }
+    )
+
+    return result.length !== 0
+  }
 }

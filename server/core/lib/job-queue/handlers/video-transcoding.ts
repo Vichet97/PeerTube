@@ -54,9 +54,6 @@ async function processVideoTranscoding (job: Job) {
   const handler = handlers[payload.type]
 
   if (!handler) {
-    await moveToFailedTranscodingState(video)
-    await VideoJobInfoModel.decrease(video.uuid, 'pendingTranscode')
-
     throw new Error('Cannot find transcoding handler for ' + payload.type)
   }
 
@@ -75,9 +72,6 @@ async function processVideoTranscoding (job: Job) {
       throw new Error('Video was deleted - transcoding job cancelled', { cause: error })
     }
 
-    await moveToFailedTranscodingState(videoStillExists)
-    await VideoJobInfoModel.decrease(video.uuid, 'pendingTranscode')
-
     throw error
   }
 
@@ -88,6 +82,24 @@ async function processVideoTranscoding (job: Job) {
 
 export {
   processVideoTranscoding
+}
+
+export async function onVideoTranscodingFailure (job: Job, err: any) {
+  const maxAttempts = job.opts?.attempts ?? 1
+  if (job.attemptsMade < maxAttempts) return
+
+  const payload = job.data as VideoTranscodingPayload
+  const video = await VideoModel.loadFull(payload.videoUUID)
+  if (!video) return
+
+  await moveToFailedTranscodingState(video)
+  const pending = await VideoJobInfoModel.decrease(video.uuid, 'pendingTranscode')
+  logger.warn(
+    'Final transcoding failure for video %s decremented pendingTranscode to %d.',
+    video.uuid,
+    pending,
+    { err, ...lTags(video.uuid) }
+  )
 }
 
 // ---------------------------------------------------------------------------

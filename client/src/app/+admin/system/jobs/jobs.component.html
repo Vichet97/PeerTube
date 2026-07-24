@@ -102,6 +102,13 @@
         ></my-button>
         <my-button
           i18n-label
+          label="Reconcile video pipeline"
+          icon="refresh"
+          (click)="reconcileVideoPipeline()"
+          [disabled]="reconcilingVideoPipeline"
+        ></my-button>
+        <my-button
+          i18n-label
           label="Reset video system state"
           icon="refresh"
           (click)="recheckVideosStatus()"

@@ -38,13 +38,19 @@ async function processTranscodingJobBuilder (job: Job) {
   }
 
   for (const job of (payload.jobs || [])) {
-    await JobQueue.Instance.createJob(job)
+    const createdJob = await JobQueue.Instance.createJob(job)
+    if (!createdJob) {
+      throw new Error(`Cannot queue transcoding child job for video ${payload.videoUUID}`)
+    }
 
     await VideoJobInfoModel.increaseOrCreate(payload.videoUUID, 'pendingTranscode')
   }
 
   for (const sequentialJobs of (payload.sequentialJobs || [])) {
-    await JobQueue.Instance.createSequentialJobFlow(...sequentialJobs)
+    const flow = await JobQueue.Instance.createSequentialJobFlow(...sequentialJobs)
+    if (!flow) {
+      throw new Error(`Cannot queue transcoding flow for video ${payload.videoUUID}`)
+    }
 
     await VideoJobInfoModel.increaseOrCreate(payload.videoUUID, 'pendingTranscode', sequentialJobs.filter(s => !!s).length)
   }

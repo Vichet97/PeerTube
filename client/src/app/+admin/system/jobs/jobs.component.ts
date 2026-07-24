@@ -16,7 +16,14 @@ import { ButtonComponent } from '../../../shared/shared-main/buttons/button.comp
 import { NumberFormatterPipe } from '../../../shared/shared-main/common/number-formatter.pipe'
 import { TableColumnInfo, TableComponent, TableQueryParams } from '../../../shared/shared-tables/table.component'
 import { AdvancedInputFilterComponent } from '../../../shared/shared-forms/advanced-input-filter.component'
-import { GlobalQueueCleanupStatus, JobService, RetainedLocalFilesCleanupStatus, VideoMaintenanceCounts, VideoSystemResetStatus } from './job.service'
+import {
+  GlobalQueueCleanupStatus,
+  JobService,
+  RetainedLocalFilesCleanupStatus,
+  VideoMaintenanceCounts,
+  VideoPipelineReconciliationStatus,
+  VideoSystemResetStatus
+} from './job.service'
 
 type ColumnName = 'select' | 'id' | 'type' | 'priority' | 'state' | 'progress' | 'createdAt' | 'processed'
 
@@ -63,6 +70,7 @@ export class JobsComponent implements OnInit {
   cancellingAllJobs = false
   clearingGlobalQueueBacklog = false
   cleaningRetainedLocalFiles = false
+  reconcilingVideoPipeline = false
 
   selectedJobIds = new Set<number>()
   retryingJobIds = new Set<number>()
@@ -70,6 +78,7 @@ export class JobsComponent implements OnInit {
   private resetStatusPollingSub?: Subscription
   private globalQueueCleanupPollingSub?: Subscription
   private retainedLocalFilesCleanupPollingSub?: Subscription
+  private videoPipelineReconciliationPollingSub?: Subscription
 
   jobsCount = 0
   videoMaintenanceCounts: VideoMaintenanceCounts = {
@@ -153,6 +162,7 @@ export class JobsComponent implements OnInit {
     this.resumeResetStatusPollingIfNeeded()
     this.resumeGlobalQueueCleanupPollingIfNeeded()
     this.resumeRetainedLocalFilesCleanupPollingIfNeeded()
+    this.resumeVideoPipelineReconciliationPollingIfNeeded()
   }
 
   getJobStateClasses (state: JobStateClient): string[] {
@@ -441,6 +451,29 @@ export class JobsComponent implements OnInit {
     })
   }
 
+  reconcileVideoPipeline () {
+    if (this.reconcilingVideoPipeline) return
+
+    this.reconcilingVideoPipeline = true
+    this.notifier.info($localize`Starting safe video pipeline reconciliation...`)
+
+    this.jobsService.reconcileVideoPipeline().subscribe({
+      next: status => {
+        if (status.state === 'running') {
+          this.notifier.success($localize`Video pipeline reconciliation started in background.`)
+          this.startVideoPipelineReconciliationPolling()
+          return
+        }
+
+        this.handleVideoPipelineReconciliationStatus(status)
+      },
+      error: () => {
+        this.reconcilingVideoPipeline = false
+        this.notifier.error($localize`Failed to start video pipeline reconciliation.`)
+      }
+    })
+  }
+
   clearGlobalQueueBacklog () {
     if (this.clearingGlobalQueueBacklog) return
 
@@ -582,6 +615,20 @@ export class JobsComponent implements OnInit {
     })
   }
 
+  private resumeVideoPipelineReconciliationPollingIfNeeded () {
+    this.jobsService.getVideoPipelineReconciliationStatus().subscribe({
+      next: status => {
+        if (status.state === 'running') {
+          this.reconcilingVideoPipeline = true
+          this.startVideoPipelineReconciliationPolling()
+        }
+      },
+      error: () => {
+        // noop
+      }
+    })
+  }
+
   private startResetStatusPolling () {
     this.resetStatusPollingSub?.unsubscribe()
 
@@ -632,6 +679,24 @@ export class JobsComponent implements OnInit {
           this.retainedLocalFilesCleanupPollingSub = undefined
           this.cleaningRetainedLocalFiles = false
           this.notifier.error($localize`Failed to poll retained local file cleanup status.`)
+        }
+      })
+  }
+
+  private startVideoPipelineReconciliationPolling () {
+    this.videoPipelineReconciliationPollingSub?.unsubscribe()
+
+    this.videoPipelineReconciliationPollingSub = interval(2000)
+      .pipe(
+        switchMap(() => this.jobsService.getVideoPipelineReconciliationStatus())
+      )
+      .subscribe({
+        next: status => this.handleVideoPipelineReconciliationStatus(status),
+        error: () => {
+          this.videoPipelineReconciliationPollingSub?.unsubscribe()
+          this.videoPipelineReconciliationPollingSub = undefined
+          this.reconcilingVideoPipeline = false
+          this.notifier.error($localize`Failed to poll video pipeline reconciliation status.`)
         }
       })
   }
@@ -714,6 +779,33 @@ export class JobsComponent implements OnInit {
       $localize`Retained local file cleanup complete: scheduled ${result.scheduled} retained local file(s), skipped ${result.skippedMissing} already-missing file(s).`
     )
     this.loadVideoMaintenanceCounts()
+  }
+
+  private handleVideoPipelineReconciliationStatus (status: VideoPipelineReconciliationStatus) {
+    if (status.state === 'running' || status.state === 'idle') return
+
+    this.videoPipelineReconciliationPollingSub?.unsubscribe()
+    this.videoPipelineReconciliationPollingSub = undefined
+    this.reconcilingVideoPipeline = false
+
+    if (status.state === 'failed') {
+      this.notifier.error($localize`Video pipeline reconciliation failed: ${status.error || 'unknown error'}.`)
+      return
+    }
+
+    const result = status.result
+    if (!result) {
+      this.notifier.success($localize`Video pipeline reconciliation finished.`)
+      this.refreshData()
+      return
+    }
+
+    this.notifier.success(
+      $localize`Video pipeline reconciliation complete: checked ${result.videosChecked} video(s), preserved ${result.videosWithActiveWork} with live work, ` +
+      $localize`cleared ${result.countersCleared} stale counter(s), recreated ${result.jobsRecreated} job flow(s), published ${result.videosPublished} video(s), ` +
+      $localize`marked ${result.videosFailed} video(s) and ${result.importsFailed} import(s) failed, and removed ${result.failedJobsRemoved} failed job(s).`
+    )
+    this.refreshData()
   }
 
   private loadVideoMaintenanceCounts () {

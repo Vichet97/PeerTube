@@ -70,6 +70,26 @@ describe('Test jobs resetter', function () {
     return statusBody
   }
 
+  async function waitForVideoPipelineReconciliationStatus () {
+    let statusBody: any
+
+    for (let i = 0; i < 240; i++) {
+      const res = await withLocalApiRetry('polling video pipeline reconciliation status', () => makeGetRequest({
+        url: server.url,
+        path: '/api/v1/jobs/reconcile-video-pipeline',
+        token: server.accessToken,
+        expectedStatus: 200
+      }))
+
+      statusBody = res.body
+      if (statusBody.state !== 'running') return statusBody
+
+      await wait(250)
+    }
+
+    return statusBody
+  }
+
   function isRetryableLocalConnectError (err: unknown) {
     const message = err instanceof Error
       ? `${err.message}\n${err.cause instanceof Error ? err.cause.message : ''}`
@@ -176,6 +196,72 @@ describe('Test jobs resetter', function () {
     }
   }
 
+  function seedAndReadStalePipelineCounters (options: {
+    videoUUID: string
+    readOnly?: boolean
+  }) {
+    const seedScript = `
+      import { VideoState } from '@peertube/peertube-models'
+      import { initDatabaseModels, sequelizeTypescript } from './dist/core/initializers/database.js'
+      import { VideoJobInfoModel } from './dist/core/models/video/video-job-info.js'
+      import { VideoModel } from './dist/core/models/video/video.js'
+
+      const input = JSON.parse(process.env.RECONCILIATION_SEED_INPUT)
+
+      await sequelizeTypescript.authenticate()
+      await initDatabaseModels(true)
+
+      const video = await VideoModel.load(input.videoUUID)
+      if (!video) throw new Error('Seed video was not found')
+
+      if (!input.readOnly) {
+        video.state = VideoState.PUBLISHED
+        video.waitTranscoding = false
+        await video.save()
+        await VideoJobInfoModel.increaseOrCreate(video.uuid, 'pendingMove', 2)
+        await VideoJobInfoModel.increaseOrCreate(video.uuid, 'pendingTranscode', 3)
+        await VideoJobInfoModel.increaseOrCreate(video.uuid, 'pendingTranscription', 1)
+      }
+
+      const info = await VideoJobInfoModel.load(video.id)
+      console.log('__RECONCILIATION_JSON__' + JSON.stringify({
+        pendingMove: info?.pendingMove ?? 0,
+        pendingTranscode: info?.pendingTranscode ?? 0,
+        pendingTranscription: info?.pendingTranscription ?? 0
+      }))
+
+      await sequelizeTypescript.close()
+    `
+
+    const output = execFileSync(process.execPath, [ '--input-type=module', '--eval', seedScript ], {
+      cwd: process.cwd(),
+      encoding: 'utf-8',
+      env: {
+        ...process.env,
+        NODE_ENV: 'test',
+        NODE_APP_INSTANCE: '1',
+        NODE_CONFIG: JSON.stringify({
+          object_storage: { enabled: false },
+          redis: { hostname: '127.0.0.1', port: 6379 }
+        }),
+        NODE_DB_LOG: 'false',
+        RECONCILIATION_SEED_INPUT: JSON.stringify(options)
+      }
+    })
+    const jsonLine = output
+      .split(/\r?\n/)
+      .map(line => line.trim())
+      .find(line => line.startsWith('__RECONCILIATION_JSON__'))
+
+    if (!jsonLine) throw new Error(`Could not find reconciliation seed JSON in child output: ${output}`)
+
+    return JSON.parse(jsonLine.replace('__RECONCILIATION_JSON__', '')) as {
+      pendingMove: number
+      pendingTranscode: number
+      pendingTranscription: number
+    }
+  }
+
   before(async function () {
     this.timeout(600000)
 
@@ -204,6 +290,48 @@ describe('Test jobs resetter', function () {
     })
 
     await waitForServerAuthentication(server)
+  })
+
+  it('Should reconcile stale counters without pausing queues or deleting a playable video', async function () {
+    this.timeout(180000)
+
+    const created = await withLocalApiRetry('uploading reconciliation seed video', () => server.videos.upload({
+      attributes: {
+        name: 'reconciliation-stale-counter-video',
+        fixture: 'video_short_0p.mp4',
+        waitTranscoding: false
+      },
+      waitTorrentGeneration: false
+    }))
+
+    await withLocalApiRetry('clearing seed video waiting jobs', () => makePostBodyRequest({
+      url: server.url,
+      path: '/api/v1/jobs/cancel-jobs',
+      token: server.accessToken,
+      fields: { jobTypes: [ 'all' ] },
+      expectedStatus: 200
+    }))
+
+    const before = seedAndReadStalePipelineCounters({ videoUUID: created.uuid })
+    expect(before).to.deep.equal({ pendingMove: 2, pendingTranscode: 3, pendingTranscription: 1 })
+
+    const startResponse = await withLocalApiRetry('starting video pipeline reconciliation', () => makePostBodyRequest({
+      url: server.url,
+      path: '/api/v1/jobs/reconcile-video-pipeline',
+      token: server.accessToken,
+      expectedStatus: 200
+    }))
+    expect(startResponse.body.state).to.equal('running')
+
+    const status = await waitForVideoPipelineReconciliationStatus()
+    expect(status.state, JSON.stringify(status)).to.equal('completed')
+    expect(status.result?.countersCleared).to.be.at.least(6)
+
+    const video = await waitForVideo(created.uuid)
+    expect(video.uuid).to.equal(created.uuid)
+
+    const after = seedAndReadStalePipelineCounters({ videoUUID: created.uuid, readOnly: true })
+    expect(after).to.deep.equal({ pendingMove: 0, pendingTranscode: 0, pendingTranscription: 0 })
   })
 
   it('Should keep successful deleted-video import history but remove incomplete orphan imports during system reset', async function () {

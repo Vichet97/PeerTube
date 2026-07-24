@@ -134,7 +134,11 @@ export async function createTranscriptionTaskIfNeeded (video: MVideoId & MVideoU
   if (CONFIG.VIDEO_TRANSCRIPTION.REMOTE_RUNNERS.ENABLED === true) {
     await new TranscriptionJobHandler().create({ video })
   } else {
-    await JobQueue.Instance.createJob({ type: 'video-transcription', payload: { videoUUID: video.uuid } })
+    const job = await JobQueue.Instance.createJob({ type: 'video-transcription', payload: { videoUUID: video.uuid } })
+    if (!job) {
+      logger.warn(`Transcription job for ${video.uuid} was not queued; not incrementing pendingTranscription.`, lTags(video.uuid))
+      return
+    }
   }
 
   await VideoJobInfoModel.increaseOrCreate(video.uuid, 'pendingTranscription')
@@ -152,6 +156,7 @@ export async function generateSubtitle (options: {
   const outputPath = join(CONFIG.STORAGE.TMP_DIR, 'transcription', buildSUUID())
 
   let inputFileMutexReleaser: MutexInterface.Releaser
+  let completed = false
 
   try {
     await ensureDir(outputPath)
@@ -164,6 +169,7 @@ export async function generateSubtitle (options: {
     const video = await VideoModel.loadFull(options.video.uuid)
     if (!video) {
       logger.info('Do not process transcription, video does not exist anymore.', lTags(options.video.uuid))
+      completed = true
       return undefined
     }
 
@@ -171,10 +177,7 @@ export async function generateSubtitle (options: {
     const existingCaptions = await VideoCaptionModel.listVideoCaptions(video.id)
     if (existingCaptions.length > 0) {
       logger.info(`Captions already exist for video ${video.uuid}, skipping transcription`, lTags(video.uuid))
-
-      await VideoJobInfoModel.decrease(video.uuid, 'pendingTranscription')
-        .catch(err => logger.error('Cannot decrease pendingTranscription job count', { err, ...lTags(video.uuid) }))
-
+      completed = true
       return
     }
 
@@ -184,7 +187,7 @@ export async function generateSubtitle (options: {
         `Do not run transcription for ${video.uuid} in ${outputPath} because it does not contain an audio stream`,
         { video, ...lTags(video.uuid) }
       )
-
+      completed = true
       return
     }
 
@@ -241,17 +244,21 @@ export async function generateSubtitle (options: {
     const refreshedVideo = await VideoModel.loadFull(video.uuid)
     if (!refreshedVideo) {
       logger.info(`Do not process transcription for video ${video.uuid}: it does not exist anymore.`, lTags(video.uuid))
+      completed = true
       return
     }
 
     await onTranscriptionEnded({ video: refreshedVideo, language: transcriptFile.language, vttPath: transcriptFile.path })
+    completed = true
   } finally {
     if (outputPath) await remove(outputPath)
     await cleanupStagedTranscriptionAudio(options.video.uuid)
     if (inputFileMutexReleaser) inputFileMutexReleaser()
 
-    VideoJobInfoModel.decrease(options.video.uuid, 'pendingTranscription')
-      .catch(err => logger.error('Cannot decrease pendingTranscription job count', { err, ...lTags(options.video.uuid) }))
+    if (completed) {
+      VideoJobInfoModel.decrease(options.video.uuid, 'pendingTranscription')
+        .catch(err => logger.error('Cannot decrease pendingTranscription job count', { err, ...lTags(options.video.uuid) }))
+    }
   }
 }
 

@@ -67,7 +67,10 @@ export class TranscodingJobQueueBuilder extends AbstractJobBuilder<FullPayload> 
       })
       : undefined
 
-    await JobQueue.Instance.createSequentialJobFlow(parentJob, transcodingJobBuilderJob)
+    const flow = await JobQueue.Instance.createSequentialJobFlow(parentJob, transcodingJobBuilderJob)
+    if (!flow) {
+      throw new Error(`Cannot queue transcoding flow for video ${video.uuid}`)
+    }
 
     // transcoding-job-builder job will increase pendingTranscode
     if (parentJob) {

@@ -39,6 +39,33 @@ export type VideoSystemResetStatus = {
   result?: VideoSystemResetResult
 }
 
+export type VideoPipelineReconciliationResult = {
+  videosChecked: number
+  videosWithActiveWork: number
+  videosSkippedForActiveLease: number
+  countersCleared: number
+  counterRaceSkips: number
+  jobsRecreated: number
+  videosPublished: number
+  videosFailed: number
+  importsFailed: number
+  failedJobsRemoved: number
+  objectStorageFilesChecked: number
+  objectStorageVerificationErrors: number
+  videosAwaitingObjectStorageVerification: number
+  completedRemoteVideos: number
+  currentPhase?: string
+}
+
+export type VideoPipelineReconciliationStatus = {
+  state: 'idle' | 'running' | 'completed' | 'failed'
+  startedAt?: string
+  finishedAt?: string
+  updatedAt?: string
+  error?: string
+  result?: VideoPipelineReconciliationResult
+}
+
 export type GlobalQueueCleanupResult = {
   queuesPaused: number
   queueJobsDrained: number
@@ -170,6 +197,23 @@ export class JobService {
   getRecheckVideosStatus () {
     return this.authHttp.get<VideoSystemResetStatus>(
       JobService.BASE_JOB_URL + '/recheck-videos-status'
+    ).pipe(
+      catchError(err => this.restExtractor.handleError(err))
+    )
+  }
+
+  reconcileVideoPipeline () {
+    return this.authHttp.post<VideoPipelineReconciliationStatus>(
+      JobService.BASE_JOB_URL + '/reconcile-video-pipeline',
+      {}
+    ).pipe(
+      catchError(err => this.restExtractor.handleError(err))
+    )
+  }
+
+  getVideoPipelineReconciliationStatus () {
+    return this.authHttp.get<VideoPipelineReconciliationStatus>(
+      JobService.BASE_JOB_URL + '/reconcile-video-pipeline'
     ).pipe(
       catchError(err => this.restExtractor.handleError(err))
     )

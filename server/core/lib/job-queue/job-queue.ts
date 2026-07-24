@@ -22,6 +22,8 @@ import {
   MoveCaptionPayload,
   NotifyPayload,
   RefreshPayload,
+  RunnerJobState,
+  RunnerJobType,
   TranscodingJobBuilderPayload,
   VideoChannelImportPayload,
   VideoChannelResetPayload,
@@ -61,6 +63,7 @@ import { VideoModel } from '../../models/video/video.js'
 import { VideoCaptionModel } from '../../models/video/video-caption.js'
 import { VideoImportModel } from '../../models/video/video-import.js'
 import { VideoJobInfoModel } from '../../models/video/video-job-info.js'
+import { RunnerJobModel } from '../../models/runner/runner-job.js'
 import { VideoStreamingPlaylistModel } from '../../models/video/video-streaming-playlist.js'
 import { LocalFileLease, LocalFileLeaseManager } from '../local-file-lease-manager.js'
 import { Hooks } from '../plugins/hooks.js'
@@ -93,8 +96,8 @@ import { processVideoFileImport } from './handlers/video-file-import.js'
 import { processVideoImport } from './handlers/video-import.js'
 import { processVideoLiveEnding } from './handlers/video-live-ending.js'
 import { processVideoStudioEdition } from './handlers/video-studio-edition.js'
-import { processVideoTranscoding } from './handlers/video-transcoding.js'
-import { processVideoTranscription } from './handlers/video-transcription.js'
+import { onVideoTranscodingFailure, processVideoTranscoding } from './handlers/video-transcoding.js'
+import { onVideoTranscriptionFailure, processVideoTranscription } from './handlers/video-transcription.js'
 import { processVideosViewsStats } from './handlers/video-views-stats.js'
 import { Op } from 'sequelize'
 import { Redis as IORedis } from 'ioredis'
@@ -102,6 +105,7 @@ import { Redis as IORedis } from 'ioredis'
 const TRANSCODING_PROGRESS_CACHE_TTL_MS = 5000
 const LOCAL_FILE_LEASE_HEARTBEAT_MS = 60 * 60 * 1000
 const LOCAL_FILE_LEASE_RECONCILIATION_BATCH_SIZE = 1000
+const VIDEO_PIPELINE_COUNTER_WATCHDOG_INTERVAL_MS = 60 * 60 * 1000
 
 const LOCAL_FILE_CONSUMER_JOB_TYPES: JobType[] = [
   'video-import',
@@ -212,7 +216,9 @@ const errorHandlers: { [id in JobType]?: (job: Job, err: any) => Promise<any> } 
   'move-video-file-to-object-storage': onGranularMoveToObjectStorageFailure,
   'move-hls-playlist-to-object-storage': onGranularMoveToObjectStorageFailure,
   'move-thumbnail-to-object-storage': onGranularMoveToObjectStorageFailure,
-  'move-caption-to-object-storage': onMoveToObjectStorageFailure
+  'move-caption-to-object-storage': onMoveToObjectStorageFailure,
+  'video-transcoding': onVideoTranscodingFailure,
+  'video-transcription': onVideoTranscriptionFailure
 }
 
 const jobTypes: JobType[] = [
@@ -272,6 +278,20 @@ const VIDEO_PIPELINE_JOB_TYPES_ON_RESET_HOLD = new Set<JobType>([
   'generate-video-storyboard',
   'video-studio-edition'
 ])
+const VIDEO_PIPELINE_COUNTER_WATCHDOG_STATES = [ 'waiting', 'delayed', 'prioritized', 'waiting-children', 'active' ] as const
+const VIDEO_PIPELINE_COUNTER_WATCHDOG_RUNNER_TYPES: RunnerJobType[] = [
+  'vod-web-video-transcoding',
+  'vod-hls-transcoding',
+  'vod-audio-merge-transcoding',
+  'video-studio-transcoding',
+  'video-transcription'
+]
+const VIDEO_PIPELINE_COUNTER_WATCHDOG_RUNNER_STATES = [
+  RunnerJobState.PENDING,
+  RunnerJobState.PROCESSING,
+  RunnerJobState.WAITING_FOR_PARENT_JOB,
+  RunnerJobState.COMPLETING
+]
 
 class JobQueue {
   private static instance: JobQueue
@@ -291,6 +311,7 @@ class JobQueue {
     values: Map<string, number>
   }
   private transcodingProgressRefreshPromise?: Promise<Map<string, number>>
+  private videoPipelineCounterWatchdogTimer?: NodeJS.Timeout
 
   private constructor () {
   }
@@ -472,6 +493,11 @@ class JobQueue {
   // ---------------------------------------------------------------------------
 
   async terminate () {
+    if (this.videoPipelineCounterWatchdogTimer) {
+      clearTimeout(this.videoPipelineCounterWatchdogTimer)
+      this.videoPipelineCounterWatchdogTimer = undefined
+    }
+
     const promises = Object.keys(this.workers)
       .map(handlerName => {
         const worker: Worker = this.workers[handlerName]
@@ -495,6 +521,7 @@ class JobQueue {
   async start () {
     await this.reconcileLocalFileLeases()
     scheduleRetainedLocalFilesCleanup()
+    this.scheduleVideoPipelineCounterWatchdog()
 
     const promises = Object.keys(this.workers)
       .map(handlerName => {
@@ -1333,8 +1360,68 @@ class JobQueue {
     await this.releaseLocalFileLeaseForJob(job, resolvedJobType)
   }
 
+  /**
+   * Waiting and delayed jobs never reach their handler, so deleting one must
+   * release the counter that was reserved when it was queued. Terminal jobs
+   * are deliberately excluded: their handler/final-failure path owns their
+   * accounting and a second decrement would hide real concurrent work.
+   */
+  async releaseVideoPipelineCounterForRemovedJob (options: {
+    job: Job
+    jobType?: JobType
+    state: JobState | 'unknown'
+  }) {
+    const { job, state } = options
+    const jobType = options.jobType ?? job.queueName as JobType
+    if (!this.isQueuedCounterOwningState(state)) return
+
+    const counterColumn = this.getVideoPipelineCounterColumn(jobType, job.data)
+    if (!counterColumn) return
+
+    const videoUUID = await this.getJobVideoUUID({
+      payload: job.data,
+      localFileLeaseVideoUUID: this.getLocalFileLeaseVideoUUID(job)
+    })
+    if (!videoUUID) return
+
+    const pending = await VideoJobInfoModel.decrease(videoUUID, counterColumn)
+    logger.info(
+      '[JOB_QUEUE] Released %s counter for removed %s job %s of video %s. Remaining: %d.',
+      counterColumn,
+      jobType,
+      job.id,
+      videoUUID,
+      pending
+    )
+  }
+
   private getLocalFileLeaseVideoUUID (job: { opts?: object }) {
     return (job.opts as { localFileLeaseVideoUUID?: string } | undefined)?.localFileLeaseVideoUUID
+  }
+
+  private isQueuedCounterOwningState (state: JobState | 'unknown') {
+    return state === 'waiting' || state === 'delayed' || state === 'prioritized' || state === 'waiting-children' || state === 'paused'
+  }
+
+  private getVideoPipelineCounterColumn (jobType: JobType, data: unknown) {
+    const payload = data as { isFollowUp?: boolean, cleanupMode?: string }
+
+    if (jobType === 'video-transcoding') return 'pendingTranscode' as const
+    if (jobType === 'video-transcription') return 'pendingTranscription' as const
+
+    if (jobType === 'move-to-object-storage' || jobType === 'move-to-file-system') {
+      return payload?.isFollowUp === true ? undefined : 'pendingMove' as const
+    }
+
+    if (jobType === 'move-video-file-to-object-storage' || jobType === 'move-thumbnail-to-object-storage') {
+      return 'pendingMove' as const
+    }
+
+    if (jobType === 'move-hls-playlist-to-object-storage') {
+      return payload?.cleanupMode === 'cleanup' ? undefined : 'pendingMove' as const
+    }
+
+    return undefined
   }
 
   async reconcileLocalFileLeasesNow () {
@@ -1856,6 +1943,135 @@ class JobQueue {
       )
       return false
     }
+  }
+
+  // ---------------------------------------------------------------------------
+
+  private scheduleVideoPipelineCounterWatchdog () {
+    if (process.env.NODE_ENV === 'test' || this.videoPipelineCounterWatchdogTimer) return
+
+    const run = () => {
+      this.videoPipelineCounterWatchdogTimer = undefined
+
+      this.reconcileStaleVideoPipelineCounters()
+        .catch(err => logger.warn('[JOB_QUEUE] Cannot reconcile stale video pipeline counters.', { err }))
+        .finally(() => this.scheduleVideoPipelineCounterWatchdog())
+    }
+
+    this.videoPipelineCounterWatchdogTimer = setTimeout(run, VIDEO_PIPELINE_COUNTER_WATCHDOG_INTERVAL_MS)
+    this.videoPipelineCounterWatchdogTimer.unref?.()
+  }
+
+  private async reconcileStaleVideoPipelineCounters () {
+    const activeCounterOwners = await this.collectActiveVideoPipelineCounterOwners()
+    const infos = await VideoJobInfoModel.findAll({
+      include: [ {
+        model: VideoModel.unscoped(),
+        attributes: [ 'uuid' ],
+        required: true
+      } ],
+      where: {
+        [Op.or]: [
+          { pendingMove: { [Op.gt]: 0 } },
+          { pendingTranscode: { [Op.gt]: 0 } },
+          { pendingTranscription: { [Op.gt]: 0 } }
+        ]
+      }
+    })
+    let repaired = 0
+
+    for (const info of infos) {
+      const videoUUID = (info.Video as { uuid?: string } | undefined)?.uuid
+      if (!videoUUID) continue
+      if (await LocalFileLeaseManager.Instance.hasActiveLeases(videoUUID)) continue
+
+      const activeColumns = activeCounterOwners.get(videoUUID) ?? new Set<string>()
+      const expected = {
+        pendingMove: info.pendingMove,
+        pendingTranscode: info.pendingTranscode,
+        pendingTranscription: info.pendingTranscription
+      }
+      const next = {
+        pendingMove: activeColumns.has('pendingMove') ? expected.pendingMove : 0,
+        pendingTranscode: activeColumns.has('pendingTranscode') ? expected.pendingTranscode : 0,
+        pendingTranscription: activeColumns.has('pendingTranscription') ? expected.pendingTranscription : 0
+      }
+      const amount =
+        (expected.pendingMove - next.pendingMove) +
+        (expected.pendingTranscode - next.pendingTranscode) +
+        (expected.pendingTranscription - next.pendingTranscription)
+      if (amount === 0) continue
+
+      const replaced = await VideoJobInfoModel.replaceCountersIfUnchanged({ videoUUID, expected, next })
+      if (replaced) repaired += amount
+    }
+
+    if (repaired !== 0) {
+      logger.warn('[JOB_QUEUE] Counter watchdog cleared %d stale video pipeline counter(s).', repaired)
+    }
+  }
+
+  private async collectActiveVideoPipelineCounterOwners () {
+    const owners = new Map<string, Set<string>>()
+    const addOwner = (videoUUID: string, column: string) => {
+      if (!owners.has(videoUUID)) owners.set(videoUUID, new Set())
+      owners.get(videoUUID).add(column)
+    }
+    const jobTypes: JobType[] = [
+      'transcoding-job-builder',
+      'video-transcoding',
+      'video-transcription',
+      'move-to-object-storage',
+      'move-to-file-system',
+      'move-video-file-to-object-storage',
+      'move-hls-playlist-to-object-storage',
+      'move-thumbnail-to-object-storage'
+    ]
+
+    for (const jobType of jobTypes) {
+      const queue = this.queues[jobType]
+      if (!queue) continue
+
+      for (const state of VIDEO_PIPELINE_COUNTER_WATCHDOG_STATES) {
+        for (let start = 0; ; start += LOCAL_FILE_LEASE_RECONCILIATION_BATCH_SIZE) {
+          const jobs = await queue.getJobs([ state ], start, start + LOCAL_FILE_LEASE_RECONCILIATION_BATCH_SIZE - 1, true)
+          for (const job of jobs) {
+            const videoUUID = (job.data as { videoUUID?: unknown })?.videoUUID
+            if (typeof videoUUID !== 'string') continue
+
+            if (jobType === 'transcoding-job-builder' || jobType === 'video-transcoding') {
+              addOwner(videoUUID, 'pendingTranscode')
+              continue
+            }
+            if (jobType === 'video-transcription') {
+              addOwner(videoUUID, 'pendingTranscription')
+              continue
+            }
+            if (this.getVideoPipelineCounterColumn(jobType, job.data) === 'pendingMove') {
+              addOwner(videoUUID, 'pendingMove')
+            }
+          }
+
+          if (jobs.length < LOCAL_FILE_LEASE_RECONCILIATION_BATCH_SIZE) break
+        }
+      }
+    }
+
+    const runnerJobs = await RunnerJobModel.findAll({
+      attributes: [ 'type', 'privatePayload' ],
+      where: {
+        type: { [Op.in]: VIDEO_PIPELINE_COUNTER_WATCHDOG_RUNNER_TYPES },
+        state: { [Op.in]: VIDEO_PIPELINE_COUNTER_WATCHDOG_RUNNER_STATES }
+      }
+    })
+    for (const runnerJob of runnerJobs) {
+      const videoUUID = (runnerJob.privatePayload as { videoUUID?: unknown })?.videoUUID
+      if (typeof videoUUID !== 'string') continue
+
+      addOwner(videoUUID, runnerJob.type === 'video-transcription' ? 'pendingTranscription' : 'pendingTranscode')
+    }
+
+    return owners
   }
 
   // ---------------------------------------------------------------------------

@@ -30,6 +30,10 @@ import { getFSTorrentFilePath, getHLSResolutionPlaylistFilename } from '../../li
 import { Redis } from '../../lib/redis.js'
 import { getUnprocessedOrphanedVideoRepairJobRefs } from './video-repair-job-orphans.js'
 import {
+  runVideoPipelineReconciliation,
+  type VideoPipelineReconciliationResult
+} from '../../lib/video-pipeline-reconciliation.js'
+import {
   buildMoveVideoJob,
   buildLocalStoryboardJobIfNeeded,
   createMoveJobWithPendingMoveRollback
@@ -166,6 +170,15 @@ type RetainedLocalFilesCleanupStatus = {
   result?: RetainedLocalFilesCleanupResult
 }
 
+type VideoPipelineReconciliationStatus = {
+  state: 'idle' | 'running' | 'completed' | 'failed'
+  startedAt?: string
+  finishedAt?: string
+  updatedAt?: string
+  error?: string
+  result?: VideoPipelineReconciliationResult
+}
+
 const VIDEO_REPAIR_JOB_STATES = [ 'waiting', 'delayed', 'prioritized', 'waiting-children', 'active', 'failed' ] as const
 const VIDEO_REPAIR_JOB_TYPES: JobType[] = [
   'video-import',
@@ -231,6 +244,7 @@ const VIDEO_PIPELINE_RUNNER_JOB_TYPES: RunnerJobType[] = [
   'generate-video-storyboard'
 ]
 let retainedLocalFilesCleanupBackgroundPromise: Promise<void> | undefined
+let videoPipelineReconciliationBackgroundPromise: Promise<void> | undefined
 
 jobsRouter.post('/pause',
   authenticate,
@@ -310,6 +324,18 @@ jobsRouter.get('/recheck-videos-status',
   authenticate,
   ensureUserHasRight(UserRight.MANAGE_JOBS),
   asyncMiddleware(getRecheckVideosStatus)
+)
+
+jobsRouter.post('/reconcile-video-pipeline',
+  authenticate,
+  ensureUserHasRight(UserRight.MANAGE_JOBS),
+  asyncMiddleware(reconcileVideoPipeline)
+)
+
+jobsRouter.get('/reconcile-video-pipeline',
+  authenticate,
+  ensureUserHasRight(UserRight.MANAGE_JOBS),
+  asyncMiddleware(getVideoPipelineReconciliationStatus)
 )
 
 jobsRouter.post('/retry-job',
@@ -536,10 +562,11 @@ async function createTranscriptionJobs (req: express.Request, res: express.Respo
     if (existingCaptions.length > 0) continue
 
     try {
-      await JobQueue.Instance.createJob({
+      const job = await JobQueue.Instance.createJob({
         type: 'video-transcription',
         payload: { videoUUID: videoFull.uuid }
       })
+      if (!job) continue
 
       await VideoJobInfoModel.increaseOrCreate(videoFull.uuid, 'pendingTranscription')
       jobsCreated++
@@ -628,6 +655,7 @@ async function cancelJobs (req: express.Request, res: express.Response) {
           const state = await job.getState()
           if (state === 'waiting' || state === 'delayed') {
             await job.remove()
+            await JobQueue.Instance.releaseVideoPipelineCounterForRemovedJob({ job, jobType: jobType as JobType, state })
             await JobQueue.Instance.releaseLocalFileLeaseForRemovedJob(job, jobType as JobType)
             cancelledCount++
           }
@@ -669,7 +697,9 @@ async function cancelJobs (req: express.Request, res: express.Response) {
 
 async function removeQueuedJob (job: BullJob) {
   try {
+    const state = await job.getState()
     await job.remove()
+    await JobQueue.Instance.releaseVideoPipelineCounterForRemovedJob({ job, state })
     await JobQueue.Instance.releaseLocalFileLeaseForRemovedJob(job)
     return 1
   } catch {
@@ -734,6 +764,31 @@ async function getRecheckVideosStatus (_req: express.Request, res: express.Respo
   return res.json(await getStoredVideoSystemResetStatus())
 }
 
+async function reconcileVideoPipeline (_req: express.Request, res: express.Response) {
+  const currentStatus = await getLiveVideoPipelineReconciliationStatus()
+  if (currentStatus.state === 'running') return res.json(currentStatus)
+
+  const startedAt = new Date().toISOString()
+  const runningStatus: VideoPipelineReconciliationStatus = {
+    state: 'running',
+    startedAt,
+    updatedAt: startedAt
+  }
+
+  await Redis.Instance.setVideoPipelineReconciliationStatus(runningStatus)
+
+  videoPipelineReconciliationBackgroundPromise = startVideoPipelineReconciliationInBackground(startedAt)
+    .finally(() => {
+      videoPipelineReconciliationBackgroundPromise = undefined
+    })
+
+  return res.json(runningStatus)
+}
+
+async function getVideoPipelineReconciliationStatus (_req: express.Request, res: express.Response) {
+  return res.json(await getLiveVideoPipelineReconciliationStatus())
+}
+
 async function getCleanupRetainedLocalFilesStatus (_req: express.Request, res: express.Response) {
   return res.json(await getLiveRetainedLocalFilesCleanupStatus())
 }
@@ -765,6 +820,30 @@ async function getLiveRetainedLocalFilesCleanupStatus (): Promise<RetainedLocalF
   }
 
   await Redis.Instance.setRetainedLocalFilesCleanupStatus(staleStatus)
+  return staleStatus
+}
+
+async function getStoredVideoPipelineReconciliationStatus (): Promise<VideoPipelineReconciliationStatus> {
+  const status = await Redis.Instance.getVideoPipelineReconciliationStatus() as VideoPipelineReconciliationStatus | null
+
+  return status || { state: 'idle' }
+}
+
+async function getLiveVideoPipelineReconciliationStatus (): Promise<VideoPipelineReconciliationStatus> {
+  const status = await getStoredVideoPipelineReconciliationStatus()
+  if (status.state !== 'running') return status
+  if (videoPipelineReconciliationBackgroundPromise !== undefined) return status
+
+  const staleStatus: VideoPipelineReconciliationStatus = {
+    state: 'failed',
+    startedAt: status.startedAt,
+    finishedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    error: 'Video pipeline reconciliation is no longer active. The server likely restarted or the process was interrupted.',
+    result: status.result
+  }
+
+  await Redis.Instance.setVideoPipelineReconciliationStatus(staleStatus)
   return staleStatus
 }
 
@@ -887,6 +966,39 @@ async function startRetainedLocalFilesCleanupInBackground (startedAt: string) {
       error: err instanceof Error
         ? err.message
         : String(err)
+    })
+  }
+}
+
+async function startVideoPipelineReconciliationInBackground (startedAt: string) {
+  try {
+    const result = await runVideoPipelineReconciliation({
+      onProgress: async progress => {
+        await Redis.Instance.setVideoPipelineReconciliationStatus({
+          state: 'running',
+          startedAt,
+          updatedAt: new Date().toISOString(),
+          result: progress
+        })
+      }
+    })
+
+    await Redis.Instance.setVideoPipelineReconciliationStatus({
+      state: 'completed',
+      startedAt,
+      finishedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      result
+    })
+  } catch (err) {
+    logger.error('[VIDEO_RECONCILIATION] Video pipeline reconciliation failed.', { err })
+
+    await Redis.Instance.setVideoPipelineReconciliationStatus({
+      state: 'failed',
+      startedAt,
+      finishedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      error: err instanceof Error ? err.message : String(err)
     })
   }
 }
@@ -1873,7 +1985,9 @@ async function removeJob (req: express.Request, res: express.Response) {
   }
 
   try {
+    const state = await job.getState()
     await job.remove()
+    await JobQueue.Instance.releaseVideoPipelineCounterForRemovedJob({ job, jobType: jobType as JobType, state })
     await JobQueue.Instance.releaseLocalFileLeaseForRemovedJob(job, jobType as JobType)
     return res.sendStatus(HttpStatusCode.NO_CONTENT_204)
   } catch (err) {

@@ -440,6 +440,21 @@ class Redis {
     return this.getObject('video-pipeline-system-reset-status')
   }
 
+  setVideoPipelineReconciliationStatus (value: {
+    state: 'idle' | 'running' | 'completed' | 'failed'
+    startedAt?: string
+    finishedAt?: string
+    updatedAt?: string
+    error?: string
+    result?: unknown
+  }) {
+    return this.setObject('video-pipeline-reconciliation-status', value)
+  }
+
+  getVideoPipelineReconciliationStatus () {
+    return this.getObject('video-pipeline-reconciliation-status')
+  }
+
   setGlobalQueueCleanupStatus (value: {
     state: 'idle' | 'running' | 'completed' | 'failed'
     startedAt?: string
