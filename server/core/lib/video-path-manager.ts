@@ -21,18 +21,27 @@ import { extname, join } from 'path'
 import { makeHLSFileAvailable, makeOriginalFileAvailable, makeWebVideoFileAvailable } from './object-storage/index.js'
 import { getHLSDirectory, getHLSResolutionPlaylistFilename } from './paths.js'
 import { isVideoInPrivateDirectory } from './video-privacy.js'
+import { LocalFileLease, LocalFileLeaseManager } from './local-file-lease-manager.js'
 
 type MakeAvailableCB<T> = (path: string) => Awaitable<T>
 type MakeAvailableMultipleCB<T> = (paths: string[]) => Awaitable<T>
-type MakeAvailableCreateMethod = { method: () => Awaitable<string>, clean: boolean }
+type MakeAvailableCreateMethod = {
+  method: () => Awaitable<string>
+  clean: boolean
+  leaseVideoUUID?: string
+  fallbackMethod?: () => Awaitable<string>
+}
+type FilesUnlockedListener = (videoUUID: string) => void | Promise<void>
 
 const lTags = loggerTagsFactory('video-path-manager')
+const LOCAL_FILE_READ_LEASE_HEARTBEAT_MS = 60 * 60 * 1000
 
 class VideoPathManager {
   private static instance: VideoPathManager
 
   // Key is a video UUID
   private readonly videoFileMutexStore = new Map<string, Mutex>()
+  private readonly filesUnlockedListeners = new Set<FilesUnlockedListener>()
 
   private constructor () {}
 
@@ -67,32 +76,32 @@ class VideoPathManager {
     const createMethods: MakeAvailableCreateMethod[] = []
 
     for (const videoFile of videoFiles) {
+      const video = extractVideo(videoFile.getVideoOrStreamingPlaylist())
       const localPath = this.getFSVideoFileOutputPath(videoFile.getVideoOrStreamingPlaylist(), videoFile)
+      const fallbackMethod = () => {
+        const destination = this.buildTMPDestination(videoFile.filename)
+
+        if (videoFile.isHLS()) {
+          const playlist = (videoFile as MVideoFileStreamingPlaylistVideo).VideoStreamingPlaylist
+
+          return makeHLSFileAvailable(playlist.Video, videoFile.filename, destination)
+        }
+
+        return makeWebVideoFileAvailable(videoFile.filename, destination)
+      }
 
       if (await this.shouldUseLocalPath(localPath, videoFile.storage)) {
         createMethods.push({
           method: () => localPath,
-          clean: false
+          clean: false,
+          leaseVideoUUID: video.uuid,
+          fallbackMethod
         })
 
         continue
       }
 
-      const destination = this.buildTMPDestination(videoFile.filename)
-
-      if (videoFile.isHLS()) {
-        const playlist = (videoFile as MVideoFileStreamingPlaylistVideo).VideoStreamingPlaylist
-
-        createMethods.push({
-          method: () => makeHLSFileAvailable(playlist.Video, videoFile.filename, destination),
-          clean: true
-        })
-      } else {
-        createMethods.push({
-          method: () => makeWebVideoFileAvailable(videoFile.filename, destination),
-          clean: true
-        })
-      }
+      createMethods.push({ method: fallbackMethod, clean: true })
     }
 
     return this.makeAvailableFactory({ createMethods, cbContext: cb })
@@ -102,15 +111,21 @@ class VideoPathManager {
     return this.makeAvailableVideoFiles([ videoFile ], paths => cb(paths[0]))
   }
 
-  async makeAvailableVideoSource<T> (videoSource: MVideoSource, cb: MakeAvailableCB<T>) {
+  async makeAvailableVideoSource<T> (videoSource: MVideoSource, cb: MakeAvailableCB<T>, videoUUID?: string) {
     const localPath = this.getFSOriginalVideoFilePath(videoSource.keptOriginalFilename)
+    const fallbackMethod = () => makeOriginalFileAvailable(
+      videoSource.keptOriginalFilename,
+      this.buildTMPDestination(videoSource.keptOriginalFilename)
+    )
 
     if (await this.shouldUseLocalPath(localPath, videoSource.storage)) {
       return this.makeAvailableFactory({
         createMethods: [
           {
             method: () => localPath,
-            clean: false
+            clean: false,
+            leaseVideoUUID: videoUUID,
+            fallbackMethod
           }
         ],
         cbContext: paths => cb(paths[0])
@@ -120,10 +135,7 @@ class VideoPathManager {
     return this.makeAvailableFactory({
       createMethods: [
         {
-          method: () => makeOriginalFileAvailable(
-            videoSource.keptOriginalFilename,
-            this.buildTMPDestination(videoSource.keptOriginalFilename)
-          ),
+          method: fallbackMethod,
           clean: true
         }
       ],
@@ -156,7 +168,13 @@ class VideoPathManager {
         createMethods: [
           {
             method: () => localPath,
-            clean: false
+            clean: false,
+            leaseVideoUUID: extractVideo(videoFile.getVideoOrStreamingPlaylist()).uuid,
+            fallbackMethod: () => makeHLSFileAvailable(
+              videoFile.VideoStreamingPlaylist.Video,
+              filename,
+              this.buildTMPDestination(filename)
+            )
           }
         ],
         cbContext: paths => cb(paths[0])
@@ -182,7 +200,13 @@ class VideoPathManager {
         createMethods: [
           {
             method: () => localPath,
-            clean: false
+            clean: false,
+            leaseVideoUUID: playlist.Video.uuid,
+            fallbackMethod: () => makeHLSFileAvailable(
+              playlist.Video,
+              filename,
+              this.buildTMPDestination(filename)
+            )
           }
         ],
         cbContext: paths => cb(paths[0])
@@ -212,19 +236,41 @@ class VideoPathManager {
 
     logger.debug('Locked files of %s.', videoUUID, lTags(videoUUID))
 
-    return releaser
+    let released = false
+
+    return () => {
+      if (released) return
+      released = true
+
+      releaser()
+      this.notifyFilesUnlocked(videoUUID)
+    }
   }
 
   unlockFiles (videoUUID: string) {
     const mutex = this.videoFileMutexStore.get(videoUUID)
 
     mutex.release()
+    this.notifyFilesUnlocked(videoUUID)
 
     logger.debug('Released lockfiles of %s.', videoUUID, lTags(videoUUID))
   }
 
+  onFilesUnlocked (listener: FilesUnlockedListener) {
+    this.filesUnlockedListeners.add(listener)
+
+    return () => this.filesUnlockedListeners.delete(listener)
+  }
+
   hasLockedFiles (videoUUID: string) {
     return this.videoFileMutexStore.get(videoUUID)?.isLocked() === true
+  }
+
+  private notifyFilesUnlocked (videoUUID: string) {
+    for (const listener of this.filesUnlockedListeners) {
+      Promise.resolve(listener(videoUUID))
+        .catch(err => logger.warn('Cannot notify local file unlock.', { err, ...lTags(videoUUID) }))
+    }
   }
 
   private async makeAvailableFactory<T> (options: {
@@ -235,31 +281,84 @@ class VideoPathManager {
 
     let result: T
 
-    const created: { destination: string, clean: boolean }[] = []
+    const created: {
+      destination: string
+      clean: boolean
+      lease?: LocalFileLease
+      stopLeaseHeartbeat?: () => void
+    }[] = []
 
     const cleanup = async () => {
-      for (const { destination, clean } of created) {
-        if (!destination || !clean) continue
-
-        // Skip if file doesn't exist (may have been already removed or never created)
-        if (!await pathExists(destination)) {
-          logger.debug('Skipping cleanup of non-existent file %s.', destination)
-          continue
-        }
+      for (const createdFile of created) {
+        const { destination, clean, lease, stopLeaseHeartbeat } = createdFile
 
         try {
-          await remove(destination)
+          if (destination && clean) {
+            // Skip if file doesn't exist (may have been already removed or never created)
+            if (!await pathExists(destination)) {
+              logger.debug('Skipping cleanup of non-existent file %s.', destination)
+            } else {
+              await remove(destination)
+            }
+          }
         } catch (err) {
           logger.error('Cannot remove ' + destination, { err })
+        } finally {
+          stopLeaseHeartbeat?.()
+          await this.releaseLocalFileLease(lease)
         }
       }
     }
 
-    for (const { method, clean } of createMethods) {
-      created.push({
-        destination: await method(),
-        clean
-      })
+    try {
+      for (const createMethod of createMethods) {
+        const { method, clean, fallbackMethod, leaseVideoUUID } = createMethod
+        let destination = await method()
+        let lease: LocalFileLease | undefined
+        let stopLeaseHeartbeat: (() => void) | undefined
+
+        if (leaseVideoUUID) {
+          lease = await LocalFileLeaseManager.Instance.acquire({
+            videoUUID: leaseVideoUUID,
+            leaseId: LocalFileLeaseManager.Instance.createLeaseId('local-read')
+          })
+
+          if (!lease && fallbackMethod) {
+            destination = await fallbackMethod()
+            lease = undefined
+            created.push({ destination, clean: true })
+            continue
+          }
+
+          if (!lease) throw new Error(`Cannot acquire local file lease for video ${leaseVideoUUID}`)
+          stopLeaseHeartbeat = this.startLocalFileReadLeaseHeartbeat(lease, leaseVideoUUID)
+
+          try {
+            // Cleanup may have won the race just before the lease was acquired.
+            // In that case use the normal object-storage staging fallback instead.
+            if (!await pathExists(destination) && fallbackMethod) {
+              stopLeaseHeartbeat()
+              await lease.release()
+              lease = undefined
+              stopLeaseHeartbeat = undefined
+              destination = await fallbackMethod()
+              created.push({ destination, clean: true })
+              continue
+            }
+          } catch (err) {
+            stopLeaseHeartbeat?.()
+            await lease?.release()
+
+            throw err
+          }
+        }
+
+        created.push({ destination, clean, lease, stopLeaseHeartbeat })
+      }
+    } catch (err) {
+      await cleanup()
+
+      throw err
     }
 
     try {
@@ -277,6 +376,26 @@ class VideoPathManager {
 
   buildTMPDestination (filename: string) {
     return join(CONFIG.STORAGE.TMP_DIR, buildUUID() + extname(filename))
+  }
+
+  private startLocalFileReadLeaseHeartbeat (lease: LocalFileLease, videoUUID: string) {
+    const timer = setInterval(() => {
+      lease.refresh()
+        .then(refreshed => {
+          if (!refreshed) logger.warn('Cannot refresh local file read lease.', lTags(videoUUID))
+        })
+        .catch(err => logger.warn('Cannot refresh local file read lease.', { err, ...lTags(videoUUID) }))
+    }, LOCAL_FILE_READ_LEASE_HEARTBEAT_MS)
+    timer.unref?.()
+
+    return () => {
+      clearInterval(timer)
+      lease.deactivate?.()
+    }
+  }
+
+  private async releaseLocalFileLease (lease: LocalFileLease | undefined) {
+    await lease?.release()
   }
 
   private async shouldUseLocalPath (path: string, storage: FileStorageType) {

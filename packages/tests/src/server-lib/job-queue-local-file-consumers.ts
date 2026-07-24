@@ -1,6 +1,8 @@
 /* eslint-disable @typescript-eslint/no-unused-expressions */
 import { expect } from 'chai'
 import { JobQueue } from '@peertube/peertube-server/core/lib/job-queue/index.js'
+import { LocalFileLeaseManager } from '@peertube/peertube-server/core/lib/local-file-lease-manager.js'
+import { VideoModel } from '@peertube/peertube-server/core/models/video/video.js'
 
 describe('job-queue local file consumer scans', function () {
   it('should tolerate undefined jobs while scanning pending local file consumers', async function () {
@@ -102,6 +104,105 @@ describe('job-queue local file consumer scans', function () {
       expect([ ...result ].sort()).to.deep.equal([ 'video-1', 'video-2' ])
     } finally {
       queues['video-transcoding'] = originalQueue
+    }
+  })
+
+  it('should attach a local-file lease to an ID-based torrent job', async function () {
+    const instance = JobQueue.Instance as any
+    const originalQueue = instance.queues['manage-video-torrent']
+    const originalLoad = VideoModel.load
+    const originalAcquire = LocalFileLeaseManager.Instance.acquire
+    let addedOptions: any
+    let acquiredVideoUUID: string | undefined
+
+    instance.queues['manage-video-torrent'] = {
+      add: (_name: string, _data: unknown, options: unknown) => {
+        addedOptions = options
+        return Promise.resolve({ id: 'job-id' })
+      }
+    }
+    VideoModel.load = (() => Promise.resolve({ uuid: 'torrent-video' } as any)) as typeof VideoModel.load
+    LocalFileLeaseManager.Instance.acquire = ((options: any) => {
+      acquiredVideoUUID = options.videoUUID
+      expect(options.persistent).to.be.true
+      return Promise.resolve({ leaseId: options.leaseId, refresh: () => Promise.resolve(true), release: () => Promise.resolve() })
+    }) as typeof LocalFileLeaseManager.Instance.acquire
+
+    try {
+      await JobQueue.Instance.createJob({
+        type: 'manage-video-torrent',
+        payload: { action: 'create', videoId: 1, videoFileId: 2 }
+      })
+
+      expect(acquiredVideoUUID).to.equal('torrent-video')
+      expect(addedOptions.localFileLeaseId).to.match(/^job:manage-video-torrent:/)
+      expect(addedOptions.localFileLeaseVideoUUID).to.equal('torrent-video')
+    } finally {
+      instance.queues['manage-video-torrent'] = originalQueue
+      VideoModel.load = originalLoad
+      LocalFileLeaseManager.Instance.acquire = originalAcquire
+    }
+  })
+
+  it('should reuse a custom-ID job without allocating another durable lease', async function () {
+    const instance = JobQueue.Instance as any
+    const originalQueue = instance.queues['move-hls-playlist-to-object-storage']
+    const originalAcquire = LocalFileLeaseManager.Instance.acquire
+    const existingJob = { id: 'existing-job' }
+    let acquireCalls = 0
+    let addCalls = 0
+
+    instance.queues['move-hls-playlist-to-object-storage'] = {
+      getJob: () => Promise.resolve(existingJob),
+      add: () => {
+        addCalls++
+        return Promise.resolve({ id: 'unexpected-new-job' })
+      }
+    }
+    LocalFileLeaseManager.Instance.acquire = (() => {
+      acquireCalls++
+      return Promise.resolve(undefined)
+    }) as typeof LocalFileLeaseManager.Instance.acquire
+
+    try {
+      const result = await instance.addJobToQueue(instance.queues['move-hls-playlist-to-object-storage'], {
+        type: 'move-hls-playlist-to-object-storage',
+        payload: { videoUUID: 'video-uuid', playlistId: 1, fileIds: [ 1 ], isNewVideo: false },
+        customJobId: 'same-job'
+      })
+
+      expect(result).to.equal(existingJob)
+      expect(acquireCalls).to.equal(0)
+      expect(addCalls).to.equal(0)
+    } finally {
+      instance.queues['move-hls-playlist-to-object-storage'] = originalQueue
+      LocalFileLeaseManager.Instance.acquire = originalAcquire
+    }
+  })
+
+  it('should release a removed job lease by its persisted lease ID without reloading the video', async function () {
+    const originalRelease = LocalFileLeaseManager.Instance.releaseLeaseById
+    let releasedLeaseId: string | undefined
+    let releasedVideoUUID: string | undefined
+
+    LocalFileLeaseManager.Instance.releaseLeaseById = ((leaseId: string, videoUUID?: string) => {
+      releasedLeaseId = leaseId
+      releasedVideoUUID = videoUUID
+      return Promise.resolve(true)
+    }) as typeof LocalFileLeaseManager.Instance.releaseLeaseById
+
+    try {
+      await JobQueue.Instance.releaseLocalFileLeaseForRemovedJob({
+        id: 'job-id',
+        queueName: 'video-transcoding',
+        data: { videoUUID: 'video-id' },
+        opts: { localFileLeaseId: 'persisted-lease-id' }
+      } as any, 'video-transcoding')
+
+      expect(releasedLeaseId).to.equal('persisted-lease-id')
+      expect(releasedVideoUUID).to.equal(undefined)
+    } finally {
+      LocalFileLeaseManager.Instance.releaseLeaseById = originalRelease
     }
   })
 })

@@ -628,6 +628,7 @@ async function cancelJobs (req: express.Request, res: express.Response) {
           const state = await job.getState()
           if (state === 'waiting' || state === 'delayed') {
             await job.remove()
+            await JobQueue.Instance.releaseLocalFileLeaseForRemovedJob(job, jobType as JobType)
             cancelledCount++
           }
         }
@@ -669,6 +670,7 @@ async function cancelJobs (req: express.Request, res: express.Response) {
 async function removeQueuedJob (job: BullJob) {
   try {
     await job.remove()
+    await JobQueue.Instance.releaseLocalFileLeaseForRemovedJob(job)
     return 1
   } catch {
     // Job might have been processed already, continue
@@ -1079,6 +1081,7 @@ async function clearVideoRepairQueuesForSystemReset (): Promise<VideoQueueCleanu
   }
 
   logger.info('[SYSTEM_RESETTER] Cleared queued video pipeline jobs before database/storage scrub.', { drained, cleaned })
+  await JobQueue.Instance.reconcileLocalFileLeasesNow()
 
   return { drained, cleaned }
 }
@@ -1118,6 +1121,8 @@ async function clearAllQueuesWaitingAndDelayedBacklog (): Promise<GlobalQueueCle
       }
     }
   }
+
+  await JobQueue.Instance.reconcileLocalFileLeasesNow()
 
   logger.info('[GLOBAL_QUEUE_SCRUB] Cleared global BullMQ waiting/delayed backlog.', {
     queuesPaused,
@@ -1546,6 +1551,7 @@ async function removeVideoRepairJobs (jobRefs: VideoRepairJobRef[]) {
   for (const ref of dedupeVideoRepairJobRefs(jobRefs)) {
     try {
       await ref.job.remove()
+      await JobQueue.Instance.releaseLocalFileLeaseForRemovedJob(ref.job, ref.jobType)
       removed++
     } catch (err) {
       failed++
@@ -1868,6 +1874,7 @@ async function removeJob (req: express.Request, res: express.Response) {
 
   try {
     await job.remove()
+    await JobQueue.Instance.releaseLocalFileLeaseForRemovedJob(job, jobType as JobType)
     return res.sendStatus(HttpStatusCode.NO_CONTENT_204)
   } catch (err) {
     logger.error('Error removing job', { err, jobType, jobId })

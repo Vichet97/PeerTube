@@ -57,7 +57,7 @@ export async function prepareStagedTranscriptionAudio (video: VideoWithAudioCand
   if (source?.keptOriginalFilename) {
     await VideoPathManager.Instance.makeAvailableVideoSource(source, async inputPath => {
       await extractAudioForTranscription(inputPath, outputPath, video.uuid)
-    })
+    }, video.uuid)
   } else {
     const maxQualityFile = video.getMaxQualityFile(VideoFileStream.AUDIO) || video.getMaxQualityFile(VideoFileStream.VIDEO)
     if (!maxQualityFile) return undefined

@@ -10,12 +10,12 @@ import {
   buildRetainedLocalFileCleanupDelay,
   cleanupRetainedLocalFilesAfterRestart,
   maybeTransitionAfterObjectStorageMove,
-  removeLocalFileAfterMove,
-  shouldWaitForPipelineCompletionBeforeDeletingMovedHLS
+  removeLocalFileAfterMove
 } from '@peertube/peertube-server/core/lib/move-storage/move-to-object-storage.js'
 import { pickCaptionsForMoveBatch } from '@peertube/peertube-server/core/lib/move-storage/shared/move-caption.js'
 import { CONFIG } from '@peertube/peertube-server/core/initializers/config.js'
 import { VideoPathManager } from '@peertube/peertube-server/core/lib/video-path-manager.js'
+import { LocalFileLease, LocalFileLeaseManager } from '@peertube/peertube-server/core/lib/local-file-lease-manager.js'
 import { VideoModel } from '@peertube/peertube-server/core/models/video/video.js'
 import { buildCaptionMoveJob, createPendingMoveJobs } from '@peertube/peertube-server/core/lib/video-jobs.js'
 import { JobQueue } from '@peertube/peertube-server/core/lib/job-queue/index.js'
@@ -187,8 +187,8 @@ describe('move-to-object-storage', function () {
     this.timeout(5_000)
 
     const originalEnabled = CONFIG.OBJECT_STORAGE.ENABLED
+    const originalKeepLocalFileAfterMove = CONFIG.OBJECT_STORAGE.KEEP_LOCAL_FILE_AFTER_MOVE
     const originalMoveFileDelay = CONFIG.OBJECT_STORAGE.MOVE_FILE_DELAY
-    const originalListPendingConsumers = JobQueue.Instance.listVideoUUIDsWithPendingLocalFileConsumerJobs
     const originalLoadByUUID = VideoJobInfoModel.loadByUUID
     const originalGetFSVideoFileOutputPath = VideoPathManager.Instance.getFSVideoFileOutputPath
     const modelClasses = [
@@ -207,11 +207,11 @@ describe('move-to-object-storage', function () {
     const path = join(tmpDirectory, 'video.mp4')
     let videoFileBatchReturned = false
     let loadCount = 0
+    let lease: LocalFileLease | undefined
 
     CONFIG.OBJECT_STORAGE.ENABLED = true
+    CONFIG.OBJECT_STORAGE.KEEP_LOCAL_FILE_AFTER_MOVE = 0
     CONFIG.OBJECT_STORAGE.MOVE_FILE_DELAY = 20
-    JobQueue.Instance.listVideoUUIDsWithPendingLocalFileConsumerJobs =
-      (() => Promise.resolve(new Set<string>())) as typeof JobQueue.Instance.listVideoUUIDsWithPendingLocalFileConsumerJobs
     VideoJobInfoModel.loadByUUID = (() => {
       loadCount++
 
@@ -247,21 +247,33 @@ describe('move-to-object-storage', function () {
 
     try {
       await writeFile(path, 'test')
+      lease = await LocalFileLeaseManager.Instance.acquire({
+        videoUUID,
+        leaseId: 'test-restart-cleanup-lease',
+        persistent: true
+      })
+      expect(lease).to.not.equal(undefined)
 
       const result = await cleanupRetainedLocalFilesAfterRestart()
 
-      expect(result.scheduled).to.equal(0)
+      expect(result.scheduled).to.equal(1)
       expect(existsSync(path)).to.be.true
-      expect(loadCount).to.equal(1)
+      expect(loadCount).to.equal(0)
 
       await new Promise(resolve => setTimeout(resolve, 100))
-      expect(loadCount).to.equal(1)
+      expect(existsSync(path)).to.be.true
+
+      await lease.release()
+      await new Promise(resolve => setTimeout(resolve, 1_000))
+      expect(existsSync(path)).to.be.false
     } finally {
       CONFIG.OBJECT_STORAGE.ENABLED = originalEnabled
+      CONFIG.OBJECT_STORAGE.KEEP_LOCAL_FILE_AFTER_MOVE = originalKeepLocalFileAfterMove
       CONFIG.OBJECT_STORAGE.MOVE_FILE_DELAY = originalMoveFileDelay
-      JobQueue.Instance.listVideoUUIDsWithPendingLocalFileConsumerJobs = originalListPendingConsumers
       VideoJobInfoModel.loadByUUID = originalLoadByUUID
       VideoPathManager.Instance.getFSVideoFileOutputPath = originalGetFSVideoFileOutputPath
+
+      await lease?.release()
 
       for (const [ model, unscoped ] of originalUnscoped) model.unscoped = unscoped
 
@@ -269,35 +281,7 @@ describe('move-to-object-storage', function () {
     }
   })
 
-  it('should keep only HLS seed files until the rest of the pipeline completes', function () {
-    const maxVideoResolution = 1080
-
-    expect(shouldWaitForPipelineCompletionBeforeDeletingMovedHLS({
-      file: {
-        resolution: 1080,
-        hasVideo: () => true
-      } as any,
-      maxVideoResolution
-    })).to.be.true
-
-    expect(shouldWaitForPipelineCompletionBeforeDeletingMovedHLS({
-      file: {
-        resolution: 480,
-        hasVideo: () => true
-      } as any,
-      maxVideoResolution
-    })).to.be.false
-
-    expect(shouldWaitForPipelineCompletionBeforeDeletingMovedHLS({
-      file: {
-        resolution: 0,
-        hasVideo: () => false
-      } as any,
-      maxVideoResolution
-    })).to.be.true
-  })
-
-  it('should allow non-seed moved local files to be deleted even when pipeline counters are still pending', async function () {
+  it('should delete moved local files even when stale pipeline counters are still pending', async function () {
     this.timeout(5_000)
 
     const originalKeepLocalFileAfterMove = CONFIG.OBJECT_STORAGE.KEEP_LOCAL_FILE_AFTER_MOVE
@@ -323,8 +307,7 @@ describe('move-to-object-storage', function () {
       await removeLocalFileAfterMove({
         path,
         videoUUID,
-        skipReadinessCheck: true,
-        waitForPipelineCompletion: false
+        skipReadinessCheck: true
       })
 
       await new Promise(resolve => setTimeout(resolve, 300))
@@ -338,7 +321,7 @@ describe('move-to-object-storage', function () {
     }
   })
 
-  it('should check pipeline counters once per video cleanup cycle for multiple files', async function () {
+  it('should release multiple retained files from one video when its lease is released without polling counters', async function () {
     this.timeout(5_000)
 
     const originalKeepLocalFileAfterMove = CONFIG.OBJECT_STORAGE.KEEP_LOCAL_FILE_AFTER_MOVE
@@ -351,6 +334,7 @@ describe('move-to-object-storage', function () {
     const firstPath = join(tmpDirectory, 'segment-1.ts')
     const secondPath = join(tmpDirectory, 'segment-2.ts')
     let loadCount = 0
+    let lease: LocalFileLease | undefined
 
     CONFIG.OBJECT_STORAGE.KEEP_LOCAL_FILE_AFTER_MOVE = 0
     CONFIG.OBJECT_STORAGE.MOVE_FILE_DELAY = 20
@@ -369,17 +353,24 @@ describe('move-to-object-storage', function () {
     try {
       await writeFile(firstPath, 'test')
       await writeFile(secondPath, 'test')
+      lease = await LocalFileLeaseManager.Instance.acquire({
+        videoUUID,
+        leaseId: 'test-batched-cleanup-lease',
+        persistent: true
+      })
+      expect(lease).to.not.equal(undefined)
 
       await removeLocalFileAfterMove({ path: firstPath, videoUUID, skipReadinessCheck: true })
       await removeLocalFileAfterMove({ path: secondPath, videoUUID, skipReadinessCheck: true })
 
-      await new Promise(resolve => setTimeout(resolve, 5))
-      expect(loadCount).to.equal(1)
+      await new Promise(resolve => setTimeout(resolve, 100))
+      expect(loadCount).to.equal(0)
       expect(existsSync(firstPath)).to.be.true
       expect(existsSync(secondPath)).to.be.true
 
-      await new Promise(resolve => setTimeout(resolve, 100))
-      expect(loadCount).to.equal(2)
+      await lease.release()
+      await new Promise(resolve => setTimeout(resolve, 300))
+      expect(loadCount).to.equal(0)
       expect(existsSync(firstPath)).to.be.false
       expect(existsSync(secondPath)).to.be.false
     } finally {
@@ -388,11 +379,93 @@ describe('move-to-object-storage', function () {
       VideoJobInfoModel.loadByUUID = originalLoadByUUID
       JobQueue.Instance.hasPendingOrActiveLocalFileConsumerJob = originalHasPendingOrActiveLocalFileConsumerJob
 
+      await lease?.release()
+
       await remove(tmpDirectory).catch(() => {})
     }
   })
 
-  it('should keep retained local files after unlock while pipeline counters remain pending', async function () {
+  it('should stage from object storage when cleanup deletes a retained local read before its lease is acquired', async function () {
+    const originalAcquire = LocalFileLeaseManager.Instance.acquire
+    const videoUUID = 'video-uuid-read-race'
+    const tmpDirectory = await mkdtemp(join(tmpdir(), 'peertube-retained-read-race-'))
+    const localPath = join(tmpDirectory, 'local.mp4')
+    const fallbackPath = join(tmpDirectory, 'fallback.mp4')
+    let released = false
+
+    LocalFileLeaseManager.Instance.acquire = ((options: any) => {
+      expect(options.videoUUID).to.equal(videoUUID)
+
+      return remove(localPath).then(() => ({
+        leaseId: 'test:local-read-race',
+        refresh: () => Promise.resolve(true),
+        release: () => {
+          released = true
+          return Promise.resolve()
+        }
+      }))
+    }) as typeof LocalFileLeaseManager.Instance.acquire
+
+    try {
+      await writeFile(localPath, 'local')
+      await writeFile(fallbackPath, 'fallback')
+
+      const result = await (VideoPathManager.Instance as any).makeAvailableFactory({
+        createMethods: [ {
+          method: () => localPath,
+          clean: false,
+          leaseVideoUUID: videoUUID,
+          fallbackMethod: () => fallbackPath
+        } ],
+        cbContext: (paths: string[]) => paths[0]
+      })
+
+      expect(result).to.equal(fallbackPath)
+      expect(released).to.be.true
+    } finally {
+      LocalFileLeaseManager.Instance.acquire = originalAcquire
+      await remove(tmpDirectory).catch(() => {})
+    }
+  })
+
+  it('should release a retained local-read lease after the callback without deleting the local file', async function () {
+    const originalAcquire = LocalFileLeaseManager.Instance.acquire
+    const videoUUID = 'video-uuid-local-read-release'
+    const tmpDirectory = await mkdtemp(join(tmpdir(), 'peertube-retained-read-release-'))
+    const localPath = join(tmpDirectory, 'local.mp4')
+    let released = false
+
+    LocalFileLeaseManager.Instance.acquire = ((_options: any) => Promise.resolve({
+      leaseId: 'test:local-read-release',
+      refresh: () => Promise.resolve(true),
+      release: () => {
+        released = true
+        return Promise.resolve()
+      }
+    } as LocalFileLease)) as typeof LocalFileLeaseManager.Instance.acquire
+
+    try {
+      await writeFile(localPath, 'local')
+
+      const result = await (VideoPathManager.Instance as any).makeAvailableFactory({
+        createMethods: [ {
+          method: () => localPath,
+          clean: false,
+          leaseVideoUUID: videoUUID
+        } ],
+        cbContext: (paths: string[]) => paths[0]
+      })
+
+      expect(result).to.equal(localPath)
+      expect(released).to.be.true
+      expect(existsSync(localPath)).to.be.true
+    } finally {
+      LocalFileLeaseManager.Instance.acquire = originalAcquire
+      await remove(tmpDirectory).catch(() => {})
+    }
+  })
+
+  it('should delete retained local files when the local file mutex releases without inspecting counters', async function () {
     this.timeout(5_000)
 
     const originalKeepLocalFileAfterMove = CONFIG.OBJECT_STORAGE.KEEP_LOCAL_FILE_AFTER_MOVE
@@ -402,13 +475,14 @@ describe('move-to-object-storage', function () {
     const tmpDirectory = await mkdtemp(join(tmpdir(), 'peertube-retained-local-'))
     const path = join(tmpDirectory, 'playlist.m3u8')
     const releaser = await VideoPathManager.Instance.lockFiles(videoUUID)
+    let loadCount = 0
 
     CONFIG.OBJECT_STORAGE.KEEP_LOCAL_FILE_AFTER_MOVE = 0
-    VideoJobInfoModel.loadByUUID = (() => Promise.resolve({
-      pendingMove: 5,
-      pendingTranscode: 7,
-      pendingTranscription: 3
-    } as any)) as typeof VideoJobInfoModel.loadByUUID
+    VideoJobInfoModel.loadByUUID = (() => {
+      loadCount++
+
+      return Promise.resolve({ pendingMove: 5, pendingTranscode: 7, pendingTranscription: 3 } as any)
+    }) as typeof VideoJobInfoModel.loadByUUID
 
     try {
       await writeFile(path, '#EXTM3U')
@@ -424,8 +498,9 @@ describe('move-to-object-storage', function () {
 
       releaser()
 
-      await new Promise(resolve => setTimeout(resolve, 500))
-      expect(existsSync(path)).to.be.true
+      await new Promise(resolve => setTimeout(resolve, 300))
+      expect(existsSync(path)).to.be.false
+      expect(loadCount).to.equal(0)
     } finally {
       releaser()
 
@@ -436,7 +511,7 @@ describe('move-to-object-storage', function () {
     }
   })
 
-  it('should keep retained local files while pipeline counters are still pending', async function () {
+  it('should not retain local files because of stale pipeline counters alone', async function () {
     this.timeout(5_000)
 
     const originalKeepLocalFileAfterMove = CONFIG.OBJECT_STORAGE.KEEP_LOCAL_FILE_AFTER_MOVE
@@ -477,11 +552,9 @@ describe('move-to-object-storage', function () {
         skipReadinessCheck: true
       })
 
-      await new Promise(resolve => setTimeout(resolve, 200))
-      expect(existsSync(path)).to.be.true
-
-      await new Promise(resolve => setTimeout(resolve, 500))
-      expect(existsSync(path)).to.be.true
+      await new Promise(resolve => setTimeout(resolve, 300))
+      expect(existsSync(path)).to.be.false
+      expect(loadCount).to.equal(0)
     } finally {
       CONFIG.OBJECT_STORAGE.KEEP_LOCAL_FILE_AFTER_MOVE = originalKeepLocalFileAfterMove
       VideoJobInfoModel.loadByUUID = originalLoadByUUID

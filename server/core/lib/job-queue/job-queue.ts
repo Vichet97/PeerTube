@@ -58,7 +58,11 @@ import {
 import { logger } from '../../helpers/logger.js'
 import { JOB_ATTEMPTS, JOB_CONCURRENCY, JOB_REMOVAL_OPTIONS, JOB_TTL, REPEAT_JOBS, WEBSERVER } from '../../initializers/constants.js'
 import { VideoModel } from '../../models/video/video.js'
+import { VideoCaptionModel } from '../../models/video/video-caption.js'
+import { VideoImportModel } from '../../models/video/video-import.js'
 import { VideoJobInfoModel } from '../../models/video/video-job-info.js'
+import { VideoStreamingPlaylistModel } from '../../models/video/video-streaming-playlist.js'
+import { LocalFileLease, LocalFileLeaseManager } from '../local-file-lease-manager.js'
 import { Hooks } from '../plugins/hooks.js'
 import { Redis } from '../redis.js'
 import { processActivityPubCleaner } from './handlers/activitypub-cleaner.js'
@@ -96,14 +100,21 @@ import { Op } from 'sequelize'
 import { Redis as IORedis } from 'ioredis'
 
 const TRANSCODING_PROGRESS_CACHE_TTL_MS = 5000
+const LOCAL_FILE_LEASE_HEARTBEAT_MS = 60 * 60 * 1000
+const LOCAL_FILE_LEASE_RECONCILIATION_BATCH_SIZE = 1000
 
 const LOCAL_FILE_CONSUMER_JOB_TYPES: JobType[] = [
+  'video-import',
+  'video-file-import',
   'transcoding-job-builder',
   'video-transcoding',
   'video-transcription',
   'generate-video-storyboard',
   'video-studio-edition',
+  'manage-video-torrent',
+  'video-live-ending',
   'move-to-object-storage',
+  'move-to-file-system',
   'move-video-file-to-object-storage',
   'move-hls-playlist-to-object-storage',
   'move-thumbnail-to-object-storage',
@@ -150,6 +161,13 @@ export type CreateJobOptions = {
   priority?: number
   customJobId?: string
   failParentOnFailure?: boolean
+  localFileLeaseId?: string
+  localFileLeaseVideoUUID?: string
+}
+
+type PeerTubeJobOptions = JobsOptions & {
+  localFileLeaseId?: string
+  localFileLeaseVideoUUID?: string
 }
 
 const handlers: { [id in JobType]: (job: Job) => Promise<any> } = {
@@ -361,7 +379,14 @@ class JobQueue {
     const processor = async (jobArg: Job) => {
       const job = await Hooks.wrapObject(jobArg, 'filter:job-queue.process.params', { type: handlerName })
 
-      return Hooks.wrapPromiseFun(handler, job, 'filter:job-queue.process.result')
+      const lease = await this.ensureLocalFileLeaseForJob(job, handlerName)
+      const stopLeaseHeartbeat = this.startLocalFileLeaseHeartbeat(lease, handlerName, job.id)
+
+      try {
+        return await Hooks.wrapPromiseFun(handler, job, 'filter:job-queue.process.result')
+      } finally {
+        stopLeaseHeartbeat()
+      }
     }
 
     const worker = new Worker(handlerName, processor, workerOptions)
@@ -381,10 +406,11 @@ class JobQueue {
       }
       logger.log(logLevel, 'Cannot execute job %s in queue %s.', job.id, handlerName, { payload: job.data, err })
 
-      if (errorHandlers[handlerName]) {
-        errorHandlers[handlerName](job, err)
-          .catch(err => logger.error('Cannot run error handler for job failure %d in queue %s.', job.id, handlerName, { err }))
-      }
+      void this.handleJobFailure(job, handlerName, err)
+    })
+
+    worker.on('completed', job => {
+      void this.releaseLocalFileLeaseForJob(job, handlerName)
     })
 
     worker.on('error', err => {
@@ -392,6 +418,19 @@ class JobQueue {
     })
 
     this.workers[handlerName] = worker
+  }
+
+  private async handleJobFailure (job: Job, handlerName: JobType, err: Error) {
+    try {
+      const errorHandler = errorHandlers[handlerName]
+      if (errorHandler) await errorHandler(job, err)
+    } catch (errorHandlerErr) {
+      logger.error('Cannot run error handler for job failure %d in queue %s.', job.id, handlerName, { err: errorHandlerErr })
+    } finally {
+      if (this.isFinalJobAttempt(job)) {
+        await this.releaseLocalFileLeaseForJob(job, handlerName)
+      }
+    }
   }
 
   private buildQueue (handlerName: JobType) {
@@ -453,7 +492,8 @@ class JobQueue {
     }
   }
 
-  start () {
+  async start () {
+    await this.reconcileLocalFileLeases()
     scheduleRetainedLocalFilesCleanup()
 
     const promises = Object.keys(this.workers)
@@ -511,7 +551,7 @@ class JobQueue {
       .catch(err => logger.error('Cannot create job.', { err, options }))
   }
 
-  createJob (options: CreateJobArgument & CreateJobOptions | undefined) {
+  async createJob (options: CreateJobArgument & CreateJobOptions | undefined) {
     if (!options) return
 
     if (VIDEO_PIPELINE_JOB_TYPES_ON_RESET_HOLD.has(options.type)) {
@@ -524,9 +564,7 @@ class JobQueue {
       return
     }
 
-    const jobOptions = this.buildJobOptions(options.type as JobType, pick(options, [ 'priority', 'delay', 'customJobId' ]))
-
-    return queue.add('job', options.payload, jobOptions)
+    return this.addJobToQueue(queue, options)
   }
 
   private async createVideoPipelineJobRespectingSystemResetHold (options: CreateJobArgument & CreateJobOptions) {
@@ -556,9 +594,98 @@ class JobQueue {
       return
     }
 
-    const jobOptions = this.buildJobOptions(options.type as JobType, pick(options, [ 'priority', 'delay', 'customJobId' ]))
+    return this.addJobToQueue(queue, options)
+  }
 
-    return queue.add('job', options.payload, jobOptions)
+  private async addJobToQueue (queue: Queue, options: CreateJobArgument & CreateJobOptions) {
+    if (options.customJobId) {
+      const existingJob = await queue.getJob(options.customJobId)
+      if (existingJob) return existingJob
+    }
+
+    const prepared = await this.prepareLocalFileLease(options)
+    const jobOptions = this.buildJobOptions(options.type as JobType, pick(prepared.options, [
+      'priority',
+      'delay',
+      'customJobId',
+      'localFileLeaseId',
+      'localFileLeaseVideoUUID'
+    ]))
+
+    try {
+      return await queue.add('job', prepared.options.payload, jobOptions)
+    } catch (err) {
+      // A concurrent creator may have won the custom job-id race after the
+      // preflight lookup. Do not release its shared deterministic lease.
+      if (options.customJobId) {
+        const existingJob = await queue.getJob(options.customJobId).catch(() => undefined)
+        if (existingJob) return existingJob
+      }
+
+      await prepared.lease?.release()
+
+      throw err
+    }
+  }
+
+  private async prepareLocalFileLease (options: CreateJobArgument & CreateJobOptions) {
+    if (options.localFileLeaseId || !this.isLocalFileLeaseJobType(options.type)) {
+      return { options, lease: undefined }
+    }
+
+    const videoUUID = await this.getJobVideoUUID(options)
+    if (!videoUUID) return { options, lease: undefined }
+
+    const localFileLeaseId = options.customJobId
+      ? `job:${options.type}:${videoUUID}:${options.customJobId}`
+      : LocalFileLeaseManager.Instance.createLeaseId(`job:${options.type}`)
+    const lease = await LocalFileLeaseManager.Instance.acquire({
+      videoUUID,
+      leaseId: localFileLeaseId,
+      persistent: true
+    })
+
+    if (!lease) throw new Error(`Cannot acquire local file lease before creating ${options.type} job for video ${videoUUID}`)
+
+    return {
+      options: { ...options, localFileLeaseId, localFileLeaseVideoUUID: videoUUID },
+      lease
+    }
+  }
+
+  private isLocalFileLeaseJobType (jobType: JobType) {
+    return LOCAL_FILE_CONSUMER_JOB_TYPES.includes(jobType)
+  }
+
+  private async getJobVideoUUID (job: { payload: any, localFileLeaseVideoUUID?: string }): Promise<string | undefined> {
+    const videoUUID = job.localFileLeaseVideoUUID ?? job.payload?.videoUUID
+
+    if (typeof videoUUID === 'string' && videoUUID.length !== 0) return videoUUID
+
+    const payload = job.payload as {
+      captionId?: number
+      videoImportId?: number
+      videoId?: number
+      streamingPlaylistId?: number
+    }
+
+    if (typeof payload?.captionId === 'number') {
+      return (await VideoCaptionModel.loadWithVideo(payload.captionId))?.Video?.uuid
+    }
+
+    if (typeof payload?.videoImportId === 'number') {
+      return (await VideoImportModel.loadAndPopulateVideo(payload.videoImportId))?.Video?.uuid
+    }
+
+    if (typeof payload?.videoId === 'number') {
+      return (await VideoModel.load(payload.videoId))?.uuid
+    }
+
+    if (typeof payload?.streamingPlaylistId === 'number') {
+      return (await VideoStreamingPlaylistModel.loadWithVideo(payload.streamingPlaylistId))?.Video?.uuid
+    }
+
+    return undefined
   }
 
   private isNewVideoPipelineTrigger (job: CreateJobArgument & CreateJobOptions) {
@@ -634,9 +761,36 @@ class JobQueue {
     const retry = await this.buildRetryJobData(jobType, job.data)
 
     let newJob: Job
+    let retryLease: LocalFileLease | undefined
+    let localFileLeaseId: string | undefined
+    let localFileLeaseVideoUUID: string | undefined
+
+    if (this.isLocalFileLeaseJobType(jobType)) {
+      const videoUUID = await this.getJobVideoUUID({
+        payload: retry.data,
+        localFileLeaseVideoUUID: this.getLocalFileLeaseVideoUUID(job)
+      })
+      if (videoUUID) {
+        localFileLeaseVideoUUID = videoUUID
+        localFileLeaseId = LocalFileLeaseManager.Instance.createLeaseId(`job:${jobType}`)
+        retryLease = await LocalFileLeaseManager.Instance.acquire({
+          videoUUID,
+          leaseId: localFileLeaseId,
+          persistent: true
+        })
+        if (!retryLease) throw new Error(`Cannot acquire local file lease before retrying ${jobType} job for video ${videoUUID}`)
+      }
+    }
+
     try {
-      newJob = await queue.add('job', retry.data, this.buildJobOptions(jobType, { priority: job.opts.priority }))
+      newJob = await queue.add(
+        'job',
+        retry.data,
+        this.buildJobOptions(jobType, { priority: job.opts.priority, localFileLeaseId, localFileLeaseVideoUUID })
+      )
     } catch (err) {
+      await retryLease?.release()
+
       if (retry.increasedPendingMove) {
         await VideoJobInfoModel.decrease(retry.data.videoUUID, 'pendingMove')
       }
@@ -1009,13 +1163,14 @@ class JobQueue {
     })
     if (!isAllowed) return undefined
 
+    const preparedJobs = await this.prepareLocalFileLeases(filteredJobs)
     let lastJob: FlowJob
 
-    logger.debug('Creating jobs in local job queue', { jobs: filteredJobs })
+    logger.debug('Creating jobs in local job queue', { jobs: preparedJobs.map(job => job.options) })
 
-    for (const job of filteredJobs) {
+    for (const preparedJob of preparedJobs) {
       lastJob = {
-        ...this.buildJobFlowOption(job),
+        ...this.buildJobFlowOption(preparedJob.options),
 
         children: lastJob
           ? [ lastJob ]
@@ -1023,7 +1178,13 @@ class JobQueue {
       }
     }
 
-    return this.flowProducer.add(lastJob)
+    try {
+      return await this.flowProducer.add(lastJob)
+    } catch (err) {
+      await this.releasePreparedJobLeases(preparedJobs)
+
+      throw err
+    }
   }
 
   async createJobWithChildren (parent: CreateJobArgument & CreateJobOptions, children: (CreateJobArgument & CreateJobOptions)[]) {
@@ -1045,11 +1206,38 @@ class JobQueue {
     })
     if (!isAllowed) return undefined
 
-    return this.flowProducer.add({
-      ...this.buildJobFlowOption(parent),
+    const preparedJobs = await this.prepareLocalFileLeases(flowJobs)
+    const [ preparedParent, ...preparedChildren ] = preparedJobs
 
-      children: children.map(c => this.buildJobFlowOption(c))
-    })
+    try {
+      return await this.flowProducer.add({
+        ...this.buildJobFlowOption(preparedParent.options),
+
+        children: preparedChildren.map(c => this.buildJobFlowOption(c.options))
+      })
+    } catch (err) {
+      await this.releasePreparedJobLeases(preparedJobs)
+
+      throw err
+    }
+  }
+
+  private async releasePreparedJobLeases (preparedJobs: { lease?: LocalFileLease }[]) {
+    await Promise.all(preparedJobs.map(job => job.lease?.release()))
+  }
+
+  private async prepareLocalFileLeases (jobs: (CreateJobArgument & CreateJobOptions)[]) {
+    const preparedJobs: { options: CreateJobArgument & CreateJobOptions, lease?: LocalFileLease }[] = []
+
+    try {
+      for (const job of jobs) preparedJobs.push(await this.prepareLocalFileLease(job))
+    } catch (err) {
+      await this.releasePreparedJobLeases(preparedJobs)
+
+      throw err
+    }
+
+    return preparedJobs
   }
 
   private buildJobFlowOption (job: CreateJobArgument & CreateJobOptions): FlowJob {
@@ -1060,21 +1248,169 @@ class JobQueue {
       opts: {
         failParentOnFailure: true,
 
-        ...this.buildJobOptions(job.type as JobType, pick(job, [ 'priority', 'delay', 'failParentOnFailure', 'customJobId' ]))
+        ...this.buildJobOptions(job.type as JobType, pick(job, [
+          'priority',
+          'delay',
+          'failParentOnFailure',
+          'customJobId',
+          'localFileLeaseId',
+          'localFileLeaseVideoUUID'
+        ]))
       }
     }
   }
 
-  private buildJobOptions (type: JobType, options: CreateJobOptions = {}): JobsOptions {
+  private buildJobOptions (type: JobType, options: CreateJobOptions = {}): PeerTubeJobOptions {
     return {
       backoff: { delay: 60 * 1000, type: 'exponential' },
       attempts: JOB_ATTEMPTS[type],
       priority: options.priority,
       delay: options.delay,
       jobId: options.customJobId,
+      localFileLeaseId: options.localFileLeaseId,
+      localFileLeaseVideoUUID: options.localFileLeaseVideoUUID,
 
       ...this.buildJobRemovalOptions(type)
     }
+  }
+
+  private async ensureLocalFileLeaseForJob (job: Job, jobType: JobType): Promise<LocalFileLease | undefined> {
+    if (!this.isLocalFileLeaseJobType(jobType)) return undefined
+
+    const videoUUID = await this.getJobVideoUUID({
+      payload: job.data,
+      localFileLeaseVideoUUID: this.getLocalFileLeaseVideoUUID(job)
+    })
+    if (!videoUUID) return undefined
+
+    const leaseId = LocalFileLeaseManager.Instance.getLeaseId(job) ??
+      LocalFileLeaseManager.Instance.buildLegacyJobLeaseId(jobType, job.id)
+    const lease = await LocalFileLeaseManager.Instance.acquire({ videoUUID, leaseId, persistent: true })
+
+    if (!lease) throw new Error(`Cannot acquire local file lease while processing ${jobType} job ${job.id}`)
+
+    return lease
+  }
+
+  private async releaseLocalFileLeaseForJob (job: Job, jobType: JobType) {
+    if (!this.isLocalFileLeaseJobType(jobType)) return
+
+    const leaseId = LocalFileLeaseManager.Instance.getLeaseId(job) ??
+      LocalFileLeaseManager.Instance.buildLegacyJobLeaseId(jobType, job.id)
+
+    if (await LocalFileLeaseManager.Instance.releaseLeaseById(leaseId)) return
+
+    const videoUUID = await this.getJobVideoUUID({
+      payload: job.data,
+      localFileLeaseVideoUUID: this.getLocalFileLeaseVideoUUID(job)
+    })
+    if (videoUUID) await LocalFileLeaseManager.Instance.releaseLeaseById(leaseId, videoUUID)
+  }
+
+  private startLocalFileLeaseHeartbeat (lease: LocalFileLease | undefined, jobType: JobType, jobId: string | number) {
+    if (!lease) return () => {}
+
+    const timer = setInterval(() => {
+      lease.refresh()
+        .then(refreshed => {
+          if (!refreshed) {
+            logger.warn('Cannot refresh local file lease while processing %s job %s.', jobType, jobId)
+          }
+        })
+        .catch(err => logger.warn('Cannot refresh local file lease while processing job.', { err, jobType, jobId }))
+    }, LOCAL_FILE_LEASE_HEARTBEAT_MS)
+    timer.unref?.()
+
+    return () => {
+      clearInterval(timer)
+      lease.deactivate?.()
+    }
+  }
+
+  async releaseLocalFileLeaseForRemovedJob (job: Job, jobType?: JobType) {
+    const resolvedJobType = jobType ?? job.queueName as JobType
+
+    await this.releaseLocalFileLeaseForJob(job, resolvedJobType)
+  }
+
+  private getLocalFileLeaseVideoUUID (job: { opts?: object }) {
+    return (job.opts as { localFileLeaseVideoUUID?: string } | undefined)?.localFileLeaseVideoUUID
+  }
+
+  async reconcileLocalFileLeasesNow () {
+    await this.reconcileLocalFileLeases()
+  }
+
+  private isFinalJobAttempt (job: Job) {
+    return (job.opts?.attempts ?? 1) <= job.attemptsMade
+  }
+
+  private async reconcileLocalFileLeases () {
+    const reconciliationStartedAt = Date.now()
+    const states: ('waiting' | 'delayed' | 'prioritized' | 'waiting-children' | 'active')[] = [
+      'waiting',
+      'delayed',
+      'prioritized',
+      'waiting-children',
+      'active'
+    ]
+    const liveLeases = new Map<string, string>()
+
+    for (const jobType of LOCAL_FILE_CONSUMER_JOB_TYPES) {
+      const queue = this.queues[jobType]
+      if (!queue) continue
+
+      try {
+        await this.collectLiveLocalFileLeases({ queue, jobType, states, liveLeases })
+      } catch (err) {
+        logger.warn('Cannot reconcile local file leases because queue %s could not be listed.', jobType, { err })
+
+        return
+      }
+    }
+
+    await LocalFileLeaseManager.Instance.reconcile(liveLeases, reconciliationStartedAt)
+  }
+
+  private async collectLiveLocalFileLeases (options: {
+    queue: Queue
+    jobType: JobType
+    states: ('waiting' | 'delayed' | 'prioritized' | 'waiting-children' | 'active')[]
+    liveLeases: Map<string, string>
+  }) {
+    const { queue, jobType, states, liveLeases } = options
+
+    for (const state of states) {
+      let start = 0
+
+      while (true) {
+        const jobs = await queue.getJobs([ state ], start, start + LOCAL_FILE_LEASE_RECONCILIATION_BATCH_SIZE - 1, true)
+        for (const job of jobs) {
+          await this.addLiveLocalFileLease({ job, jobType, liveLeases })
+        }
+
+        if (jobs.length < LOCAL_FILE_LEASE_RECONCILIATION_BATCH_SIZE) break
+
+        start += jobs.length
+      }
+    }
+  }
+
+  private async addLiveLocalFileLease (options: {
+    job: Job
+    jobType: JobType
+    liveLeases: Map<string, string>
+  }) {
+    const { job, jobType, liveLeases } = options
+    const videoUUID = await this.getJobVideoUUID({
+      payload: job.data,
+      localFileLeaseVideoUUID: this.getLocalFileLeaseVideoUUID(job)
+    })
+    if (!videoUUID) return
+
+    const leaseId = LocalFileLeaseManager.Instance.getLeaseId(job) ??
+      LocalFileLeaseManager.Instance.buildLegacyJobLeaseId(jobType, job.id)
+    liveLeases.set(leaseId, videoUUID)
   }
 
   // ---------------------------------------------------------------------------
@@ -1465,6 +1801,7 @@ class JobQueue {
           for (const job of matchingJobs) {
             const removed = await this.removeJobForDeletedVideo({
               job,
+              jobType: queueName,
               state,
               videoUUID,
               cancelledReason: CANCELLED_REASON
@@ -1493,14 +1830,17 @@ class JobQueue {
 
   private async removeJobForDeletedVideo (options: {
     job: Job
+    jobType: JobType
     state: JobState
     videoUUID: string
     cancelledReason: string
   }) {
-    const { job, state, videoUUID, cancelledReason } = options
+    const { job, jobType, state, videoUUID, cancelledReason } = options
 
     try {
       await job.remove()
+      await this.releaseLocalFileLeaseForJob(job, jobType)
+
       return true
     } catch (err) {
       if (state !== 'active') {

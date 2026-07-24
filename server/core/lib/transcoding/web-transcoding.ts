@@ -80,7 +80,7 @@ export async function optimizeOriginalVideofile (options: {
           })
 
           return onWebVideoFileTranscoding({ video, videoOutputPath })
-        })
+        }, video.uuid)
       }
 
       throw new Error(`Cannot optimize video ${video.uuid} because no input file is available anymore.`)
