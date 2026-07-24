@@ -338,6 +338,60 @@ describe('move-to-object-storage', function () {
     }
   })
 
+  it('should check pipeline counters once per video cleanup cycle for multiple files', async function () {
+    this.timeout(5_000)
+
+    const originalKeepLocalFileAfterMove = CONFIG.OBJECT_STORAGE.KEEP_LOCAL_FILE_AFTER_MOVE
+    const originalMoveFileDelay = CONFIG.OBJECT_STORAGE.MOVE_FILE_DELAY
+    const originalLoadByUUID = VideoJobInfoModel.loadByUUID
+    const originalHasPendingOrActiveLocalFileConsumerJob = JobQueue.Instance.hasPendingOrActiveLocalFileConsumerJob
+
+    const videoUUID = 'video-uuid-batched-cleanup'
+    const tmpDirectory = await mkdtemp(join(tmpdir(), 'peertube-retained-batched-'))
+    const firstPath = join(tmpDirectory, 'segment-1.ts')
+    const secondPath = join(tmpDirectory, 'segment-2.ts')
+    let loadCount = 0
+
+    CONFIG.OBJECT_STORAGE.KEEP_LOCAL_FILE_AFTER_MOVE = 0
+    CONFIG.OBJECT_STORAGE.MOVE_FILE_DELAY = 20
+    VideoJobInfoModel.loadByUUID = (() => {
+      loadCount++
+
+      return Promise.resolve({
+        pendingMove: loadCount === 1 ? 1 : 0,
+        pendingTranscode: 0,
+        pendingTranscription: 0
+      } as any)
+    }) as typeof VideoJobInfoModel.loadByUUID
+    JobQueue.Instance.hasPendingOrActiveLocalFileConsumerJob =
+      (() => Promise.resolve(false)) as typeof JobQueue.Instance.hasPendingOrActiveLocalFileConsumerJob
+
+    try {
+      await writeFile(firstPath, 'test')
+      await writeFile(secondPath, 'test')
+
+      await removeLocalFileAfterMove({ path: firstPath, videoUUID, skipReadinessCheck: true })
+      await removeLocalFileAfterMove({ path: secondPath, videoUUID, skipReadinessCheck: true })
+
+      await new Promise(resolve => setTimeout(resolve, 5))
+      expect(loadCount).to.equal(1)
+      expect(existsSync(firstPath)).to.be.true
+      expect(existsSync(secondPath)).to.be.true
+
+      await new Promise(resolve => setTimeout(resolve, 100))
+      expect(loadCount).to.equal(2)
+      expect(existsSync(firstPath)).to.be.false
+      expect(existsSync(secondPath)).to.be.false
+    } finally {
+      CONFIG.OBJECT_STORAGE.KEEP_LOCAL_FILE_AFTER_MOVE = originalKeepLocalFileAfterMove
+      CONFIG.OBJECT_STORAGE.MOVE_FILE_DELAY = originalMoveFileDelay
+      VideoJobInfoModel.loadByUUID = originalLoadByUUID
+      JobQueue.Instance.hasPendingOrActiveLocalFileConsumerJob = originalHasPendingOrActiveLocalFileConsumerJob
+
+      await remove(tmpDirectory).catch(() => {})
+    }
+  })
+
   it('should keep retained local files after unlock while pipeline counters remain pending', async function () {
     this.timeout(5_000)
 

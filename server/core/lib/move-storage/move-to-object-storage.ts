@@ -66,6 +66,8 @@ const RETAINED_LOCAL_FILES_CLEANUP_BATCH_SIZE = 100
 const RETAINED_VIDEO_ATTRIBUTES = [ 'id', 'uuid', 'privacy' ]
 const RETAINED_VIDEO_FILE_ATTRIBUTES = [ 'id', 'filename', 'torrentFilename', 'videoId', 'videoStreamingPlaylistId' ]
 const scheduledLocalFileRemovals = new Set<string>()
+const scheduledLocalFileRemovalsByVideoUUID = new Map<string, Map<string, ScheduledLocalFileRemoval>>()
+const localFileRemovalWorkersByVideoUUID = new Map<string, Promise<void>>()
 let retainedLocalFilesCleanupScheduled = false
 let retainedLocalFilesCleanupRunPromise: Promise<{ scheduled: number; skippedMissing: number }> | undefined
 const retainedLocalFilesCleanupProgressListeners = new Set<(progress: RetainedLocalFilesCleanupProgress) => void | Promise<void>>()
@@ -75,6 +77,13 @@ type RetainedLocalFileCleanupCandidate = {
   videoUUID: string
   objectStorageKey: string
   bucketInfo: BucketInfo
+}
+
+type ScheduledLocalFileRemoval = {
+  cleanupKey: string
+  path: string
+  readyAt: number
+  waitForPipelineCompletion: boolean
 }
 
 type RetainedLocalFilesCleanupProgress = {
@@ -2051,106 +2060,144 @@ function scheduleLocalFileRemovalAfterActiveFileWork (options: {
 
   scheduledLocalFileRemovals.add(cleanupKey)
 
-  void (async () => {
-    try {
-      while (true) {
-        if (delayMs > 0) {
-          logger.info(
-            'Local file %s for video %s is ready for retained cleanup. Keeping it for %d ms before deletion.',
-            path,
-            videoUUID,
-            delayMs,
-            lTagsBase(videoUUID)
-          )
+  let removals = scheduledLocalFileRemovalsByVideoUUID.get(videoUUID)
+  if (!removals) {
+    removals = new Map<string, ScheduledLocalFileRemoval>()
+    scheduledLocalFileRemovalsByVideoUUID.set(videoUUID, removals)
+  }
 
-          await wait(delayMs)
-        }
+  removals.set(cleanupKey, {
+    cleanupKey,
+    path,
+    readyAt: Date.now() + Math.max(0, delayMs),
+    waitForPipelineCompletion
+  })
 
-        const jobInfo = waitForPipelineCompletion
-          ? await VideoJobInfoModel.loadByUUID(videoUUID)
-          : null
+  if (localFileRemovalWorkersByVideoUUID.has(videoUUID) === false) {
+    const worker = runLocalFileRemovalWorker(videoUUID)
+    localFileRemovalWorkersByVideoUUID.set(videoUUID, worker)
+
+    void worker.finally(() => {
+      if (localFileRemovalWorkersByVideoUUID.get(videoUUID) === worker) {
+        localFileRemovalWorkersByVideoUUID.delete(videoUUID)
+      }
+    })
+  }
+
+  return true
+}
+
+async function runLocalFileRemovalWorker (videoUUID: string) {
+  const removals = scheduledLocalFileRemovalsByVideoUUID.get(videoUUID)
+  if (!removals) return
+
+  try {
+    while (removals.size !== 0) {
+      const now = Date.now()
+      const nextReadyAt = Math.min(...[ ...removals.values() ].map(removal => removal.readyAt))
+      if (nextReadyAt > now) {
+        await wait(nextReadyAt - now)
+        continue
+      }
+
+      const readyRemovals = [ ...removals.values() ].filter(removal => removal.readyAt <= now)
+      const pipelineRemovals = readyRemovals.filter(removal => removal.waitForPipelineCompletion)
+      const immediateRemovals = readyRemovals.filter(removal => !removal.waitForPipelineCompletion)
+
+      if (pipelineRemovals.length !== 0) {
+        const jobInfo = await VideoJobInfoModel.loadByUUID(videoUUID)
         const pendingMove = jobInfo?.pendingMove ?? 0
         const pendingTranscode = jobInfo?.pendingTranscode ?? 0
         const pendingTranscription = jobInfo?.pendingTranscription ?? 0
+        const pipelinePending = pendingMove > 0 || pendingTranscode > 0 || pendingTranscription > 0
+        const localConsumerPending = pipelinePending === false &&
+          await JobQueue.Instance.hasPendingOrActiveLocalFileConsumerJob(videoUUID)
 
-        if (waitForPipelineCompletion && (pendingMove > 0 || pendingTranscode > 0 || pendingTranscription > 0)) {
-          logger.info(
-            'Keeping local file %s for video %s because pipeline counters are still pending ' +
-            '(pendingMove=%d, pendingTranscode=%d, pendingTranscription=%d).',
-            path,
-            videoUUID,
-            pendingMove,
-            pendingTranscode,
-            pendingTranscription,
-            lTagsBase(videoUUID)
-          )
+        if (pipelinePending || localConsumerPending) {
+          const retryAt = Date.now() + (CONFIG.OBJECT_STORAGE.MOVE_FILE_DELAY || LOCAL_CLEANUP_RETRY_DELAY_MS)
+          for (const removal of pipelineRemovals) removal.readyAt = retryAt
 
-          await wait(CONFIG.OBJECT_STORAGE.MOVE_FILE_DELAY || LOCAL_CLEANUP_RETRY_DELAY_MS)
-          continue
-        }
-
-        if (waitForPipelineCompletion && await JobQueue.Instance.hasPendingOrActiveLocalFileConsumerJob(videoUUID)) {
-          logger.info(
-            'Keeping local file %s for video %s because queued local file consumer jobs are still pending.',
-            path,
-            videoUUID,
-            lTagsBase(videoUUID)
-          )
-
-          await wait(CONFIG.OBJECT_STORAGE.MOVE_FILE_DELAY || LOCAL_CLEANUP_RETRY_DELAY_MS)
-          continue
-        }
-
-        if (VideoPathManager.Instance.hasLockedFiles(videoUUID)) {
-          logger.info(
-            'Keeping local file %s for video %s because local video file work is still active.',
-            path,
-            videoUUID,
-            lTagsBase(videoUUID)
-          )
-        }
-
-        const releaser = await VideoPathManager.Instance.lockFiles(videoUUID)
-        let retryRemovalAfterLock = false
-        try {
-          try {
-            await removeLocalPathNow(path)
-          } catch (err) {
-            if (isRetryableLocalRemovalError(err)) {
-              logger.warn(
-                'Cannot remove retained local file %s yet (%s). Will retry after delay.',
-                path,
-                (err as { code?: string }).code,
-                { err, ...lTagsBase(videoUUID) }
-              )
-
-              retryRemovalAfterLock = true
-            } else {
-              throw err
-            }
+          if (pipelinePending) {
+            logger.info(
+              'Keeping %d local file(s) for video %s because pipeline counters are still pending ' +
+              '(pendingMove=%d, pendingTranscode=%d, pendingTranscription=%d).',
+              pipelineRemovals.length,
+              videoUUID,
+              pendingMove,
+              pendingTranscode,
+              pendingTranscription,
+              lTagsBase(videoUUID)
+            )
+          } else {
+            logger.info(
+              'Keeping %d local file(s) for video %s because queued local file consumer jobs are still pending.',
+              pipelineRemovals.length,
+              videoUUID,
+              lTagsBase(videoUUID)
+            )
           }
-
-          if (!retryRemovalAfterLock) {
-            logger.debug('Removed local file %s after video pipeline completed object-storage move.', path, lTagsBase(videoUUID))
-            return
-          }
-        } finally {
-          releaser()
-        }
-
-        if (retryRemovalAfterLock) {
-          await wait(CONFIG.OBJECT_STORAGE.MOVE_FILE_DELAY || LOCAL_CLEANUP_RETRY_DELAY_MS)
-          continue
         }
       }
-    } catch (err) {
-      logger.warn('Cannot remove retained local file %s after video pipeline completion.', path, { err, ...lTagsBase(videoUUID) })
-    } finally {
-      scheduledLocalFileRemovals.delete(cleanupKey)
-    }
-  })()
 
-  return true
+      const removalsToProcess = [
+        ...immediateRemovals,
+        ...pipelineRemovals.filter(removal => removal.readyAt <= now)
+      ]
+      if (removalsToProcess.length === 0) continue
+
+      const releaser = await VideoPathManager.Instance.lockFiles(videoUUID)
+      try {
+        for (const removal of removalsToProcess) {
+          await removeScheduledLocalFile({ removal, videoUUID, removals })
+        }
+      } finally {
+        releaser()
+      }
+    }
+  } catch (err) {
+    logger.warn('Cannot remove retained local files after video pipeline completion.', { err, ...lTagsBase(videoUUID) })
+
+    for (const removal of removals.values()) {
+      scheduledLocalFileRemovals.delete(removal.cleanupKey)
+    }
+    removals.clear()
+  } finally {
+    scheduledLocalFileRemovalsByVideoUUID.delete(videoUUID)
+  }
+}
+
+async function removeScheduledLocalFile (options: {
+  removal: ScheduledLocalFileRemoval
+  videoUUID: string
+  removals: Map<string, ScheduledLocalFileRemoval>
+}) {
+  const { removal, videoUUID, removals } = options
+
+  try {
+    await removeLocalPathNow(removal.path)
+    removals.delete(removal.cleanupKey)
+    scheduledLocalFileRemovals.delete(removal.cleanupKey)
+  } catch (err) {
+    if (!isRetryableLocalRemovalError(err)) {
+      logger.warn(
+        'Cannot remove retained local file %s after video pipeline completion.',
+        removal.path,
+        { err, ...lTagsBase(videoUUID) }
+      )
+
+      removals.delete(removal.cleanupKey)
+      scheduledLocalFileRemovals.delete(removal.cleanupKey)
+      return
+    }
+
+    removal.readyAt = Date.now() + LOCAL_CLEANUP_RETRY_DELAY_MS
+    logger.warn(
+      'Cannot remove retained local file %s yet (%s). Will retry after delay.',
+      removal.path,
+      (err as { code?: string }).code,
+      { err, ...lTagsBase(videoUUID) }
+    )
+  }
 }
 
 export function shouldWaitForPipelineCompletionBeforeDeletingMovedHLS (options: {
