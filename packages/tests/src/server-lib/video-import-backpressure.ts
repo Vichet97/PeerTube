@@ -159,17 +159,15 @@ describe('video-import local pipeline backpressure', function () {
     expect(buildVideoImportBackpressureJobId(42, 1_834_567, 600_000)).to.equal('video-import-backpressure-42-3')
   })
 
-  it('should not re-defer an already deferred backpressure import job', function () {
+  it('should keep a backpressure retry pending until downstream work has drained', function () {
     expect(shouldDeferVideoImportForLocalPipeline({
-      jobId: '149307',
       total: 30,
       maxJobs: 25
     })).to.be.true
 
     expect(shouldDeferVideoImportForLocalPipeline({
-      jobId: 'video-import-backpressure-121931-7717967',
       total: 30,
       maxJobs: 25
-    })).to.be.false
+    })).to.be.true
   })
 })

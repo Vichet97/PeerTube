@@ -134,27 +134,9 @@ async function maybeDeferVideoImportForLocalPipeline (
   const effectiveBacklogTotal = getVideoImportLocalPipelineBackpressureTotal(backlog)
 
   if (!shouldDeferVideoImportForLocalPipeline({
-    jobId: job.id,
     total: effectiveBacklogTotal,
     maxJobs
-  })) {
-    if (isVideoImportBackpressureJobId(job.id) && isVideoImportLocalPipelineBacklogged({ total: effectiveBacklogTotal, maxJobs })) {
-      logger.warn(
-        '[VIDEO_IMPORT] Backpressure retry job %s for import %d hit the backlog gate again at %d/%d. ' +
-        'Continuing without another deferral to avoid indefinite "To import" loops.',
-        job.id,
-        videoImport.id,
-        effectiveBacklogTotal,
-        maxJobs,
-        {
-          backlogTotal: backlog.total,
-          backlogByType: backlog.byType
-        }
-      )
-    }
-
-    return false
-  }
+  })) return false
 
   const delayMs = buildVideoImportLocalPipelineBackpressureDelayMs({
     total: effectiveBacklogTotal,
@@ -273,13 +255,13 @@ export function isVideoImportLocalPipelineBacklogged (options: {
 }
 
 export function shouldDeferVideoImportForLocalPipeline (options: {
-  jobId: string | number | undefined
   total: number
   maxJobs: number
 }) {
-  if (!isVideoImportLocalPipelineBacklogged({ total: options.total, maxJobs: options.maxJobs })) return false
-
-  return !isVideoImportBackpressureJobId(options.jobId)
+  // A delayed import is intentional admission control, not a stale job. Let it
+  // requeue until downstream local work has drained; allowing one retry through
+  // was enough to refill disk while a large transcoding backlog still existed.
+  return isVideoImportLocalPipelineBacklogged({ total: options.total, maxJobs: options.maxJobs })
 }
 
 export function buildVideoImportBackpressureJobId (

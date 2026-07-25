@@ -2095,7 +2095,15 @@ class JobQueue {
   private getJobConcurrency (jobType: JobType) {
     if (jobType === 'video-transcoding') return CONFIG.TRANSCODING.CONCURRENCY
     if (jobType === 'video-import') return CONFIG.IMPORT.VIDEOS.CONCURRENCY
-    if (jobType === 'move-to-object-storage') return CONFIG.OBJECT_STORAGE.CONCURRENCY
+    if (
+      jobType === 'move-to-object-storage' ||
+      jobType === 'move-video-file-to-object-storage' ||
+      jobType === 'move-hls-playlist-to-object-storage' ||
+      jobType === 'move-thumbnail-to-object-storage' ||
+      jobType === 'move-caption-to-object-storage'
+    ) {
+      return CONFIG.OBJECT_STORAGE.CONCURRENCY
+    }
     if (jobType === 'move-to-file-system') return CONFIG.OBJECT_STORAGE.MOVE_TO_FILE_SYSTEM_CONCURRENCY
     if (jobType === 'federate-video') return CONFIG.FEDERATION.CONCURRENCY
     if (jobType === 'generate-video-storyboard') return CONFIG.STORYBOARDS.CONCURRENCY

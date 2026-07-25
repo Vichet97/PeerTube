@@ -1,10 +1,33 @@
 /* eslint-disable @typescript-eslint/no-unused-expressions */
 import { expect } from 'chai'
+import { CONFIG } from '@peertube/peertube-server/core/initializers/config.js'
 import { JobQueue } from '@peertube/peertube-server/core/lib/job-queue/index.js'
 import { LocalFileLeaseManager } from '@peertube/peertube-server/core/lib/local-file-lease-manager.js'
 import { VideoModel } from '@peertube/peertube-server/core/models/video/video.js'
 
 describe('job-queue local file consumer scans', function () {
+  it('should use configured object-storage concurrency for granular move workers', function () {
+    const objectStorageConfig = CONFIG.OBJECT_STORAGE as { CONCURRENCY: number }
+    const originalConcurrency = objectStorageConfig.CONCURRENCY
+    objectStorageConfig.CONCURRENCY = 13
+
+    try {
+      const getJobConcurrency = (JobQueue.Instance as any).getJobConcurrency.bind(JobQueue.Instance) as (jobType: string) => number
+
+      for (const jobType of [
+        'move-to-object-storage',
+        'move-video-file-to-object-storage',
+        'move-hls-playlist-to-object-storage',
+        'move-thumbnail-to-object-storage',
+        'move-caption-to-object-storage'
+      ]) {
+        expect(getJobConcurrency(jobType)).to.equal(13)
+      }
+    } finally {
+      objectStorageConfig.CONCURRENCY = originalConcurrency
+    }
+  })
+
   it('should tolerate undefined jobs while scanning pending local file consumers', async function () {
     const queues = (JobQueue.Instance as any).queues as Record<string, any>
     const originalQueue = queues['video-transcoding']
