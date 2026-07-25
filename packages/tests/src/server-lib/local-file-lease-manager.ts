@@ -1,9 +1,19 @@
 /* eslint-disable @typescript-eslint/no-unused-expressions */
 import { expect } from 'chai'
-import { LocalFileLeaseManager } from '@peertube/peertube-server/core/lib/local-file-lease-manager.js'
+import {
+  LocalFileLeaseManager,
+  LOCAL_FILE_READ_LEASE_HEARTBEAT_MS,
+  LOCAL_FILE_READ_LEASE_TTL_MS
+} from '@peertube/peertube-server/core/lib/local-file-lease-manager.js'
 import { Redis } from '@peertube/peertube-server/core/lib/redis.js'
 
 describe('local-file-lease-manager', function () {
+  it('should refresh temporary local reads before their bounded crash-recovery expiry', function () {
+    expect(LOCAL_FILE_READ_LEASE_TTL_MS).to.equal(15 * 60 * 1000)
+    expect(LOCAL_FILE_READ_LEASE_HEARTBEAT_MS).to.equal(5 * 60 * 1000)
+    expect(LOCAL_FILE_READ_LEASE_HEARTBEAT_MS).to.be.lessThan(LOCAL_FILE_READ_LEASE_TTL_MS)
+  })
+
   it('should refresh and release an in-memory lease idempotently', async function () {
     const manager = LocalFileLeaseManager.Instance
     const lease = await manager.acquire({

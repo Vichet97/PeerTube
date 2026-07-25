@@ -21,7 +21,11 @@ import { extname, join } from 'path'
 import { makeHLSFileAvailable, makeOriginalFileAvailable, makeWebVideoFileAvailable } from './object-storage/index.js'
 import { getHLSDirectory, getHLSResolutionPlaylistFilename } from './paths.js'
 import { isVideoInPrivateDirectory } from './video-privacy.js'
-import { LocalFileLease, LocalFileLeaseManager } from './local-file-lease-manager.js'
+import {
+  LocalFileLease,
+  LocalFileLeaseManager,
+  LOCAL_FILE_READ_LEASE_HEARTBEAT_MS
+} from './local-file-lease-manager.js'
 
 type MakeAvailableCB<T> = (path: string) => Awaitable<T>
 type MakeAvailableMultipleCB<T> = (paths: string[]) => Awaitable<T>
@@ -34,8 +38,6 @@ type MakeAvailableCreateMethod = {
 type FilesUnlockedListener = (videoUUID: string) => void | Promise<void>
 
 const lTags = loggerTagsFactory('video-path-manager')
-const LOCAL_FILE_READ_LEASE_HEARTBEAT_MS = 60 * 60 * 1000
-
 class VideoPathManager {
   private static instance: VideoPathManager
 

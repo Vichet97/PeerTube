@@ -9,6 +9,7 @@ import { FileStorage, VideoState } from '@peertube/peertube-models'
 import {
   buildRetainedLocalFileCleanupDelay,
   cleanupRetainedLocalFilesAfterRestart,
+  isOrphanLocalMediaOldEnough,
   maybeTransitionAfterObjectStorageMove,
   removeLocalFileAfterMove
 } from '@peertube/peertube-server/core/lib/move-storage/move-to-object-storage.js'
@@ -181,6 +182,24 @@ describe('move-to-object-storage', function () {
       mtimeMs: 1_000,
       nowMs: 90_000
     })).to.equal(0)
+  })
+
+  it('should only classify an unreferenced local-media path as old after the orphan safety window', async function () {
+    const tmpDirectory = await mkdtemp(join(tmpdir(), 'peertube-orphan-local-media-'))
+    const path = join(tmpDirectory, 'orphan.mp4')
+
+    try {
+      await writeFile(path, 'test')
+      const createdAt = Date.now()
+
+      expect(await isOrphanLocalMediaOldEnough(path, createdAt + 60 * 60 * 1000)).to.be.false
+      expect(await isOrphanLocalMediaOldEnough(path, createdAt + 24 * 60 * 60 * 1000 + 1)).to.be.true
+
+      await remove(path)
+      expect(await isOrphanLocalMediaOldEnough(path, createdAt + 48 * 60 * 60 * 1000)).to.be.false
+    } finally {
+      await remove(tmpDirectory)
+    }
   })
 
   it('should defer restart cleanup once per video instead of creating per-file polling loops', async function () {

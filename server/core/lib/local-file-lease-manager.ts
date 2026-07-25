@@ -6,8 +6,11 @@ import { randomUUID } from 'node:crypto'
 const lTags = loggerTagsFactory('local-file-lease')
 
 // Queue-owned leases are durable and are reconciled against live BullMQ jobs at
-// startup. Short-lived local-read leases expire as a crash-recovery guard.
-const LOCAL_FILE_LEASE_TTL_MS = 24 * 60 * 60 * 1000
+// startup. Short-lived local-read leases are refreshed while their caller is
+// alive, but must expire quickly after a crash or abandoned request so they do
+// not retain object-storage replicas for a full day.
+export const LOCAL_FILE_READ_LEASE_TTL_MS = 15 * 60 * 1000
+export const LOCAL_FILE_READ_LEASE_HEARTBEAT_MS = Math.floor(LOCAL_FILE_READ_LEASE_TTL_MS / 3)
 const PERSISTENT_LEASE_SCORE_FLOOR = 8_000_000_000_000_000
 const CLEANUP_LOCK_TTL_MS = 30_000
 const CLEANUP_LOCK_HEARTBEAT_MS = Math.floor(CLEANUP_LOCK_TTL_MS / 3)
@@ -151,7 +154,7 @@ class LocalFileLeaseManager {
   }): Promise<LocalFileLease | undefined> {
     const {
       videoUUID,
-      ttlMs = LOCAL_FILE_LEASE_TTL_MS,
+      ttlMs = LOCAL_FILE_READ_LEASE_TTL_MS,
       persistent = false
     } = options
     const maxWaitMs = options.maxWaitMs ?? (
@@ -307,7 +310,7 @@ class LocalFileLeaseManager {
       await this.tryAcquireRedisLease({
         videoUUID,
         leaseId,
-        ttlMs: LOCAL_FILE_LEASE_TTL_MS,
+        ttlMs: LOCAL_FILE_READ_LEASE_TTL_MS,
         persistent: true
       })
       this.addInMemoryLease(videoUUID, leaseId, Infinity)

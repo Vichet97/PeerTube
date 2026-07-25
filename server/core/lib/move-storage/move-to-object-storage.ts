@@ -1,7 +1,7 @@
 import { FileStorage, VideoState, VideoStateType } from '@peertube/peertube-models'
 import { logger, LoggerTags, loggerTagsFactory } from '@server/helpers/logger.js'
 import { CONFIG } from '@server/initializers/config.js'
-import { P2P_MEDIA_LOADER_PEER_VERSION } from '@server/initializers/constants.js'
+import { DIRECTORIES, P2P_MEDIA_LOADER_PEER_VERSION } from '@server/initializers/constants.js'
 import { buildCaptionM3U8Content, updateM3U8AndShaPlaylist } from '@server/lib/hls.js'
 import {
   BucketInfo,
@@ -50,7 +50,7 @@ import {
 } from '@server/types/models/index.js'
 import { MVideoSource } from '@server/types/models/video/video-source.js'
 import { pathExists, remove } from 'fs-extra/esm'
-import { rmdir, stat } from 'fs/promises'
+import { readdir, rmdir, stat } from 'fs/promises'
 import { dirname, join, resolve } from 'path'
 import PQueue from 'p-queue'
 import { Op } from 'sequelize'
@@ -64,6 +64,10 @@ const RETAINED_LOCAL_FILES_CLEANUP_START_DELAY_MS = 10 * 60 * 1000
 const RETAINED_LOCAL_FILES_CLEANUP_INTERVAL_MS = 30 * 60 * 1000
 const RETAINED_LOCAL_FILES_CLEANUP_CONCURRENCY = 2
 const RETAINED_LOCAL_FILES_CLEANUP_BATCH_SIZE = 100
+// A file can briefly exist before every model relation is committed. Never
+// consider that window an orphan: the periodic scrub only removes media that
+// has been unreferenced for a full day and when the video pipeline is idle.
+const ORPHAN_LOCAL_MEDIA_MIN_AGE_MS = 24 * 60 * 60 * 1000
 const RETAINED_VIDEO_ATTRIBUTES = [ 'id', 'uuid', 'privacy' ]
 const RETAINED_VIDEO_FILE_ATTRIBUTES = [ 'id', 'filename', 'torrentFilename', 'videoId', 'videoStreamingPlaylistId' ]
 const scheduledLocalFileRemovals = new Set<string>()
@@ -100,6 +104,11 @@ type RetainedLocalFilesCleanupProgress = {
 
 type RetainedLocalFilesCleanupContext = {
   seenCleanupKeys: Set<string>
+}
+
+type OrphanLocalMediaCleanupResult = {
+  deletedWebVideoFiles: number
+  deletedHLSDirectories: number
 }
 
 export async function maybeTransitionAfterObjectStorageMove (options: {
@@ -1440,6 +1449,16 @@ async function performRetainedLocalFilesCleanupAfterRestart () {
   await addRetainedThumbnailFileCandidates(counts, context)
   await addRetainedStoryboardFileCandidates(counts, context)
 
+  const orphanCleanup = await cleanupUnreferencedLocalMedia()
+  if (orphanCleanup.deletedWebVideoFiles !== 0 || orphanCleanup.deletedHLSDirectories !== 0) {
+    logger.info(
+      'Deleted %d orphan web-video file(s) and %d orphan HLS directory/directories after database reconciliation.',
+      orphanCleanup.deletedWebVideoFiles,
+      orphanCleanup.deletedHLSDirectories,
+      lTagsBase()
+    )
+  }
+
   counts.currentPhase = 'completed'
   await emitRetainedLocalFilesCleanupProgress(counts)
 
@@ -1458,6 +1477,136 @@ async function performRetainedLocalFilesCleanupAfterRestart () {
   return {
     scheduled: counts.scheduled,
     skippedMissing: counts.skippedMissing
+  }
+}
+
+async function cleanupUnreferencedLocalMedia (): Promise<OrphanLocalMediaCleanupResult> {
+  if (await hasPendingLocalPipelineWork()) {
+    return { deletedWebVideoFiles: 0, deletedHLSDirectories: 0 }
+  }
+
+  const [ webVideoFiles, videos ] = await Promise.all([
+    VideoFileModel.unscoped().findAll({
+      attributes: [ 'filename' ],
+      where: {
+        videoId: { [Op.ne]: null },
+        filename: { [Op.ne]: null }
+      },
+      raw: true
+    }),
+    VideoModel.unscoped().findAll({
+      attributes: [ 'uuid' ],
+      raw: true
+    })
+  ])
+
+  const referencedWebVideoFilenames = new Set(webVideoFiles.map(file => file.filename).filter(Boolean))
+  const knownVideoUUIDs = new Set(videos.map(video => video.uuid).filter(Boolean))
+  const nowMs = Date.now()
+
+  const deletedWebVideoFiles = await cleanupOrphanWebVideoFiles({
+    directories: [ DIRECTORIES.WEB_VIDEOS.PUBLIC, DIRECTORIES.WEB_VIDEOS.PRIVATE ],
+    referencedFilenames: referencedWebVideoFilenames,
+    nowMs
+  })
+  const deletedHLSDirectories = await cleanupOrphanHLSDirectories({
+    directories: [ DIRECTORIES.HLS_STREAMING_PLAYLIST.PUBLIC, DIRECTORIES.HLS_STREAMING_PLAYLIST.PRIVATE ],
+    knownVideoUUIDs,
+    nowMs
+  })
+
+  return { deletedWebVideoFiles, deletedHLSDirectories }
+}
+
+async function hasPendingLocalPipelineWork () {
+  try {
+    return await VideoJobInfoModel.count({
+      where: {
+        [Op.or]: [
+          { pendingMove: { [Op.ne]: 0 } },
+          { pendingTranscode: { [Op.ne]: 0 } },
+          { pendingTranscription: { [Op.ne]: 0 } }
+        ]
+      }
+    }) !== 0
+  } catch (err) {
+    logger.warn('Cannot check pending video pipeline work before orphan local-media cleanup.', { err, ...lTagsBase() })
+
+    // A failed safety check must keep files, never remove them.
+    return true
+  }
+}
+
+async function cleanupOrphanWebVideoFiles (options: {
+  directories: string[]
+  referencedFilenames: Set<string>
+  nowMs: number
+}) {
+  let deleted = 0
+
+  for (const directory of options.directories) {
+    let entries: Awaited<ReturnType<typeof readdir>>
+    try {
+      entries = await readdir(directory, { withFileTypes: true })
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue
+      throw err
+    }
+
+    for (const entry of entries) {
+      if (!entry.isFile() || options.referencedFilenames.has(entry.name)) continue
+
+      const path = join(directory, entry.name)
+      if (!await isOrphanLocalMediaOldEnough(path, options.nowMs)) continue
+
+      await removeLocalPathNow(path)
+      deleted++
+    }
+  }
+
+  return deleted
+}
+
+async function cleanupOrphanHLSDirectories (options: {
+  directories: string[]
+  knownVideoUUIDs: Set<string>
+  nowMs: number
+}) {
+  let deleted = 0
+
+  for (const directory of options.directories) {
+    let entries: Awaited<ReturnType<typeof readdir>>
+    try {
+      entries = await readdir(directory, { withFileTypes: true })
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue
+      throw err
+    }
+
+    for (const entry of entries) {
+      const path = join(directory, entry.name)
+      // The public HLS root also contains the private HLS root. It is a
+      // container, not a video UUID directory, and must never be removed by
+      // the orphan scrub.
+      if (resolve(path) === resolve(DIRECTORIES.HLS_STREAMING_PLAYLIST.PRIVATE)) continue
+      if (!entry.isDirectory() || options.knownVideoUUIDs.has(entry.name)) continue
+      if (!await isOrphanLocalMediaOldEnough(path, options.nowMs)) continue
+
+      await remove(path)
+      deleted++
+    }
+  }
+
+  return deleted
+}
+
+export async function isOrphanLocalMediaOldEnough (path: string, nowMs = Date.now()) {
+  try {
+    const stats = await stat(path)
+    return nowMs - stats.mtimeMs >= ORPHAN_LOCAL_MEDIA_MIN_AGE_MS
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false
+    throw err
   }
 }
 
