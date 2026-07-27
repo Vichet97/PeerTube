@@ -116,7 +116,7 @@ describe('video-import local pipeline backpressure', function () {
     })).to.equal(12)
   })
 
-  it('should ignore optional follow-up transcodes when computing import-relevant backlog', function () {
+  it('should count optional new-video transcodes because they retain local HLS input', function () {
     const isImportRelevantLocalPipelineJobData =
       (JobQueue.prototype as any).isImportRelevantLocalPipelineJobData as (
         jobType: string,
@@ -131,6 +131,11 @@ describe('video-import local pipeline backpressure', function () {
     expect(isImportRelevantLocalPipelineJobData.call({}, 'video-transcoding', {
       isNewVideo: true,
       transcodingPriority: 'optional'
+    })).to.be.true
+
+    expect(isImportRelevantLocalPipelineJobData.call({}, 'video-transcoding', {
+      isNewVideo: false,
+      transcodingPriority: 'optional'
     })).to.be.false
 
     expect(isImportRelevantLocalPipelineJobData.call({}, 'transcoding-job-builder', {
@@ -143,7 +148,13 @@ describe('video-import local pipeline backpressure', function () {
           { payload: { isNewVideo: true, transcodingPriority: 'optional' } }
         ]
       ]
-    })).to.be.false
+    })).to.be.true
+
+    expect(isImportRelevantLocalPipelineJobData.call({}, 'transcoding-job-builder', {
+      jobs: [
+        { payload: { isNewVideo: true, transcodingPriority: 'optional' } }
+      ]
+    })).to.be.true
 
     expect(isImportRelevantLocalPipelineJobData.call({}, 'transcoding-job-builder', {
       sequentialJobs: [

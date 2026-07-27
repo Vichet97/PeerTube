@@ -994,10 +994,12 @@ class JobQueue {
     }
   }
 
-  // New-import pressure is primarily driven by videos still in their initial
-  // transcode/move pipeline. Published-video follow-up cleanup (for example
-  // late HLS object-storage moves) should not throttle fresh imports as
-  // aggressively.
+  // New-import pressure is driven by videos still in their initial
+  // transcode/move pipeline. Every new-video transcode can retain an HLS
+  // rendition as the input for a downstream resolution, including jobs marked
+  // optional. Optional here controls publish priority, not local-media use.
+  // Published-video follow-up cleanup (for example late HLS object-storage
+  // moves) remains excluded so maintenance work does not block fresh imports.
   private isImportRelevantLocalPipelineJobData (jobType: JobType, data: {
     isNewVideo?: boolean
     transcodingPriority?: string
@@ -1011,7 +1013,10 @@ class JobQueue {
       isNewVideo?: boolean
       transcodingPriority?: string
     }) => {
-      return payload?.isNewVideo === true && payload.transcodingPriority !== 'optional'
+      // An "optional" new-video rendition still consumes a locally retained
+      // HLS input. It must participate in import admission control to prevent
+      // new imports from filling disk while optional downstream transcodes wait.
+      return payload?.isNewVideo === true
     }
 
     if (jobType === 'generate-video-storyboard') return false
