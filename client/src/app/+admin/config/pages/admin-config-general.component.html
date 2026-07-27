@@ -332,6 +332,38 @@
             }
           </div>
 
+          <div class="form-group">
+            <label i18n for="localStorageLimitGB">Local storage limit</label>
+            <div i18n class="form-group-description">
+              New remote imports are held in the delayed queue when PeerTube local storage reaches this size.
+            </div>
+
+            <div class="number-with-unit">
+              <input type="number" min="1" id="localStorageLimitGB" formControlName="localStorageLimitGB" />
+              <span i18n>GB</span>
+            </div>
+
+            @if (formErrors.import.videos.localStorageLimitGB) {
+              <div class="form-error" role="alert">{{ formErrors.import.videos.localStorageLimitGB }}</div>
+            }
+          </div>
+
+          <div class="form-group">
+            <label i18n for="localStorageFreeSpaceForImportGB">Free space required before importing resumes</label>
+            <div i18n class="form-group-description">
+              Held imports resume after local storage drains this far below the limit. This prevents the next import from immediately filling the disk again.
+            </div>
+
+            <div class="number-with-unit">
+              <input type="number" min="0" id="localStorageFreeSpaceForImportGB" formControlName="localStorageFreeSpaceForImportGB" />
+              <span i18n>GB</span>
+            </div>
+
+            @if (formErrors.import.videos.localStorageFreeSpaceForImportGB) {
+              <div class="form-error" role="alert">{{ formErrors.import.videos.localStorageFreeSpaceForImportGB }}</div>
+            }
+          </div>
+
           <div class="form-group" formGroupName="http">
             <my-peertube-checkbox
               inputName="importVideosHttpEnabled"

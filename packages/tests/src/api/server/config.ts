@@ -124,6 +124,8 @@ function checkInitialConfig (server: PeerTubeServer, data: CustomConfig) {
   expect(data.videoFile.update.enabled).to.be.false
 
   expect(data.import.videos.concurrency).to.equal(2)
+  expect(data.import.videos.localStorageLimitGB).to.equal(1024)
+  expect(data.import.videos.localStorageFreeSpaceForImportGB).to.equal(2)
   expect(data.import.videos.http.enabled).to.be.true
   expect(data.import.videos.torrent.enabled).to.be.true
   expect(data.import.videoChannelSynchronization.enabled).to.be.false
@@ -361,6 +363,8 @@ function buildNewCustomConfig (server: PeerTubeServer): CustomConfig {
     import: {
       videos: {
         concurrency: 4,
+        localStorageLimitGB: 1024,
+        localStorageFreeSpaceForImportGB: 2,
         http: {
           enabled: false
         },

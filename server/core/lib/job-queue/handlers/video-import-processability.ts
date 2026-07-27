@@ -4,6 +4,18 @@ export function isVideoImportBackpressureJobId (jobId: string | number | undefin
   return String(jobId || '').startsWith('video-import-backpressure-')
 }
 
+export function buildVideoImportLocalStorageCapacityJobId (videoImportId: number, nowMs = Date.now()) {
+  return `video-import-local-storage-capacity-${videoImportId}-${nowMs}`
+}
+
+export function isVideoImportLocalStorageCapacityJobId (jobId: string | number | undefined) {
+  return String(jobId || '').startsWith('video-import-local-storage-capacity-')
+}
+
+export function isDeferredVideoImportJobId (jobId: string | number | undefined) {
+  return isVideoImportBackpressureJobId(jobId) || isVideoImportLocalStorageCapacityJobId(jobId)
+}
+
 export function getVideoImportSkipReason (options: {
   importState: number
   videoState?: number

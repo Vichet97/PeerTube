@@ -114,6 +114,25 @@ export const CONCURRENCY_VALIDATOR: BuildFormValidator = {
   }
 }
 
+
+export const LOCAL_STORAGE_LIMIT_GB_VALIDATOR: BuildFormValidator = {
+  VALIDATORS: [ Validators.required, Validators.min(1), Validators.pattern('[0-9]+') ],
+  MESSAGES: {
+    required: $localize`Local storage limit is required.`,
+    min: $localize`Local storage limit must be at least 1 GB.`,
+    pattern: $localize`Local storage limit must be a whole number of GB.`
+  }
+}
+
+export const LOCAL_STORAGE_FREE_SPACE_FOR_IMPORT_GB_VALIDATOR: BuildFormValidator = {
+  VALIDATORS: [ Validators.required, Validators.min(0), Validators.pattern('[0-9]+') ],
+  MESSAGES: {
+    required: $localize`Local storage free space for import is required.`,
+    min: $localize`Local storage free space for import must be 0 GB or more.`,
+    pattern: $localize`Local storage free space for import must be a whole number of GB.`
+  }
+}
+
 export const EXPORT_EXPIRATION_VALIDATOR: BuildFormValidator = {
   VALIDATORS: [ Validators.required, Validators.min(1) ],
   MESSAGES: {

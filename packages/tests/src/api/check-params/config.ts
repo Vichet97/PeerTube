@@ -168,6 +168,25 @@ describe('Test config API validators', function () {
       })
     })
 
+    it('Should fail with an invalid local storage import capacity configuration', async function () {
+      const newUpdateParams: CustomConfig = merge({}, {}, updateParams, {
+        import: {
+          videos: {
+            localStorageLimitGB: 2,
+            localStorageFreeSpaceForImportGB: 2
+          }
+        }
+      })
+
+      await makePutBodyRequest({
+        url: server.url,
+        path,
+        fields: newUpdateParams,
+        token: server.accessToken,
+        expectedStatus: HttpStatusCode.BAD_REQUEST_400
+      })
+    })
+
     it('Should fail with a disabled http upload & enabled sync', async function () {
       const newUpdateParams: CustomConfig = merge({}, {}, updateParams, {
         import: {

@@ -937,6 +937,16 @@ const CONFIG = {
       get MAX_ATTEMPTS () {
         return config.get<number>('import.videos.max_attempts')
       },
+      get LOCAL_STORAGE_LIMIT_GB () {
+        return config.has('import.videos.local_storage_limit_gb')
+          ? config.get<number>('import.videos.local_storage_limit_gb')
+          : 1024
+      },
+      get LOCAL_STORAGE_FREE_SPACE_FOR_IMPORT_GB () {
+        return config.has('import.videos.local_storage_free_space_for_import_gb')
+          ? config.get<number>('import.videos.local_storage_free_space_for_import_gb')
+          : 2
+      },
 
       HTTP: {
         get ENABLED () {

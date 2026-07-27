@@ -855,6 +855,14 @@ import:
     # Set a custom video import timeout to not block import queue
     timeout: '2 hours'
 
+    # Pause new remote imports when the PeerTube local storage directory reaches this size.
+    # Value is in GB. Delayed imports resume only after the configured free-space headroom is available.
+    local_storage_limit_gb: 1024
+
+    # Required GB below local_storage_limit_gb before delayed imports can resume.
+    # This hysteresis prevents the import queue from immediately filling the disk again.
+    local_storage_free_space_for_import_gb: 2
+
     # Number of attempts a user or the channel sync process can do to import a video if an error occurs during the import process
     max_attempts: 5
 

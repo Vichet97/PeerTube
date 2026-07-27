@@ -494,6 +494,8 @@ function customConfig (): CustomConfig {
     import: {
       videos: {
         concurrency: CONFIG.IMPORT.VIDEOS.CONCURRENCY,
+        localStorageLimitGB: CONFIG.IMPORT.VIDEOS.LOCAL_STORAGE_LIMIT_GB,
+        localStorageFreeSpaceForImportGB: CONFIG.IMPORT.VIDEOS.LOCAL_STORAGE_FREE_SPACE_FOR_IMPORT_GB,
         http: {
           enabled: CONFIG.IMPORT.VIDEOS.HTTP.ENABLED
         },

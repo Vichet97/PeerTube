@@ -13,7 +13,6 @@ import {
   ImportUserArchivePayload,
   JobState,
   JobType,
-  VideoState,
   ManageVideoTorrentPayload,
   MoveStoragePayload,
   MoveVideoFilePayload,
@@ -45,6 +44,13 @@ import {
 } from './deleted-video-job-matchers.js'
 import { processVideoRedundancy } from './handlers/video-redundancy.js'
 import { scheduleRetainedLocalFilesCleanup } from '../move-storage/move-to-object-storage.js'
+import {
+  getLocalStorageImportCapacity,
+  onLocalStorageImportCapacityAvailable,
+  shouldDeferVideoImportForLocalStorage,
+  startLocalStorageImportCapacityTracking,
+  stopLocalStorageImportCapacityTracking
+} from '../local-storage-import-admission.js'
 import {
   FlowJob,
   FlowProducer,
@@ -106,6 +112,7 @@ const TRANSCODING_PROGRESS_CACHE_TTL_MS = 5000
 const LOCAL_FILE_LEASE_HEARTBEAT_MS = 60 * 60 * 1000
 const LOCAL_FILE_LEASE_RECONCILIATION_BATCH_SIZE = 1000
 const VIDEO_PIPELINE_COUNTER_WATCHDOG_INTERVAL_MS = 60 * 60 * 1000
+const VIDEO_IMPORT_LOCAL_STORAGE_CAPACITY_JOB_ID_PREFIX = 'video-import-local-storage-capacity-'
 
 const LOCAL_FILE_CONSUMER_JOB_TYPES: JobType[] = [
   'video-import',
@@ -312,6 +319,11 @@ class JobQueue {
   }
   private transcodingProgressRefreshPromise?: Promise<Map<string, number>>
   private videoPipelineCounterWatchdogTimer?: NodeJS.Timeout
+  private stopLocalStorageImportAdmissionListener?: () => void
+  private localStorageCapacityImportPromotionRunning = false
+  private localStorageCapacityImportReleasePending = false
+  private localStorageCapacityImportAdmissionLock = Promise.resolve()
+  private readonly localStorageCapacityImportReservations = new Map<string, number>()
 
   private constructor () {
   }
@@ -341,14 +353,19 @@ class JobQueue {
     this.addRepeatableJobs()
 
     registerConfigChangedHandler(() => {
-      if (disableWorkers) return
+      if (!disableWorkers) {
+        for (const handlerName of Object.keys(handlers)) {
+          const worker = this.workers[handlerName]
+          if (!worker) continue
 
-      for (const handlerName of Object.keys(handlers)) {
-        const worker = this.workers[handlerName]
-        if (!worker) continue
-
-        worker.concurrency = this.getJobConcurrency(handlerName)
+          worker.concurrency = this.getJobConcurrency(handlerName)
+        }
       }
+
+      // An admin update can enable object storage, increase the limit, or
+      // reduce headroom. Reconfigure the event listener before evaluating
+      // parked imports so a live enablement cannot leave them delayed forever.
+      void this.configureLocalStorageImportAdmission()
     })
   }
 
@@ -432,6 +449,7 @@ class JobQueue {
 
     worker.on('completed', job => {
       void this.releaseLocalFileLeaseForJob(job, handlerName)
+      this.onLocalStorageCapacityVideoImportSettled(handlerName, job)
     })
 
     worker.on('error', err => {
@@ -450,6 +468,7 @@ class JobQueue {
     } finally {
       if (this.isFinalJobAttempt(job)) {
         await this.releaseLocalFileLeaseForJob(job, handlerName)
+        this.onLocalStorageCapacityVideoImportSettled(handlerName, job)
       }
     }
   }
@@ -498,6 +517,12 @@ class JobQueue {
       this.videoPipelineCounterWatchdogTimer = undefined
     }
 
+    this.stopLocalStorageImportAdmissionListener?.()
+    this.stopLocalStorageImportAdmissionListener = undefined
+    this.localStorageCapacityImportReleasePending = false
+    this.localStorageCapacityImportReservations.clear()
+    stopLocalStorageImportCapacityTracking()
+
     const promises = Object.keys(this.workers)
       .map(handlerName => {
         const worker: Worker = this.workers[handlerName]
@@ -520,6 +545,8 @@ class JobQueue {
 
   async start () {
     await this.reconcileLocalFileLeases()
+    await this.configureLocalStorageImportAdmission()
+
     scheduleRetainedLocalFilesCleanup()
     this.scheduleVideoPipelineCounterWatchdog()
 
@@ -915,137 +942,205 @@ class JobQueue {
     })
   }
 
+  private registerLocalStorageImportAdmissionListener () {
+    this.stopLocalStorageImportAdmissionListener?.()
+    this.stopLocalStorageImportAdmissionListener = onLocalStorageImportCapacityAvailable(() => {
+      this.localStorageCapacityImportReleasePending = true
+      this.promoteLocalStorageCapacityVideoImports()
+    })
+  }
+
+  private async configureLocalStorageImportAdmission () {
+    if (!CONFIG.OBJECT_STORAGE.ENABLED) {
+      this.stopLocalStorageImportAdmissionListener?.()
+      this.stopLocalStorageImportAdmissionListener = undefined
+      stopLocalStorageImportCapacityTracking()
+      this.localStorageCapacityImportReservations.clear()
+
+      // A configuration change that disables object storage also disables the
+      // disk admission gate. Release one held import; completion of that job
+      // will release the next one without a timer loop.
+      this.localStorageCapacityImportReleasePending = true
+      this.promoteLocalStorageCapacityVideoImports()
+      return
+    }
+
+    await startLocalStorageImportCapacityTracking()
+    this.registerLocalStorageImportAdmissionListener()
+
+    // Startup and a config change are state transitions, not retry polling.
+    // They can make held imports eligible even if no file was just removed.
+    this.localStorageCapacityImportReleasePending = true
+    this.promoteLocalStorageCapacityVideoImports()
+  }
+
+  private onLocalStorageCapacityVideoImportSettled (handlerName: JobType, job: Job) {
+    if (handlerName !== 'video-import' || !this.isLocalStorageCapacityVideoImportJob(job)) return
+
+    this.releaseLocalStorageCapacityVideoImportReservation(job.id)
+
+    // A promoted job can be stale, canceled, or fail before it changes local
+    // media. Its terminal state is itself an event: evaluate the next held
+    // import so the queue cannot remain parked for the one-year safety delay.
+    this.localStorageCapacityImportReleasePending = true
+    this.promoteLocalStorageCapacityVideoImports()
+  }
+
+  async hasLocalStorageCapacityVideoImports () {
+    return !!await this.getFirstLocalStorageCapacityVideoImportJob([ 'waiting', 'delayed', 'prioritized', 'active' ])
+  }
+
+  async hasLocalStorageCapacityVideoImportForImport (videoImportId: number) {
+    return !!await this.getFirstLocalStorageCapacityVideoImportJob(
+      [ 'waiting', 'delayed', 'prioritized', 'active' ],
+      job => (job.data as { videoImportId?: number }).videoImportId === videoImportId
+    )
+  }
+
+  async reserveLocalStorageCapacityVideoImport (options: {
+    jobId: string | number | undefined
+    isPromotedDelayedImport: boolean
+  }) {
+    return this.runLocalStorageCapacityImportAdmissionExclusive(async () => {
+      const capacity = await getLocalStorageImportCapacity()
+      const jobId = String(options.jobId)
+      const reservationBytes = Math.max(0, capacity.limitBytes - capacity.resumeUsageBytes)
+      const existingReservationBytes = this.localStorageCapacityImportReservations.get(jobId) ?? 0
+      const otherReservationBytes = this.getLocalStorageCapacityImportReservationBytes() - existingReservationBytes
+      const effectiveCapacity = {
+        ...capacity,
+        usageBytes: capacity.usageBytes + otherReservationBytes
+      }
+      const hasDelayedImports = options.isPromotedDelayedImport || await this.hasLocalStorageCapacityVideoImports()
+      const shouldDefer = options.isPromotedDelayedImport
+        ? this.shouldDeferPromotedLocalStorageCapacityImport(effectiveCapacity, otherReservationBytes)
+        : hasDelayedImports || shouldDeferVideoImportForLocalStorage(effectiveCapacity, { hasDeferredImports: false })
+
+      if (!shouldDefer && existingReservationBytes === 0) {
+        this.localStorageCapacityImportReservations.set(jobId, reservationBytes)
+      }
+
+      return { capacity, shouldDefer }
+    })
+  }
+
+  releaseLocalStorageCapacityVideoImportReservation (jobId: string | number | undefined) {
+    this.localStorageCapacityImportReservations.delete(String(jobId))
+  }
+
+  private promoteLocalStorageCapacityVideoImports () {
+    if (this.localStorageCapacityImportPromotionRunning) return
+
+    this.localStorageCapacityImportPromotionRunning = true
+    const run = this.promoteLocalStorageCapacityVideoImportsNow()
+
+    run
+      .catch(err => logger.warn('Cannot promote local-storage deferred video imports.', { err }))
+      .finally(() => {
+        this.localStorageCapacityImportPromotionRunning = false
+        if (this.localStorageCapacityImportReleasePending) this.promoteLocalStorageCapacityVideoImports()
+      })
+  }
+
+  private async promoteLocalStorageCapacityVideoImportsNow () {
+    const shouldPromote = this.localStorageCapacityImportReleasePending
+    this.localStorageCapacityImportReleasePending = false
+    if (!shouldPromote) return
+
+    const queue = this.queues['video-import']
+    if (!queue) return
+
+    const deferredJob = await this.getFirstLocalStorageCapacityVideoImportJob([ 'delayed' ])
+    if (!deferredJob) return
+
+    if (CONFIG.OBJECT_STORAGE.ENABLED) {
+      const { capacity, shouldDefer } = await this.reserveLocalStorageCapacityVideoImport({
+        jobId: deferredJob.id,
+        isPromotedDelayedImport: true
+      })
+      if (shouldDefer) return
+
+      // Promote one job per local-file-removal event. The next removal event,
+      // or the promoted job's terminal state, decides whether there is room
+      // for another import; no timer/retry loop is involved.
+      try {
+        await deferredJob.promote()
+      } catch (err) {
+        this.releaseLocalStorageCapacityVideoImportReservation(deferredJob.id)
+        throw err
+      }
+
+      logger.info(
+        '[JOB_QUEUE] Promoted delayed import %s after local storage fell to %d/%d bytes (resume threshold: %d).',
+        deferredJob.id,
+        capacity.usageBytes,
+        capacity.limitBytes,
+        capacity.resumeUsageBytes
+      )
+      return
+    }
+
+    await deferredJob.promote()
+    logger.info('[JOB_QUEUE] Promoted delayed import %s because object storage is disabled.', deferredJob.id)
+  }
+
+  private isLocalStorageCapacityVideoImportJob (job: Job) {
+    return String(job.id).startsWith(VIDEO_IMPORT_LOCAL_STORAGE_CAPACITY_JOB_ID_PREFIX)
+  }
+
+  private getLocalStorageCapacityImportReservationBytes () {
+    let total = 0
+    for (const bytes of this.localStorageCapacityImportReservations.values()) total += bytes
+    return total
+  }
+
+  private shouldDeferPromotedLocalStorageCapacityImport (
+    capacity: Awaited<ReturnType<typeof getLocalStorageImportCapacity>>,
+    otherReservationBytes: number
+  ) {
+    // The first release is allowed exactly at the resume threshold. Further
+    // release/config events must not promote another import until the first
+    // promotion's immutable admission reservation has been consumed or settled.
+    if (otherReservationBytes > 0 && capacity.usageBytes >= capacity.resumeUsageBytes) return true
+
+    return shouldDeferVideoImportForLocalStorage(capacity, { hasDeferredImports: true })
+  }
+
+  private async runLocalStorageCapacityImportAdmissionExclusive<T> (fn: () => Promise<T>) {
+    let unlock = () => undefined
+    const previous = this.localStorageCapacityImportAdmissionLock
+    this.localStorageCapacityImportAdmissionLock = new Promise<void>(resolve => {
+      unlock = resolve
+    })
+
+    await previous
+
+    try {
+      return await fn()
+    } finally {
+      unlock()
+    }
+  }
+
+  private async getFirstLocalStorageCapacityVideoImportJob (
+    states: ('waiting' | 'delayed' | 'prioritized' | 'active')[],
+    matches = (_job: Job) => true
+  ) {
+    const queue = this.queues['video-import']
+    if (!queue) return undefined
+
+    const pageSize = 1000
+    for (let start = 0; ; start += pageSize) {
+      const jobs = await queue.getJobs(states, start, start + pageSize - 1, true)
+      const job = jobs.find(candidate => this.isLocalStorageCapacityVideoImportJob(candidate) && matches(candidate))
+      if (job) return job
+      if (jobs.length < pageSize) return undefined
+    }
+  }
+
   async hasPendingOrActiveLocalFileConsumerJob (videoUUID: string): Promise<boolean> {
     for (const jobType of LOCAL_FILE_CONSUMER_JOB_TYPES) {
       if (await this.hasPendingOrActiveJob(jobType, videoUUID)) return true
-    }
-
-    return false
-  }
-
-  async getLocalVideoPipelineBacklog () {
-    const localPipelineJobTypes: JobType[] = [
-      'transcoding-job-builder',
-      'video-transcoding',
-      'move-to-object-storage',
-      'move-video-file-to-object-storage',
-      'move-hls-playlist-to-object-storage',
-      'move-thumbnail-to-object-storage',
-      'move-caption-to-object-storage'
-    ]
-    const states: JobState[] = [ 'waiting', 'delayed', 'prioritized', 'waiting-children', 'active' ]
-    const byType: Partial<Record<JobType, number>> = {}
-    const importRelevantUniqueVideoUUIDsByType: Partial<Record<JobType, number>> = {}
-    const uniqueVideoUUIDsByType: Partial<Record<JobType, number>> = {}
-    const importRelevantUniqueVideoUUIDs = new Set<string>()
-    const uniqueVideoUUIDs = new Set<string>()
-    let total = 0
-
-    for (const jobType of localPipelineJobTypes) {
-      const queue = this.queues[jobType]
-      if (!queue) continue
-
-      const counts = await queue.getJobCounts()
-      const count = states.reduce((sum, state) => sum + (counts[state] ?? 0), 0)
-
-      if (count !== 0) byType[jobType] = count
-      total += count
-
-      if (jobType === 'move-caption-to-object-storage') continue
-
-      const jobs = await queue.getJobs(states as Parameters<Queue['getJobs']>[0], 0, 10000, true)
-      const importRelevantUUIDsForType = new Set<string>()
-      const uuidsForType = new Set<string>()
-
-      for (const job of jobs) {
-        const data = (job?.data ?? {}) as {
-          videoUUID?: string
-          isNewVideo?: boolean
-          transcodingPriority?: string
-          previousVideoState?: number
-          moveVideoState?: { isNewVideo?: boolean, previousVideoState?: number }
-          optimizeJob?: { isNewVideo?: boolean }
-          jobs?: { payload?: { isNewVideo?: boolean, transcodingPriority?: string } }[]
-          sequentialJobs?: { payload?: { isNewVideo?: boolean, transcodingPriority?: string } }[][]
-        }
-        const videoUUID = data.videoUUID
-        if (!videoUUID) continue
-
-        uuidsForType.add(videoUUID)
-        uniqueVideoUUIDs.add(videoUUID)
-
-        if (this.isImportRelevantLocalPipelineJobData(jobType, data)) {
-          importRelevantUUIDsForType.add(videoUUID)
-          importRelevantUniqueVideoUUIDs.add(videoUUID)
-        }
-      }
-
-      if (importRelevantUUIDsForType.size !== 0) importRelevantUniqueVideoUUIDsByType[jobType] = importRelevantUUIDsForType.size
-      if (uuidsForType.size !== 0) uniqueVideoUUIDsByType[jobType] = uuidsForType.size
-    }
-
-    return {
-      total,
-      byType,
-      importRelevantUniqueVideoUUIDTotal: importRelevantUniqueVideoUUIDs.size,
-      importRelevantUniqueVideoUUIDsByType,
-      uniqueVideoUUIDTotal: uniqueVideoUUIDs.size,
-      uniqueVideoUUIDsByType
-    }
-  }
-
-  // New-import pressure is driven by videos still in their initial
-  // transcode/move pipeline. Every new-video transcode can retain an HLS
-  // rendition as the input for a downstream resolution, including jobs marked
-  // optional. Optional here controls publish priority, not local-media use.
-  // Published-video follow-up cleanup (for example late HLS object-storage
-  // moves) remains excluded so maintenance work does not block fresh imports.
-  private isImportRelevantLocalPipelineJobData (jobType: JobType, data: {
-    isNewVideo?: boolean
-    transcodingPriority?: string
-    previousVideoState?: number
-    moveVideoState?: { isNewVideo?: boolean, previousVideoState?: number }
-    optimizeJob?: { isNewVideo?: boolean }
-    jobs?: { payload?: { isNewVideo?: boolean, transcodingPriority?: string } }[]
-    sequentialJobs?: { payload?: { isNewVideo?: boolean, transcodingPriority?: string } }[][]
-  }) {
-    const isImportRelevantNewVideoTranscodingPayload = (payload?: {
-      isNewVideo?: boolean
-      transcodingPriority?: string
-    }) => {
-      // An "optional" new-video rendition still consumes a locally retained
-      // HLS input. It must participate in import admission control to prevent
-      // new imports from filling disk while optional downstream transcodes wait.
-      return payload?.isNewVideo === true
-    }
-
-    if (jobType === 'generate-video-storyboard') return false
-
-    if (jobType === 'transcoding-job-builder') {
-      if (data.optimizeJob?.isNewVideo === true) return true
-      if (data.jobs?.some(job => isImportRelevantNewVideoTranscodingPayload(job.payload))) return true
-      if (data.sequentialJobs?.some(group => group.some(job => isImportRelevantNewVideoTranscodingPayload(job.payload)))) return true
-      return false
-    }
-
-    const previousVideoState = data.previousVideoState ?? data.moveVideoState?.previousVideoState
-
-    if (jobType === 'video-transcoding') {
-      return isImportRelevantNewVideoTranscodingPayload(data)
-    }
-
-    if (jobType === 'move-to-object-storage') {
-      if (data.isNewVideo === true || data.moveVideoState?.isNewVideo === true) return true
-      return previousVideoState !== undefined && previousVideoState !== VideoState.PUBLISHED
-    }
-
-    if (
-      jobType === 'move-video-file-to-object-storage' ||
-      jobType === 'move-hls-playlist-to-object-storage' ||
-      jobType === 'move-thumbnail-to-object-storage'
-    ) {
-      if (data.isNewVideo === true) return true
-      return previousVideoState !== undefined && previousVideoState !== VideoState.PUBLISHED
     }
 
     return false

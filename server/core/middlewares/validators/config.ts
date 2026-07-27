@@ -90,6 +90,8 @@ export const customConfigUpdateValidator = [
   body('videoFile.update.enabled').isBoolean(),
 
   body('import.videos.concurrency').isInt({ min: 0 }),
+  body('import.videos.localStorageLimitGB').isInt({ min: 1 }),
+  body('import.videos.localStorageFreeSpaceForImportGB').isInt({ min: 0 }),
   body('import.videos.http.enabled').isBoolean(),
   body('import.videos.torrent.enabled').isBoolean(),
 
@@ -158,6 +160,7 @@ export const customConfigUpdateValidator = [
     if (!checkInvalidConfigIfEmailDisabled(req.body, req, res)) return
     if (!checkInvalidTranscodingConfig(req.body, req, res)) return
     if (!checkInvalidSynchronizationConfig(req.body, req, res)) return
+    if (!checkInvalidImportLocalStorageConfig(req.body, req, res)) return
     if (!checkInvalidLiveConfig(req.body, req, res)) return
     if (!checkInvalidVideoStudioConfig(req.body, req, res)) return
     if (!checkInvalidSearchConfig(req.body, req, res)) return
@@ -234,6 +237,15 @@ function checkInvalidSynchronizationConfig (customConfig: CustomConfig, req: exp
     return false
   }
   return true
+}
+
+function checkInvalidImportLocalStorageConfig (customConfig: CustomConfig, req: express.Request, res: express.Response) {
+  const { localStorageLimitGB, localStorageFreeSpaceForImportGB } = customConfig.import.videos
+
+  if (localStorageFreeSpaceForImportGB < localStorageLimitGB) return true
+
+  res.fail({ message: req.t('Local storage free space for import must be lower than the local storage limit.') })
+  return false
 }
 
 function checkInvalidLiveConfig (customConfig: CustomConfig, req: express.Request, res: express.Response) {

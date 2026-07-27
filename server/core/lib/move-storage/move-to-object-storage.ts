@@ -37,6 +37,7 @@ import { VideoSourceModel } from '@server/models/video/video-source.js'
 import { VideoStreamingPlaylistModel } from '@server/models/video/video-streaming-playlist.js'
 import { JobQueue } from '@server/lib/job-queue/index.js'
 import { CLEANUP_LOCK_HEARTBEAT_MS, LocalFileCleanupLock, LocalFileLeaseManager } from '@server/lib/local-file-lease-manager.js'
+import { notifyLocalStorageImportPathRemoved } from '@server/lib/local-storage-import-admission.js'
 import { buildMoveVideoJob } from '@server/lib/video-jobs.js'
 import {
   MStreamingPlaylistFiles,
@@ -2072,6 +2073,7 @@ async function removeLocalPathNow (path: string) {
   if (!await pathExists(path)) return
 
   await remove(path)
+  notifyLocalStorageImportPathRemoved(path)
   await removeParentDirIfEmpty(path)
 }
 

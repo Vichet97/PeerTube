@@ -11,6 +11,8 @@ import {
   EXPORT_MAX_USER_VIDEO_QUOTA_VALIDATOR,
   MAX_SYNC_PER_USER,
   MAX_VIDEO_CHANNELS_PER_USER_VALIDATOR,
+  LOCAL_STORAGE_FREE_SPACE_FOR_IMPORT_GB_VALIDATOR,
+  LOCAL_STORAGE_LIMIT_GB_VALIDATOR,
   SIGNUP_LIMIT_VALIDATOR,
   SIGNUP_MINIMUM_AGE_VALIDATOR
 } from '@app/shared/form-validators/custom-config-validators'
@@ -72,6 +74,8 @@ type Form = {
   import: FormGroup<{
     videos: FormGroup<{
       concurrency: FormControl<number>
+      localStorageLimitGB: FormControl<number>
+      localStorageFreeSpaceForImportGB: FormControl<number>
 
       http: FormGroup<{
         enabled: FormControl<boolean>
@@ -337,6 +341,8 @@ export class AdminConfigGeneralComponent implements OnInit, OnDestroy, CanCompon
       import: {
         videos: {
           concurrency: CONCURRENCY_VALIDATOR,
+          localStorageLimitGB: LOCAL_STORAGE_LIMIT_GB_VALIDATOR,
+          localStorageFreeSpaceForImportGB: LOCAL_STORAGE_FREE_SPACE_FOR_IMPORT_GB_VALIDATOR,
           http: {
             enabled: null
           },

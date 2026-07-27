@@ -240,6 +240,8 @@ export interface CustomConfig {
   import: {
     videos: {
       concurrency: number
+      localStorageLimitGB: number
+      localStorageFreeSpaceForImportGB: number
 
       http: {
         enabled: boolean
