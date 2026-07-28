@@ -424,8 +424,11 @@ async function processFile (downloader: () => Promise<string>, videoImport: MVid
       // Move file
       const videoDestFile = VideoPathManager.Instance.getFSVideoFileOutputPath(videoImportWithFiles.Video, videoFile)
       await move(tmpVideoPath, videoDestFile)
-      await notifyLocalStorageImportPathChanged(tmpVideoPath)
+      // Account for the new path before dropping the source directory total.
+      // Reversing this order can briefly under-count the moved file and emit a
+      // false capacity-release event that admits another import.
       await notifyLocalStorageImportPathChanged(videoDestFile)
+      await notifyLocalStorageImportPathChanged(tmpVideoPath)
       movedVideoDestPath = videoDestFile
 
       tmpVideoPath = null // This path is not used anymore

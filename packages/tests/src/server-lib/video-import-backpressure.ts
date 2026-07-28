@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-unused-expressions */
 import { expect } from 'chai'
-import { mkdtemp, mkdir, rm, writeFile } from 'fs/promises'
+import { mkdtemp, mkdir, rename, rm, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { CONFIG } from '@server/initializers/config.js'
@@ -79,13 +79,22 @@ describe('video-import local storage admission', function () {
 
       expect((await getLocalStorageImportCapacity()).usageBytes).to.equal(10)
 
-      const addedPath = join(webVideos, 'import.mp4')
-      await writeFile(addedPath, Buffer.alloc(20))
-      await notifyLocalStorageImportPathChanged(addedPath)
+      const sourcePath = join(tmp, 'import.mp4')
+      const destinationPath = join(webVideos, 'import.mp4')
+      await writeFile(sourcePath, Buffer.alloc(20))
+      await notifyLocalStorageImportPathChanged(sourcePath)
       expect((await getLocalStorageImportCapacity()).usageBytes).to.equal(30)
 
-      await rm(addedPath)
-      await notifyLocalStorageImportPathRemoved(addedPath)
+      await rename(sourcePath, destinationPath)
+      // Count the destination first. The source total remains accounted until
+      // its notification lands, so a move cannot falsely look like a release
+      // of local storage capacity.
+      await notifyLocalStorageImportPathChanged(destinationPath)
+      await notifyLocalStorageImportPathChanged(sourcePath)
+      expect((await getLocalStorageImportCapacity()).usageBytes).to.equal(30)
+
+      await rm(destinationPath)
+      await notifyLocalStorageImportPathRemoved(destinationPath)
       expect((await getLocalStorageImportCapacity()).usageBytes).to.equal(10)
     } finally {
       stopLocalStorageImportCapacityTracking()
