@@ -74,6 +74,7 @@ import { RunnerJobModel } from '../../models/runner/runner-job.js'
 import { VideoStreamingPlaylistModel } from '../../models/video/video-streaming-playlist.js'
 import {
   CLEANUP_LOCK_HEARTBEAT_MS,
+  CLEANUP_LOCK_TTL_MS,
   LocalFileLease,
   LocalFileLeaseManager
 } from '../local-file-lease-manager.js'
@@ -330,10 +331,12 @@ class JobQueue {
   private videoPipelineCounterWatchdogTimer?: NodeJS.Timeout
   private stopLocalStorageImportAdmissionListener?: () => void
   private stopLocalStorageImportAdmissionLockListener?: () => void
+  private stopLocalStorageImportAdmissionRedisListener?: () => void
   private localStorageCapacityImportPromotionRunning = false
   private localStorageCapacityImportReleasePending = false
   private localStorageCapacityImportPromotionRetryOnRedisReady = false
   private localStorageCapacityImportPromotionRetryOnLockRelease = false
+  private localStorageCapacityImportLockReleaseVersion = 0
   private readonly localStorageCapacityImportReservations = new Map<string, number>()
 
   private constructor () {
@@ -346,10 +349,14 @@ class JobQueue {
 
     this.jobRedisPrefix = 'bull-' + WEBSERVER.HOST
     this.sharedRedisClient = new IORedis(Redis.getRedisClientOptions('BullMQShared', { maxRetriesPerRequest: null }))
-    this.sharedRedisClient.on('ready', () => {
-      if (!this.localStorageCapacityImportPromotionRetryOnRedisReady) return
+    this.stopLocalStorageImportAdmissionRedisListener = Redis.Instance.onConnected(() => {
+      if (
+        !this.localStorageCapacityImportPromotionRetryOnRedisReady &&
+        !this.localStorageCapacityImportPromotionRetryOnLockRelease
+      ) return
 
       this.localStorageCapacityImportPromotionRetryOnRedisReady = false
+      this.localStorageCapacityImportPromotionRetryOnLockRelease = false
       this.localStorageCapacityImportReleasePending = true
       this.promoteLocalStorageCapacityVideoImports()
     })
@@ -539,6 +546,8 @@ class JobQueue {
     this.stopLocalStorageImportAdmissionListener = undefined
     this.stopLocalStorageImportAdmissionLockListener?.()
     this.stopLocalStorageImportAdmissionLockListener = undefined
+    this.stopLocalStorageImportAdmissionRedisListener?.()
+    this.stopLocalStorageImportAdmissionRedisListener = undefined
     this.localStorageCapacityImportReleasePending = false
     this.localStorageCapacityImportPromotionRetryOnRedisReady = false
     this.localStorageCapacityImportPromotionRetryOnLockRelease = false
@@ -975,13 +984,14 @@ class JobQueue {
     this.stopLocalStorageImportAdmissionLockListener = LocalFileLeaseManager.Instance.onCleanupLockReleased(lockId => {
       if (lockId !== LOCAL_STORAGE_IMPORT_ADMISSION_LOCK_ID) return
 
+      this.localStorageCapacityImportLockReleaseVersion++
+
       // A fail-closed decision can be blocked by another PM2 process while
       // the disk is already below the resume threshold. The owner releasing
       // the distributed lock is the event that makes its delayed import
       // eligible for another decision; it is not a retry timer.
-      if (!this.localStorageCapacityImportPromotionRetryOnLockRelease) return
-
       this.localStorageCapacityImportPromotionRetryOnLockRelease = false
+      this.localStorageCapacityImportPromotionRetryOnRedisReady = false
       this.localStorageCapacityImportReleasePending = true
       this.promoteLocalStorageCapacityVideoImports()
     })
@@ -1143,6 +1153,7 @@ class JobQueue {
     if (!deferredJob) return
 
     if (CONFIG.OBJECT_STORAGE.ENABLED) {
+      const lockReleaseVersion = this.localStorageCapacityImportLockReleaseVersion
       const { capacity, shouldDefer, admissionUnavailable, retryOnLockRelease } = await this.reserveLocalStorageCapacityVideoImport({
         jobId: deferredJob.id,
         isPromotedDelayedImport: true
@@ -1152,7 +1163,9 @@ class JobQueue {
           // Keep the event latch armed. A Redis reconnect or the owner that
           // currently holds the admission lock will re-evaluate this job.
           this.localStorageCapacityImportReleasePending = true
-          this.localStorageCapacityImportPromotionRetryOnLockRelease = retryOnLockRelease
+          const lockWasReleasedDuringDecision =
+            retryOnLockRelease && this.localStorageCapacityImportLockReleaseVersion !== lockReleaseVersion
+          this.localStorageCapacityImportPromotionRetryOnLockRelease = retryOnLockRelease && !lockWasReleasedDuringDecision
           this.localStorageCapacityImportPromotionRetryOnRedisReady = !retryOnLockRelease
         }
 
@@ -1215,7 +1228,7 @@ class JobQueue {
 
     const distributedLock = await LocalFileLeaseManager.Instance.acquireCleanupLock(
       LOCAL_STORAGE_IMPORT_ADMISSION_LOCK_ID,
-      5000
+      CLEANUP_LOCK_TTL_MS + CLEANUP_LOCK_HEARTBEAT_MS
     )
     if (!distributedLock) {
       throw new LocalStorageImportAdmissionLockUnavailableError('Cannot acquire the shared local-storage import admission lock')

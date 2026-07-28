@@ -12,12 +12,14 @@ import {
 } from '@server/lib/job-queue/handlers/video-import-processability.js'
 import {
   LocalStorageImportCapacity,
+  getSharedLocalStorageImportCapacity,
   getLocalStorageImportCapacity,
   notifyLocalStorageImportPathChanged,
   notifyLocalStorageImportPathRemoved,
   shouldDeferVideoImportForLocalStorage,
   stopLocalStorageImportCapacityTracking
 } from '@server/lib/local-storage-import-admission.js'
+import { Redis } from '@server/lib/redis.js'
 
 const GB = 1024 ** 3
 
@@ -78,6 +80,33 @@ describe('video-import local storage admission', function () {
       storage.ORIGINAL_VIDEO_FILES_DIR = originalVideos
 
       expect((await getLocalStorageImportCapacity()).usageBytes).to.equal(10)
+
+      const redis = Redis.Instance as any
+      const originalIsConnected = redis.isConnected
+      const originalGetClient = redis.getClient
+      const originalGetPrefix = redis.getPrefix
+      redis.isConnected = () => true
+      redis.getClient = () => ({
+        hset: () => Promise.resolve(1),
+        hgetall: () => Promise.reject(new Error('Redis unavailable'))
+      })
+      redis.getPrefix = () => 'test:'
+
+      try {
+        let thrown: unknown
+        try {
+          await getSharedLocalStorageImportCapacity()
+        } catch (err) {
+          thrown = err
+        }
+
+        expect(thrown).to.be.instanceOf(Error)
+        expect((thrown as Error).message).to.equal('Cannot read shared local-storage import capacity.')
+      } finally {
+        redis.isConnected = originalIsConnected
+        redis.getClient = originalGetClient
+        redis.getPrefix = originalGetPrefix
+      }
 
       const sourcePath = join(tmp, 'import.mp4')
       const destinationPath = join(webVideos, 'import.mp4')

@@ -20,12 +20,15 @@ import {
 
 const lTags = loggerTagsFactory('redis')
 
+type RedisConnectionListener = () => void
+
 class Redis {
   private static instance: Redis
   private initialized = false
   private connected = false
   private client: IoRedis
   private prefix: string
+  private readonly connectionListeners = new Set<RedisConnectionListener>()
 
   private constructor () {
   }
@@ -44,6 +47,7 @@ class Redis {
       logger.info('Connected to redis.', lTags())
 
       this.connected = true
+      for (const listener of this.connectionListeners) listener()
     })
     this.client.on('reconnecting', ms => {
       logger.error(`Reconnecting to redis in ${ms}.`, lTags())
@@ -146,6 +150,12 @@ class Redis {
 
   isConnected () {
     return this.connected
+  }
+
+  onConnected (listener: RedisConnectionListener) {
+    this.connectionListeners.add(listener)
+
+    return () => this.connectionListeners.delete(listener)
   }
 
   /* ************ Forgot password ************ */
