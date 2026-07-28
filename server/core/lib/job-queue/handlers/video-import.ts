@@ -14,6 +14,7 @@ import { retryTransactionWrapper } from '@server/helpers/database-utils.js'
 import { downloadWithNm3u8dlRe } from '@server/helpers/n-m3u8dl-re/index.js'
 import { customHeadersToYoutubeDLArgs, YoutubeDLWrapper } from '@server/helpers/youtube-dl/index.js'
 import { CONFIG } from '@server/initializers/config.js'
+import { notifyLocalStorageImportPathChanged } from '@server/lib/local-storage-import-admission.js'
 import { AutomaticTagger } from '@server/lib/automatic-tags/automatic-tagger.js'
 import { setAndSaveVideoAutomaticTags } from '@server/lib/automatic-tags/automatic-tags.js'
 import { isPostImportVideoAccepted } from '@server/lib/moderation.js'
@@ -101,7 +102,7 @@ async function processVideoImport (job: Job): Promise<VideoImportPreventExceptio
     logger.warn('Catch error in video import to send value to parent job.', { payload, err })
     return { resultType: 'error' }
   } finally {
-    localStorageAdmission.release()
+    await localStorageAdmission.release()
   }
 }
 
@@ -123,7 +124,7 @@ async function maybeDeferVideoImportForLocalStorage (
   // delayed state and is promoted by the local-file-removal event once the
   // configured hysteresis headroom is available.
   if (!CONFIG.OBJECT_STORAGE.ENABLED) {
-    return { deferred: false, release: () => {} }
+    return { deferred: false, release: async () => {} }
   }
 
   const isPromotedDelayedImport = isVideoImportLocalStorageCapacityJobId(job.id)
@@ -144,7 +145,7 @@ async function maybeDeferVideoImportForLocalStorage (
   // guard covers the small create-job race between concurrent workers.
   const guardDeferredImport = !isPromotedDelayedImport
   if (guardDeferredImport && localStorageCapacityDeferralsInProgress.has(videoImport.id)) {
-    return { deferred: true, release: () => {} }
+    return { deferred: true, release: async () => {} }
   }
 
   if (guardDeferredImport) localStorageCapacityDeferralsInProgress.add(videoImport.id)
@@ -166,7 +167,7 @@ async function maybeDeferVideoImportForLocalStorage (
     await videoImport.save()
 
     if (guardDeferredImport && await JobQueue.Instance.hasLocalStorageCapacityVideoImportForImport(videoImport.id)) {
-      return { deferred: true, release: () => {} }
+      return { deferred: true, release: async () => {} }
     }
 
     try {
@@ -189,7 +190,7 @@ async function maybeDeferVideoImportForLocalStorage (
           customJobId,
           videoImport.id
         )
-        return { deferred: true, release: () => {} }
+        return { deferred: true, release: async () => {} }
       }
 
       throw err
@@ -198,7 +199,7 @@ async function maybeDeferVideoImportForLocalStorage (
     if (guardDeferredImport) localStorageCapacityDeferralsInProgress.delete(videoImport.id)
   }
 
-  return { deferred: true, release: () => {} }
+  return { deferred: true, release: async () => {} }
 }
 
 function isDuplicateVideoImportBackpressureJobError (err: unknown) {
@@ -423,6 +424,8 @@ async function processFile (downloader: () => Promise<string>, videoImport: MVid
       // Move file
       const videoDestFile = VideoPathManager.Instance.getFSVideoFileOutputPath(videoImportWithFiles.Video, videoFile)
       await move(tmpVideoPath, videoDestFile)
+      await notifyLocalStorageImportPathChanged(tmpVideoPath)
+      await notifyLocalStorageImportPathChanged(videoDestFile)
       movedVideoDestPath = videoDestFile
 
       tmpVideoPath = null // This path is not used anymore

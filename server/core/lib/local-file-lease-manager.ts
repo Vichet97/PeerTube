@@ -18,6 +18,7 @@ const CLEANUP_LOCK_RETRY_DELAY_MS = 25
 const CLEANUP_LOCK_MAX_WAIT_MS = 5_000
 const PERSISTENT_LEASE_ACQUIRE_MAX_WAIT_MS = 60_000
 const LEASE_RELEASE_CHANNEL_SUFFIX = 'local-file-lease-released'
+const CLEANUP_LOCK_RELEASE_CHANNEL_SUFFIX = 'local-file-cleanup-lock-released'
 
 const ACQUIRE_LEASE_SCRIPT = `
   local existingVideoUUID = redis.call('GET', KEYS[4])
@@ -106,6 +107,7 @@ const CLEAR_EMPTY_VIDEO_LEASES_SCRIPT = `
 `
 
 type LeaseChangeListener = (videoUUID: string) => void | Promise<void>
+type CleanupLockChangeListener = (lockId: string) => void | Promise<void>
 
 export type LocalFileLease = {
   leaseId: string
@@ -131,6 +133,7 @@ class LocalFileLeaseManager {
   private readonly inMemoryVideoUUIDByLeaseId = new Map<string, string>()
   private readonly inMemoryCleanupLocks = new Set<string>()
   private readonly leaseChangeListeners = new Set<LeaseChangeListener>()
+  private readonly cleanupLockChangeListeners = new Set<CleanupLockChangeListener>()
   private readonly leaseReleasePublisherId = randomUUID()
   private leaseReleaseSubscriber?: IORedis
   private leaseReleaseSubscriptionPromise?: Promise<void>
@@ -296,6 +299,14 @@ class LocalFileLeaseManager {
       .catch(err => logger.warn('Cannot initialize local file lease release subscriber.', { err, ...lTags() }))
 
     return () => this.leaseChangeListeners.delete(listener)
+  }
+
+  onCleanupLockReleased (listener: CleanupLockChangeListener) {
+    this.cleanupLockChangeListeners.add(listener)
+    void this.ensureLeaseReleaseSubscriber()
+      .catch(err => logger.warn('Cannot initialize local file cleanup lock release subscriber.', { err, ...lTags() }))
+
+    return () => this.cleanupLockChangeListeners.delete(listener)
   }
 
   async reconcile (liveLeases: Map<string, string>, reconciliationStartedAt = Date.now()) {
@@ -535,6 +546,7 @@ class LocalFileLeaseManager {
 
         if (!owner) {
           this.inMemoryCleanupLocks.delete(videoUUID)
+          this.emitCleanupLockReleased(videoUUID)
           return
         }
 
@@ -542,12 +554,14 @@ class LocalFileLeaseManager {
         if (!client) return
 
         try {
-          await client.eval(
+          const released = await client.eval(
             RELEASE_CLEANUP_LOCK_SCRIPT,
             1,
             this.buildCleanupLockKey(videoUUID),
             owner
           )
+
+          if (released === 1) this.emitCleanupLockReleased(videoUUID)
         } catch (err) {
           logger.warn('Cannot release local file cleanup lock.', { err, ...lTags(videoUUID) })
         }
@@ -605,6 +619,15 @@ class LocalFileLeaseManager {
     void this.publishLeaseReleased(videoUUID)
   }
 
+  private emitCleanupLockReleased (lockId: string) {
+    this.notifyCleanupLockReleased(lockId)
+    if (this.cleanupLockChangeListeners.size !== 0) {
+      void this.ensureLeaseReleaseSubscriber()
+        .catch(err => logger.warn('Cannot initialize local file cleanup lock release subscriber.', { err, ...lTags() }))
+    }
+    void this.publishCleanupLockReleased(lockId)
+  }
+
   private async publishLeaseReleased (videoUUID: string) {
     const client = this.getRedisClient()
     if (!client) return
@@ -619,6 +642,20 @@ class LocalFileLeaseManager {
     }
   }
 
+  private async publishCleanupLockReleased (lockId: string) {
+    const client = this.getRedisClient()
+    if (!client) return
+
+    try {
+      await client.publish(this.buildCleanupLockReleaseChannel(), JSON.stringify({
+        lockId,
+        publisherId: this.leaseReleasePublisherId
+      }))
+    } catch (err) {
+      logger.warn('Cannot publish local file cleanup lock release.', { err, ...lTags() })
+    }
+  }
+
   private async ensureLeaseReleaseSubscriber () {
     if (this.leaseReleaseSubscriber !== undefined || this.leaseReleaseSubscriptionPromise !== undefined) return
 
@@ -626,7 +663,8 @@ class LocalFileLeaseManager {
     if (!client) return
 
     const subscriber = client.duplicate()
-    const channel = this.buildLeaseReleaseChannel()
+    const leaseChannel = this.buildLeaseReleaseChannel()
+    const cleanupLockChannel = this.buildCleanupLockReleaseChannel()
 
     subscriber.on('error', err => logger.warn('Local file lease release subscriber failed.', { err, ...lTags() }))
     subscriber.on('end', () => {
@@ -635,20 +673,23 @@ class LocalFileLeaseManager {
       this.leaseReleaseSubscriber = undefined
     })
     subscriber.on('message', (receivedChannel, message) => {
-      if (receivedChannel !== channel) return
-
       try {
-        const event = JSON.parse(message) as { videoUUID?: unknown, publisherId?: unknown }
+        const event = JSON.parse(message) as { videoUUID?: unknown, lockId?: unknown, publisherId?: unknown }
         if (event.publisherId === this.leaseReleasePublisherId) return
-        if (typeof event.videoUUID !== 'string' || event.videoUUID.length === 0) return
 
-        this.notifyLeaseReleased(event.videoUUID)
+        if (receivedChannel === leaseChannel && typeof event.videoUUID === 'string' && event.videoUUID.length !== 0) {
+          this.notifyLeaseReleased(event.videoUUID)
+        }
+
+        if (receivedChannel === cleanupLockChannel && typeof event.lockId === 'string' && event.lockId.length !== 0) {
+          this.notifyCleanupLockReleased(event.lockId)
+        }
       } catch (err) {
-        logger.warn('Cannot process local file lease release event.', { err, ...lTags() })
+        logger.warn('Cannot process local file lease or cleanup lock release event.', { err, ...lTags() })
       }
     })
 
-    this.leaseReleaseSubscriptionPromise = subscriber.subscribe(channel)
+    this.leaseReleaseSubscriptionPromise = subscriber.subscribe(leaseChannel, cleanupLockChannel)
       .then(() => {
         this.leaseReleaseSubscriber = subscriber
       })
@@ -667,6 +708,13 @@ class LocalFileLeaseManager {
     for (const listener of this.leaseChangeListeners) {
       Promise.resolve(listener(videoUUID))
         .catch(err => logger.warn('Cannot notify local file lease release.', { err, ...lTags(videoUUID) }))
+    }
+  }
+
+  private notifyCleanupLockReleased (lockId: string) {
+    for (const listener of this.cleanupLockChangeListeners) {
+      Promise.resolve(listener(lockId))
+        .catch(err => logger.warn('Cannot notify local file cleanup lock release.', { err, ...lTags() }))
     }
   }
 
@@ -692,6 +740,10 @@ class LocalFileLeaseManager {
 
   private buildLeaseReleaseChannel () {
     return `${Redis.Instance.getPrefix()}${LEASE_RELEASE_CHANNEL_SUFFIX}`
+  }
+
+  private buildCleanupLockReleaseChannel () {
+    return `${Redis.Instance.getPrefix()}${CLEANUP_LOCK_RELEASE_CHANNEL_SUFFIX}`
   }
 }
 

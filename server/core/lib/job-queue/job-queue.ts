@@ -46,6 +46,7 @@ import { processVideoRedundancy } from './handlers/video-redundancy.js'
 import { scheduleRetainedLocalFilesCleanup } from '../move-storage/move-to-object-storage.js'
 import {
   getLocalStorageImportCapacity,
+  getSharedLocalStorageImportCapacity,
   onLocalStorageImportCapacityAvailable,
   shouldDeferVideoImportForLocalStorage,
   startLocalStorageImportCapacityTracking,
@@ -71,7 +72,11 @@ import { VideoImportModel } from '../../models/video/video-import.js'
 import { VideoJobInfoModel } from '../../models/video/video-job-info.js'
 import { RunnerJobModel } from '../../models/runner/runner-job.js'
 import { VideoStreamingPlaylistModel } from '../../models/video/video-streaming-playlist.js'
-import { LocalFileLease, LocalFileLeaseManager } from '../local-file-lease-manager.js'
+import {
+  CLEANUP_LOCK_HEARTBEAT_MS,
+  LocalFileLease,
+  LocalFileLeaseManager
+} from '../local-file-lease-manager.js'
 import { Hooks } from '../plugins/hooks.js'
 import { Redis } from '../redis.js'
 import { processActivityPubCleaner } from './handlers/activitypub-cleaner.js'
@@ -113,6 +118,10 @@ const LOCAL_FILE_LEASE_HEARTBEAT_MS = 60 * 60 * 1000
 const LOCAL_FILE_LEASE_RECONCILIATION_BATCH_SIZE = 1000
 const VIDEO_PIPELINE_COUNTER_WATCHDOG_INTERVAL_MS = 60 * 60 * 1000
 const VIDEO_IMPORT_LOCAL_STORAGE_CAPACITY_JOB_ID_PREFIX = 'video-import-local-storage-capacity-'
+const LOCAL_STORAGE_IMPORT_ADMISSION_LOCK_ID = '__local-storage-import-admission__'
+const LOCAL_STORAGE_IMPORT_RESERVATIONS_KEY_SUFFIX = 'local-storage-import-reservations'
+
+class LocalStorageImportAdmissionLockUnavailableError extends Error {}
 
 const LOCAL_FILE_CONSUMER_JOB_TYPES: JobType[] = [
   'video-import',
@@ -320,9 +329,11 @@ class JobQueue {
   private transcodingProgressRefreshPromise?: Promise<Map<string, number>>
   private videoPipelineCounterWatchdogTimer?: NodeJS.Timeout
   private stopLocalStorageImportAdmissionListener?: () => void
+  private stopLocalStorageImportAdmissionLockListener?: () => void
   private localStorageCapacityImportPromotionRunning = false
   private localStorageCapacityImportReleasePending = false
-  private localStorageCapacityImportAdmissionLock = Promise.resolve()
+  private localStorageCapacityImportPromotionRetryOnRedisReady = false
+  private localStorageCapacityImportPromotionRetryOnLockRelease = false
   private readonly localStorageCapacityImportReservations = new Map<string, number>()
 
   private constructor () {
@@ -335,6 +346,13 @@ class JobQueue {
 
     this.jobRedisPrefix = 'bull-' + WEBSERVER.HOST
     this.sharedRedisClient = new IORedis(Redis.getRedisClientOptions('BullMQShared', { maxRetriesPerRequest: null }))
+    this.sharedRedisClient.on('ready', () => {
+      if (!this.localStorageCapacityImportPromotionRetryOnRedisReady) return
+
+      this.localStorageCapacityImportPromotionRetryOnRedisReady = false
+      this.localStorageCapacityImportReleasePending = true
+      this.promoteLocalStorageCapacityVideoImports()
+    })
     const disableWorkers = process.env.PEERTUBE_TEST_DISABLE_JOB_WORKERS === 'true'
 
     for (const handlerName of Object.keys(handlers)) {
@@ -449,7 +467,7 @@ class JobQueue {
 
     worker.on('completed', job => {
       void this.releaseLocalFileLeaseForJob(job, handlerName)
-      this.onLocalStorageCapacityVideoImportSettled(handlerName, job)
+      void this.onLocalStorageCapacityVideoImportSettled(handlerName, job)
     })
 
     worker.on('error', err => {
@@ -468,7 +486,7 @@ class JobQueue {
     } finally {
       if (this.isFinalJobAttempt(job)) {
         await this.releaseLocalFileLeaseForJob(job, handlerName)
-        this.onLocalStorageCapacityVideoImportSettled(handlerName, job)
+        await this.onLocalStorageCapacityVideoImportSettled(handlerName, job)
       }
     }
   }
@@ -519,7 +537,11 @@ class JobQueue {
 
     this.stopLocalStorageImportAdmissionListener?.()
     this.stopLocalStorageImportAdmissionListener = undefined
+    this.stopLocalStorageImportAdmissionLockListener?.()
+    this.stopLocalStorageImportAdmissionLockListener = undefined
     this.localStorageCapacityImportReleasePending = false
+    this.localStorageCapacityImportPromotionRetryOnRedisReady = false
+    this.localStorageCapacityImportPromotionRetryOnLockRelease = false
     this.localStorageCapacityImportReservations.clear()
     stopLocalStorageImportCapacityTracking()
 
@@ -948,12 +970,30 @@ class JobQueue {
       this.localStorageCapacityImportReleasePending = true
       this.promoteLocalStorageCapacityVideoImports()
     })
+
+    this.stopLocalStorageImportAdmissionLockListener?.()
+    this.stopLocalStorageImportAdmissionLockListener = LocalFileLeaseManager.Instance.onCleanupLockReleased(lockId => {
+      if (lockId !== LOCAL_STORAGE_IMPORT_ADMISSION_LOCK_ID) return
+
+      // A fail-closed decision can be blocked by another PM2 process while
+      // the disk is already below the resume threshold. The owner releasing
+      // the distributed lock is the event that makes its delayed import
+      // eligible for another decision; it is not a retry timer.
+      if (!this.localStorageCapacityImportPromotionRetryOnLockRelease) return
+
+      this.localStorageCapacityImportPromotionRetryOnLockRelease = false
+      this.localStorageCapacityImportReleasePending = true
+      this.promoteLocalStorageCapacityVideoImports()
+    })
   }
 
   private async configureLocalStorageImportAdmission () {
     if (!CONFIG.OBJECT_STORAGE.ENABLED) {
       this.stopLocalStorageImportAdmissionListener?.()
       this.stopLocalStorageImportAdmissionListener = undefined
+      this.stopLocalStorageImportAdmissionLockListener?.()
+      this.stopLocalStorageImportAdmissionLockListener = undefined
+      this.localStorageCapacityImportPromotionRetryOnLockRelease = false
       stopLocalStorageImportCapacityTracking()
       this.localStorageCapacityImportReservations.clear()
 
@@ -974,10 +1014,10 @@ class JobQueue {
     this.promoteLocalStorageCapacityVideoImports()
   }
 
-  private onLocalStorageCapacityVideoImportSettled (handlerName: JobType, job: Job) {
+  private async onLocalStorageCapacityVideoImportSettled (handlerName: JobType, job: Job) {
     if (handlerName !== 'video-import' || !this.isLocalStorageCapacityVideoImportJob(job)) return
 
-    this.releaseLocalStorageCapacityVideoImportReservation(job.id)
+    await this.releaseLocalStorageCapacityVideoImportReservation(job.id)
 
     // A promoted job can be stale, canceled, or fail before it changes local
     // media. Its terminal state is itself an event: evaluate the next held
@@ -1001,31 +1041,74 @@ class JobQueue {
     jobId: string | number | undefined
     isPromotedDelayedImport: boolean
   }) {
-    return this.runLocalStorageCapacityImportAdmissionExclusive(async () => {
-      const capacity = await getLocalStorageImportCapacity()
-      const jobId = String(options.jobId)
-      const reservationBytes = Math.max(0, capacity.limitBytes - capacity.resumeUsageBytes)
-      const existingReservationBytes = this.localStorageCapacityImportReservations.get(jobId) ?? 0
-      const otherReservationBytes = this.getLocalStorageCapacityImportReservationBytes() - existingReservationBytes
-      const effectiveCapacity = {
-        ...capacity,
-        usageBytes: capacity.usageBytes + otherReservationBytes
-      }
-      const hasDelayedImports = options.isPromotedDelayedImport || await this.hasLocalStorageCapacityVideoImports()
-      const shouldDefer = options.isPromotedDelayedImport
-        ? this.shouldDeferPromotedLocalStorageCapacityImport(effectiveCapacity, otherReservationBytes)
-        : hasDelayedImports || shouldDeferVideoImportForLocalStorage(effectiveCapacity, { hasDeferredImports: false })
+    try {
+      return await this.runLocalStorageCapacityImportAdmissionExclusive(async () => {
+        const capacity = await getSharedLocalStorageImportCapacity()
+        const jobId = String(options.jobId)
+        const reservationBytes = Math.max(0, capacity.limitBytes - capacity.resumeUsageBytes)
+        const reservations = await this.getLocalStorageCapacityImportReservations()
+        const existingReservationBytes = reservations.get(jobId) ?? 0
+        const otherReservationBytes = this.getLocalStorageCapacityImportReservationBytes(reservations) - existingReservationBytes
+        const effectiveCapacity = {
+          ...capacity,
+          usageBytes: capacity.usageBytes + otherReservationBytes
+        }
+        const hasDelayedImports = options.isPromotedDelayedImport || await this.hasLocalStorageCapacityVideoImports()
+        const shouldDefer = options.isPromotedDelayedImport
+          ? this.shouldDeferPromotedLocalStorageCapacityImport(effectiveCapacity, otherReservationBytes)
+          : hasDelayedImports || shouldDeferVideoImportForLocalStorage(effectiveCapacity, { hasDeferredImports: false })
 
-      if (!shouldDefer && existingReservationBytes === 0) {
-        this.localStorageCapacityImportReservations.set(jobId, reservationBytes)
+        if (!shouldDefer && existingReservationBytes === 0) {
+          await this.setLocalStorageCapacityImportReservation(jobId, reservationBytes)
+        }
+
+        return { capacity, shouldDefer, admissionUnavailable: false, retryOnLockRelease: false }
+      })
+    } catch (err) {
+      // Admission is a safety gate. If the shared lock cannot be acquired,
+      // park the import instead of letting multiple workers overcommit disk.
+      logger.warn('Cannot acquire local-storage import admission lock. Deferring import.', { err, jobId: options.jobId })
+
+      let capacity: Awaited<ReturnType<typeof getLocalStorageImportCapacity>>
+      try {
+        capacity = await getLocalStorageImportCapacity()
+      } catch (capacityErr) {
+        logger.warn('Cannot read local-storage import capacity after admission lock failure.', { err: capacityErr })
+        capacity = this.buildFailClosedLocalStorageImportCapacity()
       }
 
-      return { capacity, shouldDefer }
-    })
+      return {
+        capacity,
+        shouldDefer: true,
+        admissionUnavailable: true,
+        retryOnLockRelease: err instanceof LocalStorageImportAdmissionLockUnavailableError
+      }
+    }
   }
 
-  releaseLocalStorageCapacityVideoImportReservation (jobId: string | number | undefined) {
-    this.localStorageCapacityImportReservations.delete(String(jobId))
+  async releaseLocalStorageCapacityVideoImportReservation (jobId: string | number | undefined) {
+    // Direct import path notifications are serialized through the tracker. Do
+    // not drop the admission reservation until their updated directory totals
+    // have been observed by the next capacity read.
+    try {
+      await getLocalStorageImportCapacity()
+    } catch (err) {
+      // Keep the durable reservation and let the reconciliation path remove it
+      // later. A Redis snapshot problem must not turn a completed import into
+      // a failed/retried BullMQ job.
+      logger.warn('Cannot refresh local-storage capacity before releasing import reservation.', { err, jobId })
+      return
+    }
+
+    try {
+      await this.runLocalStorageCapacityImportAdmissionExclusive(async () => {
+        await this.deleteLocalStorageCapacityImportReservation(String(jobId))
+      })
+    } catch (err) {
+      // A stale reservation is reconciled against BullMQ job state before the
+      // next admission decision. Keeping it is safer than admitting work.
+      logger.warn('Cannot release local-storage import admission reservation.', { err, jobId })
+    }
   }
 
   private promoteLocalStorageCapacityVideoImports () {
@@ -1038,7 +1121,13 @@ class JobQueue {
       .catch(err => logger.warn('Cannot promote local-storage deferred video imports.', { err }))
       .finally(() => {
         this.localStorageCapacityImportPromotionRunning = false
-        if (this.localStorageCapacityImportReleasePending) this.promoteLocalStorageCapacityVideoImports()
+        if (
+          this.localStorageCapacityImportReleasePending &&
+          !this.localStorageCapacityImportPromotionRetryOnRedisReady &&
+          !this.localStorageCapacityImportPromotionRetryOnLockRelease
+        ) {
+          this.promoteLocalStorageCapacityVideoImports()
+        }
       })
   }
 
@@ -1054,19 +1143,32 @@ class JobQueue {
     if (!deferredJob) return
 
     if (CONFIG.OBJECT_STORAGE.ENABLED) {
-      const { capacity, shouldDefer } = await this.reserveLocalStorageCapacityVideoImport({
+      const { capacity, shouldDefer, admissionUnavailable, retryOnLockRelease } = await this.reserveLocalStorageCapacityVideoImport({
         jobId: deferredJob.id,
         isPromotedDelayedImport: true
       })
-      if (shouldDefer) return
+      if (shouldDefer) {
+        if (admissionUnavailable) {
+          // Keep the event latch armed. A Redis reconnect or the owner that
+          // currently holds the admission lock will re-evaluate this job.
+          this.localStorageCapacityImportReleasePending = true
+          this.localStorageCapacityImportPromotionRetryOnLockRelease = retryOnLockRelease
+          this.localStorageCapacityImportPromotionRetryOnRedisReady = !retryOnLockRelease
+        }
+
+        return
+      }
 
       // Promote one job per local-file-removal event. The next removal event,
       // or the promoted job's terminal state, decides whether there is room
       // for another import; no timer/retry loop is involved.
       try {
         await deferredJob.promote()
+        this.localStorageCapacityImportPromotionRetryOnRedisReady = false
       } catch (err) {
-        this.releaseLocalStorageCapacityVideoImportReservation(deferredJob.id)
+        await this.releaseLocalStorageCapacityVideoImportReservation(deferredJob.id)
+        this.localStorageCapacityImportReleasePending = true
+        this.localStorageCapacityImportPromotionRetryOnRedisReady = true
         throw err
       }
 
@@ -1088,9 +1190,9 @@ class JobQueue {
     return String(job.id).startsWith(VIDEO_IMPORT_LOCAL_STORAGE_CAPACITY_JOB_ID_PREFIX)
   }
 
-  private getLocalStorageCapacityImportReservationBytes () {
+  private getLocalStorageCapacityImportReservationBytes (reservations = this.localStorageCapacityImportReservations) {
     let total = 0
-    for (const bytes of this.localStorageCapacityImportReservations.values()) total += bytes
+    for (const bytes of reservations.values()) total += bytes
     return total
   }
 
@@ -1107,18 +1209,119 @@ class JobQueue {
   }
 
   private async runLocalStorageCapacityImportAdmissionExclusive<T> (fn: () => Promise<T>) {
-    let unlock = () => undefined
-    const previous = this.localStorageCapacityImportAdmissionLock
-    this.localStorageCapacityImportAdmissionLock = new Promise<void>(resolve => {
-      unlock = resolve
-    })
+    if (!Redis.Instance.isConnected()) {
+      throw new Error('Redis is unavailable for local-storage import admission')
+    }
 
-    await previous
+    const distributedLock = await LocalFileLeaseManager.Instance.acquireCleanupLock(
+      LOCAL_STORAGE_IMPORT_ADMISSION_LOCK_ID,
+      5000
+    )
+    if (!distributedLock) {
+      throw new LocalStorageImportAdmissionLockUnavailableError('Cannot acquire the shared local-storage import admission lock')
+    }
+
+    let lockLost = false
+    let refreshInFlight = false
+    const refreshLock = () => {
+      if (lockLost || refreshInFlight) return
+
+      refreshInFlight = true
+      void distributedLock.refresh()
+        .then(refreshed => {
+          if (refreshed) return
+
+          lockLost = true
+          logger.warn('Lost the shared local-storage import admission lock.')
+        })
+        .catch(err => {
+          lockLost = true
+          logger.warn('Cannot refresh the shared local-storage import admission lock.', { err })
+        })
+        .finally(() => {
+          refreshInFlight = false
+        })
+    }
+    const heartbeat = setInterval(refreshLock, CLEANUP_LOCK_HEARTBEAT_MS)
+    heartbeat.unref?.()
 
     try {
-      return await fn()
+      const result = await fn()
+      // A final synchronous refresh closes the interval race just before the
+      // caller acts on the decision. If the lock was lost, fail closed so the
+      // import remains delayed rather than admitting against stale state.
+      if (lockLost || !await distributedLock.refresh()) {
+        throw new LocalStorageImportAdmissionLockUnavailableError('Lost the shared local-storage import admission lock')
+      }
+
+      return result
     } finally {
-      unlock()
+      clearInterval(heartbeat)
+      await distributedLock.release()
+    }
+  }
+
+  private async getLocalStorageCapacityImportReservations () {
+    const client = Redis.Instance.isConnected() ? Redis.Instance.getClient() : undefined
+    if (!client) return new Map(this.localStorageCapacityImportReservations)
+
+    const key = this.buildLocalStorageCapacityImportReservationsKey()
+    const rawReservations = await client.hgetall(key)
+    const reservations = new Map<string, number>()
+    const staleJobIds: string[] = []
+    const queue = this.queues['video-import']
+
+    for (const [ jobId, rawBytes ] of Object.entries(rawReservations)) {
+      const bytes = Number(rawBytes)
+      if (!Number.isFinite(bytes) || bytes < 0) {
+        staleJobIds.push(jobId)
+        continue
+      }
+
+      const job = await queue?.getJob(jobId)
+      const state = job ? await job.getState() : undefined
+      if (!job || state === 'completed' || state === 'failed' || state === 'unknown') {
+        staleJobIds.push(jobId)
+        continue
+      }
+
+      reservations.set(jobId, bytes)
+    }
+
+    if (staleJobIds.length !== 0) await client.hdel(key, ...staleJobIds)
+    return reservations
+  }
+
+  private async setLocalStorageCapacityImportReservation (jobId: string, bytes: number) {
+    this.localStorageCapacityImportReservations.set(jobId, bytes)
+
+    const client = Redis.Instance.isConnected() ? Redis.Instance.getClient() : undefined
+    if (!client) return
+
+    await client.hset(this.buildLocalStorageCapacityImportReservationsKey(), jobId, String(bytes))
+  }
+
+  private async deleteLocalStorageCapacityImportReservation (jobId: string) {
+    this.localStorageCapacityImportReservations.delete(jobId)
+
+    const client = Redis.Instance.isConnected() ? Redis.Instance.getClient() : undefined
+    if (!client) return
+
+    await client.hdel(this.buildLocalStorageCapacityImportReservationsKey(), jobId)
+  }
+
+  private buildLocalStorageCapacityImportReservationsKey () {
+    return Redis.Instance.getPrefix() + LOCAL_STORAGE_IMPORT_RESERVATIONS_KEY_SUFFIX
+  }
+
+  private buildFailClosedLocalStorageImportCapacity () {
+    const limitBytes = Math.max(1, CONFIG.IMPORT.VIDEOS.LOCAL_STORAGE_LIMIT_GB) * 1024 ** 3
+    const headroomBytes = Math.max(0, CONFIG.IMPORT.VIDEOS.LOCAL_STORAGE_FREE_SPACE_FOR_IMPORT_GB) * 1024 ** 3
+
+    return {
+      usageBytes: Number.MAX_SAFE_INTEGER,
+      limitBytes,
+      resumeUsageBytes: Math.max(0, limitBytes - headroomBytes)
     }
   }
 

@@ -1,9 +1,13 @@
 import { CONFIG } from '@server/initializers/config.js'
+import { Redis } from '@server/lib/redis.js'
 import { FSWatcher, watch } from 'fs'
 import { lstat, readdir } from 'fs/promises'
+import { randomUUID } from 'node:crypto'
 import { dirname, isAbsolute, join, relative, resolve } from 'path'
 
 const GIGABYTE = 1024 ** 3
+const CAPACITY_SNAPSHOT_MAX_AGE_MS = 5 * 60 * 1000
+const CAPACITY_REDIS_KEY_SUFFIX = 'local-storage-import-capacity-snapshots'
 
 export type LocalStorageImportCapacity = {
   usageBytes: number
@@ -14,15 +18,21 @@ export type LocalStorageImportCapacity = {
 type LocalStorageCapacityAvailableListener = () => void | Promise<void>
 
 const localStorageCapacityAvailableListeners = new Set<LocalStorageCapacityAvailableListener>()
-const trackedFileBytes = new Map<string, number>()
+// Store the direct file total for each directory, not every media file. A 1 TB
+// HLS store can contain millions of segments, while its directory count stays
+// manageable. Recursive scans still produce an exact aggregate total.
+const trackedDirectoryBytes = new Map<string, number>()
 const directoryWatchers = new Map<string, FSWatcher>()
 let trackedUsageBytes = 0
 let trackerRoots: string[] = []
 const recursiveWatchers = new Map<string, FSWatcher>()
 let trackerStartPromise: Promise<void> | undefined
+let trackerRecoveryPromise: Promise<void> | undefined
 let trackerStarted = false
 let trackingFailed = false
 let watcherWork = Promise.resolve()
+let initialWatcherChangedPaths: Set<string> | undefined
+const capacitySnapshotOwnerId = randomUUID()
 
 export async function startLocalStorageImportCapacityTracking () {
   if (trackerStarted && !trackingFailed) return trackerStartPromise
@@ -32,24 +42,32 @@ export async function startLocalStorageImportCapacityTracking () {
   trackerStartPromise = (async () => {
     try {
       trackerRoots = getLocalStorageRoots()
-      let tree = await collectStorageTrees(trackerRoots)
-
-      replaceTrackedFiles(tree.files)
 
       try {
-        // Node 20+ supports recursive fs.watch on PeerTube's supported
-        // platforms. Fall back to one watcher per directory only when that
-        // capability is unavailable, so a large HLS tree does not consume one
-        // file descriptor per playlist under normal deployments.
-        watchStorageTrees(trackerRoots, tree.directories)
+        // Start native recursive watchers before scanning. On supported
+        // Node 20+ deployments this closes the scan-to-watch race without a
+        // second full walk of a potentially multi-terabyte HLS tree. Older
+        // platforms fall back to per-directory watchers after the scan.
+        initialWatcherChangedPaths = new Set()
+        const usesRecursiveWatchers = watchStorageTrees(trackerRoots, [])
 
-        // A storage mutation can occur after the initial scan but before every
-        // directory watcher is installed. Take one event-driven startup
-        // snapshot after registration, then apply any watcher work queued while
-        // that snapshot was being collected.
-        tree = await collectStorageTrees(trackerRoots)
-        replaceTrackedFiles(tree.files)
-        watchStorageTrees(trackerRoots, tree.directories)
+        let tree = await collectStorageTrees(trackerRoots)
+        replaceTrackedDirectories(tree.directories)
+        watchStorageTrees(trackerRoots, tree.directories.keys())
+
+        // The per-directory fallback cannot watch a directory before it has
+        // been discovered by the first scan. Take one more snapshot after
+        // those watchers exist so Linux/unsupported recursive-watch platforms
+        // cannot lose mutations made during the initial walk.
+        if (!usesRecursiveWatchers) {
+          tree = await collectStorageTrees(trackerRoots)
+          replaceTrackedDirectories(tree.directories)
+          watchStorageTrees(trackerRoots, tree.directories.keys())
+        }
+
+        const changedPaths = initialWatcherChangedPaths
+        initialWatcherChangedPaths = undefined
+        for (const changedPath of changedPaths ?? []) void enqueueTrackedPathChange(changedPath)
         await watcherWork
       } catch {
         failClosedTracking()
@@ -69,6 +87,8 @@ export async function startLocalStorageImportCapacityTracking () {
 export async function getLocalStorageImportCapacity (): Promise<LocalStorageImportCapacity> {
   await startLocalStorageImportCapacityTracking()
   await watcherWork
+
+  await publishLocalStorageImportCapacitySnapshot()
 
   const limitBytes = Math.max(1, CONFIG.IMPORT.VIDEOS.LOCAL_STORAGE_LIMIT_GB) * GIGABYTE
 
@@ -100,22 +120,44 @@ export function onLocalStorageImportCapacityAvailable (listener: LocalStorageCap
 // media. It makes queued-import admission react synchronously; fs.watch still
 // covers every other process/manual file mutation.
 export function notifyLocalStorageImportPathRemoved (path: string) {
-  if (trackerRoots.length === 0) return
+  return notifyLocalStorageImportPathChanged(path)
+}
 
-  const previousUsageBytes = trackedUsageBytes
-  const releasedBytes = removeTrackedPath(resolve(path))
-  if (releasedBytes !== 0) emitCapacityAvailableIfNeeded(previousUsageBytes)
+export function notifyLocalStorageImportPathChanged (path: string) {
+  if (trackerRoots.length === 0) return Promise.resolve()
+
+  if (trackingFailed) {
+    return recoverLocalStorageImportCapacityTracking()
+  }
+
+  return enqueueTrackedPathChange(resolve(path))
 }
 
 export function stopLocalStorageImportCapacityTracking () {
   closeAllDirectoryWatchers()
   trackerStartPromise = undefined
+  trackerRecoveryPromise = undefined
   trackerStarted = false
   trackingFailed = false
   trackerRoots = []
   trackedUsageBytes = 0
   watcherWork = Promise.resolve()
-  trackedFileBytes.clear()
+  initialWatcherChangedPaths = undefined
+  trackedDirectoryBytes.clear()
+  void removeLocalStorageImportCapacitySnapshot()
+}
+
+function enqueueTrackedPathChange (path: string) {
+  if (initialWatcherChangedPaths) {
+    initialWatcherChangedPaths.add(path)
+    return Promise.resolve()
+  }
+
+  watcherWork = watcherWork
+    .then(() => reconcileChangedPath(path))
+    .catch(() => failClosedTracking())
+
+  return watcherWork
 }
 
 async function reconcileChangedPath (path: string) {
@@ -127,37 +169,46 @@ async function reconcileChangedPath (path: string) {
     const stats = await lstat(path)
 
     if (stats.isDirectory()) {
-      await replaceTrackedDirectory(path)
+      await replaceTrackedDirectoryTree(path)
     } else if (stats.isFile()) {
-      const previousBytes = trackedFileBytes.get(path) ?? 0
-      const nextBytes = getAllocatedSize(stats)
-      trackedFileBytes.set(path, nextBytes)
-      applyUsageDelta(nextBytes - previousBytes)
+      await replaceTrackedDirectoryDirectBytes(dirname(path))
     }
   } catch (err) {
-    if ((err as { code?: string })?.code !== 'ENOENT') return
+    if ((err as { code?: string })?.code !== 'ENOENT') throw err
 
-    removeTrackedPath(path)
+    removeTrackedDirectory(path)
+    await replaceTrackedDirectoryDirectBytes(dirname(path))
   }
 
   emitCapacityAvailableIfNeeded(previousUsageBytes)
 }
 
-async function replaceTrackedDirectory (path: string) {
+async function replaceTrackedDirectoryTree (path: string) {
   const tree = await collectStorageTree(path)
-  const previousBytes = removeTrackedPath(path)
+  removeTrackedDirectory(path)
 
-  for (const [ nextPath, size ] of tree.files) trackedFileBytes.set(nextPath, size)
-  const addedBytes = sumFileBytes(tree.files)
+  for (const [ nextPath, size ] of tree.directories) trackedDirectoryBytes.set(nextPath, size)
+  const addedBytes = sumDirectoryBytes(tree.directories)
 
-  trackedUsageBytes = Math.max(0, trackedUsageBytes + addedBytes - previousBytes)
-  watchStorageDirectories(tree.directories)
+  // removeTrackedDirectory already subtracted previousBytes from the aggregate.
+  trackedUsageBytes = Math.max(0, trackedUsageBytes + addedBytes)
+  watchStorageDirectories(tree.directories.keys())
 }
 
-function replaceTrackedFiles (files: Map<string, number>) {
-  trackedFileBytes.clear()
-  for (const [ path, size ] of files) trackedFileBytes.set(path, size)
-  trackedUsageBytes = sumFileBytes(files)
+async function replaceTrackedDirectoryDirectBytes (path: string) {
+  if (!isInsideTrackedRoots(path)) return
+
+  const nextBytes = await collectDirectoryDirectBytes(path)
+  const previousBytes = trackedDirectoryBytes.get(path) ?? 0
+
+  trackedDirectoryBytes.set(path, nextBytes)
+  applyUsageDelta(nextBytes - previousBytes)
+}
+
+function replaceTrackedDirectories (directories: Map<string, number>) {
+  trackedDirectoryBytes.clear()
+  for (const [ path, size ] of directories) trackedDirectoryBytes.set(path, size)
+  trackedUsageBytes = sumDirectoryBytes(directories)
 }
 
 function applyUsageDelta (delta: number) {
@@ -166,13 +217,13 @@ function applyUsageDelta (delta: number) {
   trackedUsageBytes = Math.max(0, trackedUsageBytes + delta)
 }
 
-function removeTrackedPath (path: string) {
+function removeTrackedDirectory (path: string) {
   let releasedBytes = 0
 
-  for (const [ trackedPath, size ] of trackedFileBytes) {
+  for (const [ trackedPath, size ] of trackedDirectoryBytes) {
     if (!isSamePathOrDescendant(path, trackedPath)) continue
 
-    trackedFileBytes.delete(trackedPath)
+    trackedDirectoryBytes.delete(trackedPath)
     releasedBytes += size
   }
 
@@ -237,9 +288,7 @@ function watchStorageDirectories (directories: Iterable<string>) {
 
     const watcher = watch(directory, (_eventType, filename) => {
       const changedPath = getChangedPath(directory, filename)
-      watcherWork = watcherWork
-        .then(() => reconcileChangedPath(changedPath))
-        .catch(() => failClosedTracking())
+      void enqueueTrackedPathChange(changedPath)
     })
 
     watcher.on('error', () => {
@@ -260,14 +309,14 @@ function watchStorageDirectories (directories: Iterable<string>) {
           try {
             const stats = await lstat(directory)
             if (!stats.isDirectory()) {
-              removeTrackedPath(directory)
+              removeTrackedDirectory(directory)
               return
             }
 
             watchStorageDirectories([ directory ])
           } catch (err) {
             if ((err as { code?: string })?.code === 'ENOENT') {
-              removeTrackedPath(directory)
+              removeTrackedDirectory(directory)
               return
             }
 
@@ -281,8 +330,50 @@ function watchStorageDirectories (directories: Iterable<string>) {
   }
 }
 
+export async function getSharedLocalStorageImportCapacity (): Promise<LocalStorageImportCapacity> {
+  const localCapacity = await getLocalStorageImportCapacity()
+  const client = Redis.Instance.isConnected() ? Redis.Instance.getClient() : undefined
+  if (!client) return localCapacity
+
+  try {
+    const snapshots = await client.hgetall(buildCapacityRedisKey())
+    let usageBytes = localCapacity.usageBytes
+    const staleOwners: string[] = []
+    const now = Date.now()
+
+    for (const [ ownerId, rawSnapshot ] of Object.entries(snapshots)) {
+      try {
+        const snapshot = JSON.parse(rawSnapshot) as { usageBytes?: unknown, updatedAt?: unknown }
+        if (
+          typeof snapshot.usageBytes !== 'number' ||
+          !Number.isFinite(snapshot.usageBytes) ||
+          typeof snapshot.updatedAt !== 'number' ||
+          now - snapshot.updatedAt > CAPACITY_SNAPSHOT_MAX_AGE_MS
+        ) {
+          staleOwners.push(ownerId)
+          continue
+        }
+
+        usageBytes = Math.max(usageBytes, snapshot.usageBytes)
+      } catch {
+        staleOwners.push(ownerId)
+      }
+    }
+
+    if (staleOwners.length !== 0) await client.hdel(buildCapacityRedisKey(), ...staleOwners)
+
+    return { ...localCapacity, usageBytes }
+  } catch (err) {
+    // Shared snapshots prevent independent PM2 processes from each admitting
+    // against their own stale watcher state. Do not silently fall back to the
+    // local reading when Redis cannot provide that coordination.
+    throw new Error('Cannot read shared local-storage import capacity.', { cause: err })
+  }
+}
+
 function watchStorageTrees (roots: string[], directories: Iterable<string>) {
   const allDirectories = [ ...directories ]
+  let usesRecursiveWatchers = true
 
   for (const root of roots) {
     if (recursiveWatchers.has(root)) continue
@@ -293,15 +384,14 @@ function watchStorageTrees (roots: string[], directories: Iterable<string>) {
     // capability failure. In that case only add newly created directories.
     if (hasDirectoryWatcherUnder(root)) {
       watchStorageDirectories(rootDirectories)
+      usesRecursiveWatchers = false
       continue
     }
 
     try {
       const watcher = watch(root, { recursive: true }, (_eventType, filename) => {
         const changedPath = getChangedPath(root, filename)
-        watcherWork = watcherWork
-          .then(() => reconcileChangedPath(changedPath))
-          .catch(() => failClosedTracking())
+        void enqueueTrackedPathChange(changedPath)
       })
 
       watcher.on('error', () => {
@@ -314,7 +404,7 @@ function watchStorageTrees (roots: string[], directories: Iterable<string>) {
           .then(() => {
             if (!trackerRoots.includes(root)) return
 
-            return replaceTrackedDirectory(root)
+            return replaceTrackedDirectoryTree(root)
           })
           .catch(() => failClosedTracking())
       })
@@ -322,8 +412,11 @@ function watchStorageTrees (roots: string[], directories: Iterable<string>) {
       recursiveWatchers.set(root, watcher)
     } catch {
       watchStorageDirectories(rootDirectories)
+      usesRecursiveWatchers = false
     }
   }
+
+  return usesRecursiveWatchers
 }
 
 function hasDirectoryWatcherUnder (root: string) {
@@ -354,20 +447,55 @@ function closeAllDirectoryWatchers () {
 function failClosedTracking () {
   trackedUsageBytes = Number.MAX_SAFE_INTEGER
   closeAllDirectoryWatchers()
+  initialWatcherChangedPaths = undefined
   trackingFailed = true
   trackerStarted = false
   trackerStartPromise = undefined
 }
 
+async function recoverLocalStorageImportCapacityTracking () {
+  if (trackerRecoveryPromise !== undefined) return trackerRecoveryPromise
+
+  const previousUsageBytes = trackedUsageBytes
+  trackerRecoveryPromise = (async () => {
+    await startLocalStorageImportCapacityTracking()
+
+    if (!trackingFailed) emitCapacityAvailableIfNeeded(previousUsageBytes)
+  })().finally(() => {
+    trackerRecoveryPromise = undefined
+  })
+
+  return trackerRecoveryPromise
+}
+
+async function publishLocalStorageImportCapacitySnapshot () {
+  const client = Redis.Instance.isConnected() ? Redis.Instance.getClient() : undefined
+  if (!client) return
+
+  await client.hset(buildCapacityRedisKey(), capacitySnapshotOwnerId, JSON.stringify({
+    usageBytes: trackedUsageBytes,
+    updatedAt: Date.now()
+  }))
+}
+
+async function removeLocalStorageImportCapacitySnapshot () {
+  const client = Redis.Instance.isConnected() ? Redis.Instance.getClient() : undefined
+  if (!client) return
+
+  await client.hdel(buildCapacityRedisKey(), capacitySnapshotOwnerId)
+}
+
+function buildCapacityRedisKey () {
+  return Redis.Instance.getPrefix() + CAPACITY_REDIS_KEY_SUFFIX
+}
+
 type StorageTree = {
-  files: Map<string, number>
-  directories: Set<string>
+  directories: Map<string, number>
 }
 
 async function collectStorageTree (path: string): Promise<StorageTree> {
   const tree: StorageTree = {
-    files: new Map<string, number>(),
-    directories: new Set<string>()
+    directories: new Map<string, number>()
   }
 
   await collectStorageTreeInto(path, tree)
@@ -376,14 +504,12 @@ async function collectStorageTree (path: string): Promise<StorageTree> {
 
 async function collectStorageTrees (paths: string[]) {
   const tree: StorageTree = {
-    files: new Map<string, number>(),
-    directories: new Set<string>()
+    directories: new Map<string, number>()
   }
 
   for (const path of paths) {
     const nextTree = await collectStorageTree(path)
-    for (const [ filePath, size ] of nextTree.files) tree.files.set(filePath, size)
-    for (const directory of nextTree.directories) tree.directories.add(directory)
+    for (const [ directory, size ] of nextTree.directories) tree.directories.set(directory, size)
   }
 
   return tree
@@ -399,7 +525,7 @@ async function collectStorageTreeInto (path: string, tree: StorageTree): Promise
     throw err
   }
 
-  tree.directories.add(resolve(path))
+  let directBytes = 0
 
   for (const entry of entries) {
     const entryPath = join(path, entry.name)
@@ -410,8 +536,10 @@ async function collectStorageTreeInto (path: string, tree: StorageTree): Promise
     }
 
     if (!entry.isFile()) continue
-    tree.files.set(resolve(entryPath), getAllocatedSize(await lstat(entryPath)))
+    directBytes += getAllocatedSize(await lstat(entryPath))
   }
+
+  tree.directories.set(resolve(path), directBytes)
 }
 
 function getAllocatedSize (stats: { size: number }) {
@@ -420,8 +548,27 @@ function getAllocatedSize (stats: { size: number }) {
   return stats.size
 }
 
-function sumFileBytes (files: Map<string, number>) {
+async function collectDirectoryDirectBytes (path: string) {
+  let entries: Awaited<ReturnType<typeof readdir>>
+
+  try {
+    entries = await readdir(path, { withFileTypes: true })
+  } catch (err) {
+    if ((err as { code?: string })?.code === 'ENOENT') return 0
+    throw err
+  }
+
   let total = 0
-  for (const size of files.values()) total += size
+  for (const entry of entries) {
+    if (!entry.isFile()) continue
+    total += getAllocatedSize(await lstat(join(path, entry.name)))
+  }
+
+  return total
+}
+
+function sumDirectoryBytes (directories: Map<string, number>) {
+  let total = 0
+  for (const size of directories.values()) total += size
   return total
 }

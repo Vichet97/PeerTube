@@ -2073,7 +2073,7 @@ async function removeLocalPathNow (path: string) {
   if (!await pathExists(path)) return
 
   await remove(path)
-  notifyLocalStorageImportPathRemoved(path)
+  await notifyLocalStorageImportPathRemoved(path)
   await removeParentDirIfEmpty(path)
 }
 

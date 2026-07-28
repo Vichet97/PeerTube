@@ -62,6 +62,25 @@ describe('local-file-lease-manager', function () {
     await lease.release()
   })
 
+  it('should emit a cleanup-lock release event', async function () {
+    const manager = LocalFileLeaseManager.Instance
+    const lockId = 'cleanup-lock-release-event'
+    let releasedLockId: string | undefined
+    const stopListening = manager.onCleanupLockReleased(released => {
+      releasedLockId = released
+    })
+
+    try {
+      const cleanupLock = await manager.acquireCleanupLock(lockId)
+      expect(cleanupLock).to.not.equal(undefined)
+
+      await cleanupLock?.release()
+      expect(releasedLockId).to.equal(lockId)
+    } finally {
+      stopListening()
+    }
+  })
+
   it('should retain a durable queue lease until its lifecycle releases it', async function () {
     const manager = LocalFileLeaseManager.Instance
     const lease = await manager.acquire({
