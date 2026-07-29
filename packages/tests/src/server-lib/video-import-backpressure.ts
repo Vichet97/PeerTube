@@ -64,6 +64,7 @@ describe('video-import local storage admission', function () {
     const tmp = join(root, 'tmp')
     const webVideos = join(root, 'web-videos')
     const originalVideos = join(root, 'original-video-files')
+    const unrelatedStorageDirectory = join(root, 'captions')
     const storage = CONFIG.STORAGE
     const originalPaths = {
       streamingPlaylists: storage.STREAMING_PLAYLISTS_DIR,
@@ -74,8 +75,15 @@ describe('video-import local storage admission', function () {
     }
 
     try {
-      await Promise.all([ mkdir(streamingPlaylists), mkdir(tmp), mkdir(webVideos), mkdir(originalVideos) ])
-      await writeFile(join(root, 'existing.bin'), Buffer.alloc(10))
+      await Promise.all([
+        mkdir(streamingPlaylists),
+        mkdir(tmp),
+        mkdir(webVideos),
+        mkdir(originalVideos),
+        mkdir(unrelatedStorageDirectory)
+      ])
+      await writeFile(join(streamingPlaylists, 'existing.bin'), Buffer.alloc(10))
+      await writeFile(join(unrelatedStorageDirectory, 'untracked.vtt'), Buffer.alloc(30))
 
       storage.STREAMING_PLAYLISTS_DIR = streamingPlaylists
       storage.TMP_DIR = tmp
@@ -83,6 +91,9 @@ describe('video-import local storage admission', function () {
       storage.WEB_VIDEOS_DIR = webVideos
       storage.ORIGINAL_VIDEO_FILES_DIR = originalVideos
 
+      // The capacity gate must count import pipeline media only. Logs,
+      // captions and other storage siblings are too noisy to watch and do not
+      // affect the local-media budget this gate protects.
       expect((await getLocalStorageImportCapacity()).usageBytes).to.equal(10)
 
       const redis = Redis.Instance as any

@@ -32,6 +32,8 @@ let trackerStarted = false
 let trackingFailed = false
 let watcherWork = Promise.resolve()
 let initialWatcherChangedPaths: Set<string> | undefined
+let pendingWatcherChangedPaths = new Set<string>()
+let watcherChangeFlushScheduled = false
 const capacitySnapshotOwnerId = randomUUID()
 
 export async function startLocalStorageImportCapacityTracking () {
@@ -143,6 +145,8 @@ export function stopLocalStorageImportCapacityTracking () {
   trackedUsageBytes = 0
   watcherWork = Promise.resolve()
   initialWatcherChangedPaths = undefined
+  pendingWatcherChangedPaths.clear()
+  watcherChangeFlushScheduled = false
   trackedDirectoryBytes.clear()
   void removeLocalStorageImportCapacitySnapshot()
 }
@@ -153,11 +157,46 @@ function enqueueTrackedPathChange (path: string) {
     return Promise.resolve()
   }
 
-  watcherWork = watcherWork
-    .then(() => reconcileChangedPath(path))
-    .catch(() => failClosedTracking())
+  // fs.watch can emit many events for one transcoding output. Coalesce every
+  // burst into one serialized reconciliation pass so tracker bookkeeping never
+  // monopolizes the event loop and stalls unrelated import admission/jobs.
+  pendingWatcherChangedPaths.add(path)
+  if (!watcherChangeFlushScheduled) {
+    watcherChangeFlushScheduled = true
+    queueMicrotask(flushTrackedPathChanges)
+  }
 
-  return watcherWork
+  // Direct pipeline notifications await the coalesced update. fs.watch callers
+  // intentionally ignore this promise, but a move/delete must not look like a
+  // capacity release before its new directory total has been recorded.
+  return Promise.resolve().then(() => watcherWork)
+}
+
+function flushTrackedPathChanges () {
+  watcherChangeFlushScheduled = false
+  const changedPaths = pendingWatcherChangedPaths
+  pendingWatcherChangedPaths = new Set<string>()
+  if (changedPaths.size === 0) return
+
+  watcherWork = watcherWork
+    .then(async () => {
+      for (const path of collapseTrackedPathChanges(changedPaths)) {
+        await reconcileChangedPath(path)
+      }
+    })
+    .catch(() => failClosedTracking())
+}
+
+function collapseTrackedPathChanges (paths: Set<string>) {
+  const sorted = [ ...paths ].sort((left, right) => left.length - right.length)
+  const collapsed: string[] = []
+
+  for (const path of sorted) {
+    if (collapsed.some(parent => isSamePathOrDescendant(parent, path))) continue
+    collapsed.push(path)
+  }
+
+  return collapsed
 }
 
 async function reconcileChangedPath (path: string) {
@@ -265,12 +304,12 @@ function isSamePathOrDescendant (parentPath: string, candidatePath: string) {
 }
 
 function getLocalStorageRoots () {
-  // The normal layout has all media under the streaming-playlists parent, so
-  // that one root covers the entire local storage folder. Include configured
-  // import paths outside that parent as separate roots: remote downloads begin
-  // in TMP_DIR before they become web-video/HLS media.
+  // Track only bytes that can be created by a remote import and retained by
+  // the move/transcode pipeline. Do not watch the whole storage parent: that
+  // also contains logs, captions, plugins and unrelated runtime churn. A
+  // busy caption/move pass otherwise floods fs.watch and starves the single
+  // Node event loop before a new import can start.
   const candidates = [
-    dirname(CONFIG.STORAGE.STREAMING_PLAYLISTS_DIR),
     CONFIG.STORAGE.TMP_DIR,
     CONFIG.STORAGE.TMP_PERSISTENT_DIR,
     CONFIG.STORAGE.WEB_VIDEOS_DIR,
