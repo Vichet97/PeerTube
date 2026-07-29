@@ -54,6 +54,10 @@ describe('video-import local storage admission', function () {
     expect(isVideoImportBackpressureJobId(jobId)).to.be.false
   })
 
+  it('should not defer a new import below the limit just because another import is delayed', function () {
+    expect(shouldDeferVideoImportForLocalStorage(capacity(900), { hasDeferredImports: false })).to.be.false
+  })
+
   it('should track directory totals without retaining an entry for every media file', async function () {
     const root = await mkdtemp(join(tmpdir(), 'peertube-storage-admission-'))
     const streamingPlaylists = join(root, 'streaming-playlists')

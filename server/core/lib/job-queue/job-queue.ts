@@ -337,6 +337,7 @@ class JobQueue {
   private localStorageCapacityImportPromotionRetryOnRedisReady = false
   private localStorageCapacityImportPromotionRetryOnLockRelease = false
   private localStorageCapacityImportLockReleaseVersion = 0
+  private localStorageCapacityImportAdmissionLock = Promise.resolve()
   private readonly localStorageCapacityImportReservations = new Map<string, number>()
 
   private constructor () {
@@ -1036,10 +1037,6 @@ class JobQueue {
     this.promoteLocalStorageCapacityVideoImports()
   }
 
-  async hasLocalStorageCapacityVideoImports () {
-    return !!await this.getFirstLocalStorageCapacityVideoImportJob([ 'waiting', 'delayed', 'prioritized', 'active' ])
-  }
-
   async hasLocalStorageCapacityVideoImportForImport (videoImportId: number) {
     return !!await this.getFirstLocalStorageCapacityVideoImportJob(
       [ 'waiting', 'delayed', 'prioritized', 'active' ],
@@ -1063,10 +1060,9 @@ class JobQueue {
           ...capacity,
           usageBytes: capacity.usageBytes + otherReservationBytes
         }
-        const hasDelayedImports = options.isPromotedDelayedImport || await this.hasLocalStorageCapacityVideoImports()
         const shouldDefer = options.isPromotedDelayedImport
           ? this.shouldDeferPromotedLocalStorageCapacityImport(effectiveCapacity, otherReservationBytes)
-          : hasDelayedImports || shouldDeferVideoImportForLocalStorage(effectiveCapacity, { hasDeferredImports: false })
+          : shouldDeferVideoImportForLocalStorage(effectiveCapacity, { hasDeferredImports: false })
 
         if (!shouldDefer && existingReservationBytes === 0) {
           await this.setLocalStorageCapacityImportReservation(jobId, reservationBytes)
@@ -1222,43 +1218,51 @@ class JobQueue {
   }
 
   private async runLocalStorageCapacityImportAdmissionExclusive<T> (fn: () => Promise<T>) {
-    if (!Redis.Instance.isConnected()) {
-      throw new Error('Redis is unavailable for local-storage import admission')
-    }
+    let unlock = () => undefined
+    const previous = this.localStorageCapacityImportAdmissionLock
+    this.localStorageCapacityImportAdmissionLock = new Promise<void>(resolve => {
+      unlock = resolve
+    })
 
-    const distributedLock = await LocalFileLeaseManager.Instance.acquireCleanupLock(
-      LOCAL_STORAGE_IMPORT_ADMISSION_LOCK_ID,
-      CLEANUP_LOCK_TTL_MS + CLEANUP_LOCK_HEARTBEAT_MS
-    )
-    if (!distributedLock) {
-      throw new LocalStorageImportAdmissionLockUnavailableError('Cannot acquire the shared local-storage import admission lock')
-    }
-
-    let lockLost = false
-    let refreshInFlight = false
-    const refreshLock = () => {
-      if (lockLost || refreshInFlight) return
-
-      refreshInFlight = true
-      void distributedLock.refresh()
-        .then(refreshed => {
-          if (refreshed) return
-
-          lockLost = true
-          logger.warn('Lost the shared local-storage import admission lock.')
-        })
-        .catch(err => {
-          lockLost = true
-          logger.warn('Cannot refresh the shared local-storage import admission lock.', { err })
-        })
-        .finally(() => {
-          refreshInFlight = false
-        })
-    }
-    const heartbeat = setInterval(refreshLock, CLEANUP_LOCK_HEARTBEAT_MS)
-    heartbeat.unref?.()
-
+    await previous
     try {
+      if (!Redis.Instance.isConnected()) {
+        throw new Error('Redis is unavailable for local-storage import admission')
+      }
+
+      const distributedLock = await LocalFileLeaseManager.Instance.acquireCleanupLock(
+        LOCAL_STORAGE_IMPORT_ADMISSION_LOCK_ID,
+        CLEANUP_LOCK_TTL_MS + CLEANUP_LOCK_HEARTBEAT_MS
+      )
+      if (!distributedLock) {
+        throw new LocalStorageImportAdmissionLockUnavailableError('Cannot acquire the shared local-storage import admission lock')
+      }
+
+      let lockLost = false
+      let refreshInFlight = false
+      const refreshLock = () => {
+        if (lockLost || refreshInFlight) return
+
+        refreshInFlight = true
+        void distributedLock.refresh()
+          .then(refreshed => {
+            if (refreshed) return
+
+            lockLost = true
+            logger.warn('Lost the shared local-storage import admission lock.')
+          })
+          .catch(err => {
+            lockLost = true
+            logger.warn('Cannot refresh the shared local-storage import admission lock.', { err })
+          })
+          .finally(() => {
+            refreshInFlight = false
+          })
+      }
+      const heartbeat = setInterval(refreshLock, CLEANUP_LOCK_HEARTBEAT_MS)
+      heartbeat.unref?.()
+
+      try {
       const result = await fn()
       // A final synchronous refresh closes the interval race just before the
       // caller acts on the decision. If the lock was lost, fail closed so the
@@ -1268,9 +1272,12 @@ class JobQueue {
       }
 
       return result
+      } finally {
+        clearInterval(heartbeat)
+        await distributedLock.release()
+      }
     } finally {
-      clearInterval(heartbeat)
-      await distributedLock.release()
+      unlock()
     }
   }
 
