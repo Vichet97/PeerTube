@@ -25,7 +25,6 @@ const trackedDirectoryBytes = new Map<string, number>()
 const directoryWatchers = new Map<string, FSWatcher>()
 let trackedUsageBytes = 0
 let trackerRoots: string[] = []
-const recursiveWatchers = new Map<string, FSWatcher>()
 let trackerStartPromise: Promise<void> | undefined
 let trackerRecoveryPromise: Promise<void> | undefined
 let trackerStarted = false
@@ -46,26 +45,22 @@ export async function startLocalStorageImportCapacityTracking () {
       trackerRoots = getLocalStorageRoots()
 
       try {
-        // Start native recursive watchers before scanning. On supported
-        // Node 20+ deployments this closes the scan-to-watch race without a
-        // second full walk of a potentially multi-terabyte HLS tree. Older
-        // platforms fall back to per-directory watchers after the scan.
+        // A recursive fs.watch on Linux allocates an inotify watch for every
+        // entry in a large HLS tree. That turns tens of thousands of HLS
+        // fragments into active Node handles and starves unrelated API work.
+        // Watch directories only: parent events discover new directories, and
+        // the second snapshot closes the scan-to-watch race without polling.
         initialWatcherChangedPaths = new Set()
-        const usesRecursiveWatchers = watchStorageTrees(trackerRoots, [])
-
         let tree = await collectStorageTrees(trackerRoots)
         replaceTrackedDirectories(tree.directories)
-        watchStorageTrees(trackerRoots, tree.directories.keys())
+        watchStorageDirectories(tree.directories.keys())
 
-        // The per-directory fallback cannot watch a directory before it has
-        // been discovered by the first scan. Take one more snapshot after
-        // those watchers exist so Linux/unsupported recursive-watch platforms
-        // cannot lose mutations made during the initial walk.
-        if (!usesRecursiveWatchers) {
-          tree = await collectStorageTrees(trackerRoots)
-          replaceTrackedDirectories(tree.directories)
-          watchStorageTrees(trackerRoots, tree.directories.keys())
-        }
+        // A directory cannot be watched before the first scan discovers it.
+        // Re-snapshot after attaching directory watchers so mutations made in
+        // that first window are reflected before imports are admitted.
+        tree = await collectStorageTrees(trackerRoots)
+        replaceTrackedDirectories(tree.directories)
+        watchStorageDirectories(tree.directories.keys())
 
         const changedPaths = initialWatcherChangedPaths
         initialWatcherChangedPaths = undefined
@@ -410,62 +405,6 @@ export async function getSharedLocalStorageImportCapacity (): Promise<LocalStora
   }
 }
 
-function watchStorageTrees (roots: string[], directories: Iterable<string>) {
-  const allDirectories = [ ...directories ]
-  let usesRecursiveWatchers = true
-
-  for (const root of roots) {
-    if (recursiveWatchers.has(root)) continue
-
-    const rootDirectories = allDirectories.filter(directory => isSamePathOrDescendant(root, directory))
-
-    // A directory watcher may already be active after a recursive-watch
-    // capability failure. In that case only add newly created directories.
-    if (hasDirectoryWatcherUnder(root)) {
-      watchStorageDirectories(rootDirectories)
-      usesRecursiveWatchers = false
-      continue
-    }
-
-    try {
-      const watcher = watch(root, { recursive: true }, (_eventType, filename) => {
-        const changedPath = getChangedPath(root, filename)
-        void enqueueTrackedPathChange(changedPath)
-      })
-
-      watcher.on('error', () => {
-        if (recursiveWatchers.get(root) === watcher) recursiveWatchers.delete(root)
-        // A recursive watcher can fail at runtime on some network or mounted
-        // filesystems even when its initial creation succeeded. Re-snapshot and
-        // downgrade to the per-directory event watcher rather than stranding
-        // every held import until restart.
-        watcherWork = watcherWork
-          .then(() => {
-            if (!trackerRoots.includes(root)) return
-
-            return replaceTrackedDirectoryTree(root)
-          })
-          .catch(() => failClosedTracking())
-      })
-
-      recursiveWatchers.set(root, watcher)
-    } catch {
-      watchStorageDirectories(rootDirectories)
-      usesRecursiveWatchers = false
-    }
-  }
-
-  return usesRecursiveWatchers
-}
-
-function hasDirectoryWatcherUnder (root: string) {
-  for (const directory of directoryWatchers.keys()) {
-    if (isSamePathOrDescendant(root, directory)) return true
-  }
-
-  return false
-}
-
 function closeDirectoryWatchersAtOrBelow (path: string) {
   for (const [ watchedDirectory, watcher ] of directoryWatchers) {
     if (!isSamePathOrDescendant(path, watchedDirectory)) continue
@@ -476,9 +415,6 @@ function closeDirectoryWatchersAtOrBelow (path: string) {
 }
 
 function closeAllDirectoryWatchers () {
-  for (const watcher of recursiveWatchers.values()) watcher.close()
-  recursiveWatchers.clear()
-
   for (const watcher of directoryWatchers.values()) watcher.close()
   directoryWatchers.clear()
 }
