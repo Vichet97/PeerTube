@@ -3,6 +3,7 @@ import { createReqFiles } from '@server/helpers/express-utils.js'
 import { MIMETYPES } from '@server/initializers/constants.js'
 import { deleteLocalActorImageFile, updateLocalActorImageFiles } from '@server/lib/local-actor.js'
 import { ServerConfigManager } from '@server/lib/server-config-manager.js'
+import { clearHLSPlaylistResponseCache } from '@server/lib/object-storage/presigned-redirect.js'
 import { deleteUploadImages, logoTypeToUploadImageEnum, replaceUploadImage } from '@server/lib/upload-image.js'
 import { ActorImageModel } from '@server/models/actor/actor-image.js'
 import { getServerActor } from '@server/models/application/application.js'
@@ -190,6 +191,7 @@ async function updateCustomConfig (req: express.Request, res: express.Response) 
   await writeJSON(CONFIG.CUSTOM_FILE, toUpdateJSON, { spaces: 2 })
 
   await reloadConfig()
+  clearHLSPlaylistResponseCache()
   ClientHtml.invalidateCache()
 
   const data = customConfig()

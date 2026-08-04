@@ -5,8 +5,72 @@ import { OBJECT_STORAGE_PROXY_PATHS } from '@server/initializers/constants.js'
 import { getClient, getReadClient, buildKey, lTags } from './shared/index.js'
 import { logger } from '@server/helpers/logger.js'
 import { applyReadBucketNameReplacement, getReadBucketNameForSigning } from './read-url.js'
+import { LRUCache } from 'lru-cache'
 
 export type ObjectStoragePublicFileType = 'thumbnails' | 'storyboards' | 'web-videos' | 'streaming-playlists' | 'torrents' | 'captions'
+
+const HLS_PLAYLIST_CACHE_TTL_MS = 60 * 1000
+const HLS_PLAYLIST_CACHE_MAX_SIZE = 32 * 1024 * 1024
+
+export class HLSPlaylistResponseCache {
+  private readonly cache: LRUCache<string, string>
+  private readonly inFlight = new Map<string, Promise<string | null>>()
+
+  constructor (options: { maxSize?: number, ttl?: number } = {}) {
+    this.cache = new LRUCache<string, string>({
+      maxSize: options.maxSize ?? HLS_PLAYLIST_CACHE_MAX_SIZE,
+      sizeCalculation: value => Buffer.byteLength(value),
+      ttl: options.ttl ?? HLS_PLAYLIST_CACHE_TTL_MS
+    })
+  }
+
+  getOrCreate (key: string, build: () => Promise<string | null>) {
+    const cached = this.cache.get(key)
+    if (cached !== undefined) return Promise.resolve(cached)
+
+    const pending = this.inFlight.get(key)
+    if (pending !== undefined) return pending
+
+    const promise = build()
+      .then(value => {
+        if (value !== null) this.cache.set(key, value)
+
+        return value
+      })
+      .finally(() => this.inFlight.delete(key))
+
+    this.inFlight.set(key, promise)
+
+    return promise
+  }
+
+  clear () {
+    this.cache.clear()
+  }
+}
+
+const hlsPlaylistResponseCache = new HLSPlaylistResponseCache()
+
+export function clearHLSPlaylistResponseCache () {
+  hlsPlaylistResponseCache.clear()
+}
+
+export function getCachedHLSPlaylistResponse (options: {
+  playlistKey: string
+  getContent: () => Promise<Buffer | null>
+}) {
+  const { playlistKey, getContent } = options
+
+  return hlsPlaylistResponseCache.getOrCreate(playlistKey, async () => {
+    const content = await getContent()
+    if (content === null) return null
+
+    return transformM3U8ToProxy({
+      masterPlaylistKey: playlistKey,
+      masterPlaylistContent: content.toString('utf-8')
+    })
+  })
+}
 
 // Secret key for proxy token signing (derived from secret or fallback)
 function getProxyTokenSecret (): string {
@@ -181,52 +245,46 @@ export async function getObjectContent (options: {
 
 export async function transformM3U8ToProxy (options: {
   masterPlaylistKey: string
-  videoUUID: string
   masterPlaylistContent: string
+  signDirectFile?: (key: string, fileType: ObjectStoragePublicFileType) => Promise<string>
 }) : Promise<string | null> {
-  const { masterPlaylistKey, masterPlaylistContent } = options
+  const { masterPlaylistKey, masterPlaylistContent, signDirectFile = buildSegmentPresignedUrl } = options
 
   const lines = masterPlaylistContent.split('\n')
   const resultLines: string[] = []
 
   const baseDir = getM3U8BaseDir(masterPlaylistKey)
 
-  // Collect all file URLs that need presigned URLs
-  const fileRefs: { originalLine: string; fileKey: string; isInitSegment: boolean }[] = []
+  // A single-file fMP4 playlist can repeat the same media object hundreds of
+  // times with different byte ranges. Sign each distinct direct object once.
+  // Sub-playlists use proxy tokens below and must not consume S3 signing work.
+  const directFileKeys = new Set<string>()
   for (const line of lines) {
     const l = line.trim()
 
-    // Sub-playlists (.m3u8)
-    if (l.endsWith('.m3u8') && !l.startsWith('#')) {
+    if ((l.endsWith('.ts') || l.endsWith('.mp4') || l.endsWith('.webm')) && !l.startsWith('#')) {
       const fileKey = baseDir ? `${baseDir}/${l}` : l
-      fileRefs.push({ originalLine: line, fileKey, isInitSegment: false })
+      directFileKeys.add(fileKey)
     }
-    // Segments (.ts, .mp4, .webm)
-    else if ((l.endsWith('.ts') || l.endsWith('.mp4') || l.endsWith('.webm')) && !l.startsWith('#')) {
-      const fileKey = baseDir ? `${baseDir}/${l}` : l
-      fileRefs.push({ originalLine: line, fileKey, isInitSegment: false })
-    }
-    // EXT-X-MAP:URI="..." - init segments
     else if (l.startsWith('#EXT-X-MAP:')) {
       const uriMatch = l.match(/URI="([^"]+)"/)
       if (uriMatch) {
         const uri = uriMatch[1]
         const fileKey = baseDir ? `${baseDir}/${uri}` : uri
-        fileRefs.push({ originalLine: line, fileKey, isInitSegment: true })
+        directFileKeys.add(fileKey)
       }
     }
   }
 
-  // Generate all presigned URLs in parallel
   const signedUrls = await Promise.all(
-    fileRefs.map(r => buildSegmentPresignedUrl(r.fileKey, 'streaming-playlists'))
+    Array.from(directFileKeys, async fileKey => {
+      const signedUrl = await signDirectFile(fileKey, 'streaming-playlists')
+
+      return [ fileKey, signedUrl ] as const
+    })
   )
 
-  // Build a map for quick lookup
-  const fileUrlMap = new Map<string, string>()
-  fileRefs.forEach((r, i) => {
-    fileUrlMap.set(r.fileKey, signedUrls[i])
-  })
+  const fileUrlMap = new Map(signedUrls)
 
   for (const line of lines) {
     const l = line.trim()

@@ -4,7 +4,7 @@ import {
   generatePresignedRedirect,
   validateProxyToken,
   getObjectContent,
-  transformM3U8ToProxy,
+  getCachedHLSPlaylistResponse,
   ObjectStoragePublicFileType
 } from '@server/lib/object-storage/presigned-redirect.js'
 import { proxifyCaption, proxifyHLS, proxifyStoryboard, proxifyThumbnail, proxifyWebVideoFile } from '@server/lib/object-storage/index.js'
@@ -201,6 +201,28 @@ async function hlsProxyController (req: express.Request, res: express.Response) 
   // Use timeout from config (request_timeout in seconds, converted to ms)
   const timeoutMs = CONFIG.OBJECT_STORAGE.PROXY?.REQUEST_TIMEOUT_MS
 
+  if (playlistName.endsWith('.m3u8')) {
+    // Cache only the expensive transformed response. Token validation remains above
+    // the cache lookup, so a cached playlist never bypasses access validation.
+    const transformed = await getCachedHLSPlaylistResponse({
+      playlistKey,
+      getContent: () => getObjectContent({
+        key: playlistKey,
+        fileType: 'streaming-playlists',
+        timeoutMs
+      })
+    })
+
+    if (transformed === null) {
+      return res.status(504).json({ error: 'Failed to fetch playlist from object storage' })
+    }
+
+    const expiresInSeconds = 3600 * CONFIG.OBJECT_STORAGE.PRESIGNED_PUBLIC_URLS_EXPIRATION_HOURS
+    res.set('Cache-Control', `public, max-age=${expiresInSeconds}`)
+    return res.set('content-type', 'application/x-mpegurl; charset=utf-8').send(transformed).end()
+  }
+
+  // Keep the legacy non-playlist route behaviour unchanged.
   const content = await getObjectContent({
     key: playlistKey,
     fileType: 'streaming-playlists',
@@ -211,25 +233,7 @@ async function hlsProxyController (req: express.Request, res: express.Response) 
     return res.status(504).json({ error: 'Failed to fetch playlist from object storage' })
   }
 
-  // Determine if this is a master or media playlist
-  const contentStr = content.toString('utf-8')
-  const isMediaPlaylist = contentStr.includes('#EXTINF')
-
-  if (playlistName.endsWith('.m3u8') || isMediaPlaylist) {
-    // Master or media playlist: transform to use reverse proxy with relative paths
-    // Each sub-playlist will get its own token
-    const transformed = await transformM3U8ToProxy({
-      masterPlaylistKey: playlistKey,
-      videoUUID,
-      masterPlaylistContent: contentStr
-    })
-
-    const expiresInSeconds = 3600 * CONFIG.OBJECT_STORAGE.PRESIGNED_PUBLIC_URLS_EXPIRATION_HOURS
-    res.set('Cache-Control', `public, max-age=${expiresInSeconds}`)
-    return res.set('content-type', 'application/x-mpegurl; charset=utf-8').send(transformed).end()
-  }
-
-  // Segment playlist: return as-is (segments will use signed URLs)
+  // Return non-playlist content as-is.
   const expiresInSeconds = 3600 * CONFIG.OBJECT_STORAGE.PRESIGNED_PUBLIC_URLS_EXPIRATION_HOURS
   res.set('Cache-Control', `public, max-age=${expiresInSeconds}`)
   return res.set('content-type', 'application/x-mpegurl; charset=utf-8').send(content).end()
