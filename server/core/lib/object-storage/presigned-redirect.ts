@@ -2,7 +2,7 @@ import type express from 'express'
 import { createHmac, timingSafeEqual } from 'node:crypto'
 import { CONFIG } from '@server/initializers/config.js'
 import { OBJECT_STORAGE_PROXY_PATHS } from '@server/initializers/constants.js'
-import { getClient, getReadClient, buildKey, lTags } from './shared/index.js'
+import { getReadClient, buildKey, lTags } from './shared/index.js'
 import { logger } from '@server/helpers/logger.js'
 import { applyReadBucketNameReplacement, getReadBucketNameForSigning } from './read-url.js'
 import { LRUCache } from 'lru-cache'
@@ -208,7 +208,7 @@ export async function getObjectContent (options: {
 
   try {
     const { GetObjectCommand } = await import('@aws-sdk/client-s3')
-    const client = await getClient()
+    const client = await getReadClient()
 
     // Create AbortController for timeout
     const abortController = new AbortController()

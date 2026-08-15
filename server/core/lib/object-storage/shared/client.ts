@@ -36,7 +36,6 @@ export function getReadClient () {
   const endpoint = getReadEndpoint()
   const forcePathStyle = getReadForcePathStyle()
 
-  if (endpoint === getEndpoint() && forcePathStyle === CONFIG.OBJECT_STORAGE.FORCE_PATH_STYLE) return getClient()
   if (readS3ClientPromise !== undefined && readS3ClientEndpoint === `${endpoint}|${forcePathStyle}`) return readS3ClientPromise
 
   readS3ClientEndpoint = `${endpoint}|${forcePathStyle}`

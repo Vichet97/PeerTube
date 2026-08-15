@@ -2,7 +2,9 @@
 import { expect } from 'chai'
 import {
   buildObjectStorageNodeHttpHandlerOptions,
+  getClient,
   getEndpoint,
+  getReadClient,
   getReadEndpoint
 } from '@peertube/peertube-server/core/lib/object-storage/shared/client.js'
 import { CONFIG } from '@peertube/peertube-server/core/initializers/config.js'
@@ -27,6 +29,29 @@ describe('object-storage S3 client handler options', function () {
     } finally {
       if (originalHttpProxy !== undefined) process.env.HTTP_PROXY = originalHttpProxy
       if (originalHttpsProxy !== undefined) process.env.HTTPS_PROXY = originalHttpsProxy
+    }
+  })
+
+  it('should keep read and write S3 clients isolated when endpoints are identical', async function () {
+    const originalEndpoint = CONFIG.OBJECT_STORAGE.ENDPOINT
+    const originalReadEndpoint = CONFIG.OBJECT_STORAGE.READ_ENDPOINT
+    const originalForcePathStyle = CONFIG.OBJECT_STORAGE.FORCE_PATH_STYLE
+    const originalReadForcePathStyle = CONFIG.OBJECT_STORAGE.READ_FORCE_PATH_STYLE
+
+    try {
+      CONFIG.OBJECT_STORAGE.ENDPOINT = 'https://same-object-storage.example'
+      CONFIG.OBJECT_STORAGE.READ_ENDPOINT = 'https://same-object-storage.example'
+      CONFIG.OBJECT_STORAGE.FORCE_PATH_STYLE = true
+      CONFIG.OBJECT_STORAGE.READ_FORCE_PATH_STYLE = true
+
+      const [ writeClient, readClient ] = await Promise.all([ getClient(), getReadClient() ])
+
+      expect(readClient).not.to.equal(writeClient)
+    } finally {
+      CONFIG.OBJECT_STORAGE.ENDPOINT = originalEndpoint
+      CONFIG.OBJECT_STORAGE.READ_ENDPOINT = originalReadEndpoint
+      CONFIG.OBJECT_STORAGE.FORCE_PATH_STYLE = originalForcePathStyle
+      CONFIG.OBJECT_STORAGE.READ_FORCE_PATH_STYLE = originalReadForcePathStyle
     }
   })
 
