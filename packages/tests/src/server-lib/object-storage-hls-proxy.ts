@@ -62,4 +62,34 @@ describe('object-storage HLS proxy', function () {
     await cache.getOrCreate('hls/video-uuid/720.m3u8', build)
     expect(builds).to.equal(2)
   })
+
+  it('should bound concurrent builds for distinct cold playlists', async function () {
+    const cache = new HLSPlaylistResponseCache({ maxSize: 1024, ttl: 60_000, concurrency: 2 })
+    let activeBuilds = 0
+    let peakBuilds = 0
+    let releaseBuilds = () => undefined
+    const gate = new Promise<void>(resolve => { releaseBuilds = resolve })
+
+    const build = async () => {
+      activeBuilds++
+      peakBuilds = Math.max(peakBuilds, activeBuilds)
+      await gate
+      activeBuilds--
+
+      return '#EXTM3U'
+    }
+
+    const pending = [
+      cache.getOrCreate('hls/video-a/master.m3u8', build),
+      cache.getOrCreate('hls/video-b/master.m3u8', build),
+      cache.getOrCreate('hls/video-c/master.m3u8', build)
+    ]
+
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(peakBuilds).to.equal(2)
+
+    releaseBuilds()
+    await Promise.all(pending)
+    expect(peakBuilds).to.equal(2)
+  })
 })

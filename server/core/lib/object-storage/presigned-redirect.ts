@@ -6,22 +6,29 @@ import { getReadClient, buildKey, lTags } from './shared/index.js'
 import { logger } from '@server/helpers/logger.js'
 import { applyReadBucketNameReplacement, getReadBucketNameForSigning } from './read-url.js'
 import { LRUCache } from 'lru-cache'
+import PQueue from 'p-queue'
 
 export type ObjectStoragePublicFileType = 'thumbnails' | 'storyboards' | 'web-videos' | 'streaming-playlists' | 'torrents' | 'captions'
 
 const HLS_PLAYLIST_CACHE_TTL_MS = 60 * 1000
 const HLS_PLAYLIST_CACHE_MAX_SIZE = 32 * 1024 * 1024
+// The read pool can carry more sockets, but concurrent cold transformations
+// compete with the active Node process on this host. Keep this small so a
+// burst of distinct playlists queues instead of amplifying tail latency.
+const HLS_PLAYLIST_BUILD_CONCURRENCY = 2
 
 export class HLSPlaylistResponseCache {
   private readonly cache: LRUCache<string, string>
   private readonly inFlight = new Map<string, Promise<string | null>>()
+  private readonly buildQueue: PQueue
 
-  constructor (options: { maxSize?: number, ttl?: number } = {}) {
+  constructor (options: { maxSize?: number, ttl?: number, concurrency?: number } = {}) {
     this.cache = new LRUCache<string, string>({
       maxSize: options.maxSize ?? HLS_PLAYLIST_CACHE_MAX_SIZE,
       sizeCalculation: value => Buffer.byteLength(value),
       ttl: options.ttl ?? HLS_PLAYLIST_CACHE_TTL_MS
     })
+    this.buildQueue = new PQueue({ concurrency: options.concurrency ?? HLS_PLAYLIST_BUILD_CONCURRENCY })
   }
 
   getOrCreate (key: string, build: () => Promise<string | null>) {
@@ -31,7 +38,7 @@ export class HLSPlaylistResponseCache {
     const pending = this.inFlight.get(key)
     if (pending !== undefined) return pending
 
-    const promise = build()
+    const promise = this.buildQueue.add(build)
       .then(value => {
         if (value !== null) this.cache.set(key, value)
 
