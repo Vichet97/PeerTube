@@ -17,6 +17,15 @@ const HLS_PLAYLIST_CACHE_MAX_SIZE = 32 * 1024 * 1024
 // burst of distinct playlists queues instead of amplifying tail latency.
 const HLS_PLAYLIST_BUILD_CONCURRENCY = 2
 
+export type HLSPlaylistCacheState = 'hit' | 'coalesced' | 'build'
+
+export interface HLSPlaylistResponseTiming {
+  cacheState?: HLSPlaylistCacheState
+  queueWaitMs?: number
+  objectStorageFetchMs?: number
+  transformMs?: number
+}
+
 export class HLSPlaylistResponseCache {
   private readonly cache: LRUCache<string, string>
   private readonly inFlight = new Map<string, Promise<string | null>>()
@@ -31,14 +40,27 @@ export class HLSPlaylistResponseCache {
     this.buildQueue = new PQueue({ concurrency: options.concurrency ?? HLS_PLAYLIST_BUILD_CONCURRENCY })
   }
 
-  getOrCreate (key: string, build: () => Promise<string | null>) {
+  getOrCreate (key: string, build: () => Promise<string | null>, onTiming?: (timing: HLSPlaylistResponseTiming) => void) {
     const cached = this.cache.get(key)
-    if (cached !== undefined) return Promise.resolve(cached)
+    if (cached !== undefined) {
+      onTiming?.({ cacheState: 'hit' })
+
+      return Promise.resolve(cached)
+    }
 
     const pending = this.inFlight.get(key)
-    if (pending !== undefined) return pending
+    if (pending !== undefined) {
+      onTiming?.({ cacheState: 'coalesced' })
 
-    const promise = this.buildQueue.add(build)
+      return pending
+    }
+
+    const queuedAt = performance.now()
+    const promise = this.buildQueue.add(async () => {
+      onTiming?.({ cacheState: 'build', queueWaitMs: performance.now() - queuedAt })
+
+      return build()
+    })
       .then(value => {
         if (value !== null) this.cache.set(key, value)
 
@@ -65,18 +87,26 @@ export function clearHLSPlaylistResponseCache () {
 export function getCachedHLSPlaylistResponse (options: {
   playlistKey: string
   getContent: () => Promise<Buffer | null>
+  onTiming?: (timing: HLSPlaylistResponseTiming) => void
 }) {
-  const { playlistKey, getContent } = options
+  const { playlistKey, getContent, onTiming } = options
 
   return hlsPlaylistResponseCache.getOrCreate(playlistKey, async () => {
+    const fetchStartedAt = performance.now()
     const content = await getContent()
+    onTiming?.({ objectStorageFetchMs: performance.now() - fetchStartedAt })
+
     if (content === null) return null
 
-    return transformM3U8ToProxy({
+    const transformStartedAt = performance.now()
+    const transformed = await transformM3U8ToProxy({
       masterPlaylistKey: playlistKey,
       masterPlaylistContent: content.toString('utf-8')
     })
-  })
+    onTiming?.({ transformMs: performance.now() - transformStartedAt })
+
+    return transformed
+  }, onTiming)
 }
 
 // Secret key for proxy token signing (derived from secret or fallback)

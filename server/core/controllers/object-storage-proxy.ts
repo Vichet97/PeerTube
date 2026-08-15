@@ -5,6 +5,7 @@ import {
   validateProxyToken,
   getObjectContent,
   getCachedHLSPlaylistResponse,
+  HLSPlaylistResponseTiming,
   ObjectStoragePublicFileType
 } from '@server/lib/object-storage/presigned-redirect.js'
 import { proxifyCaption, proxifyHLS, proxifyStoryboard, proxifyThumbnail, proxifyWebVideoFile } from '@server/lib/object-storage/index.js'
@@ -163,6 +164,23 @@ function presignedRedirectController (fileType: ObjectStoragePublicFileType) {
 // HLS Proxy with presigned segment URLs and expiration validation
 
 async function hlsProxyController (req: express.Request, res: express.Response) {
+  const requestStartedAt = performance.now()
+  const shouldReportTiming = req.get('x-peertube-debug-timing') === '1'
+  const timing: HLSPlaylistResponseTiming = {}
+  const setDebugTimingHeader = () => {
+    if (!shouldReportTiming) return
+
+    const entries = [
+      `cache;desc="${timing.cacheState ?? 'none'}"`,
+      timing.queueWaitMs !== undefined && `queue;dur=${formatServerTimingDuration(timing.queueWaitMs)}`,
+      timing.objectStorageFetchMs !== undefined && `s3;dur=${formatServerTimingDuration(timing.objectStorageFetchMs)}`,
+      timing.transformMs !== undefined && `transform;dur=${formatServerTimingDuration(timing.transformMs)}`,
+      `total;dur=${formatServerTimingDuration(performance.now() - requestStartedAt)}`
+    ].filter((entry): entry is string => typeof entry === 'string')
+
+    res.set('Server-Timing', entries.join(', '))
+  }
+
   const { playlistPath } = req.params
   const expiresParam = req.query.expires as string
 
@@ -210,14 +228,19 @@ async function hlsProxyController (req: express.Request, res: express.Response) 
         key: playlistKey,
         fileType: 'streaming-playlists',
         timeoutMs
-      })
+      }),
+      onTiming: entry => Object.assign(timing, entry)
     })
 
     if (transformed === null) {
+      setDebugTimingHeader()
+
       return res.status(504).json({ error: 'Failed to fetch playlist from object storage' })
     }
 
     const expiresInSeconds = 3600 * CONFIG.OBJECT_STORAGE.PRESIGNED_PUBLIC_URLS_EXPIRATION_HOURS
+    setDebugTimingHeader()
+
     res.set('Cache-Control', `public, max-age=${expiresInSeconds}`)
     return res.set('content-type', 'application/x-mpegurl; charset=utf-8').send(transformed).end()
   }
@@ -237,6 +260,10 @@ async function hlsProxyController (req: express.Request, res: express.Response) 
   const expiresInSeconds = 3600 * CONFIG.OBJECT_STORAGE.PRESIGNED_PUBLIC_URLS_EXPIRATION_HOURS
   res.set('Cache-Control', `public, max-age=${expiresInSeconds}`)
   return res.set('content-type', 'application/x-mpegurl; charset=utf-8').send(content).end()
+}
+
+function formatServerTimingDuration (durationMs: number) {
+  return durationMs.toFixed(1)
 }
 
 async function segmentPresignedRedirectController (req: express.Request, res: express.Response) {

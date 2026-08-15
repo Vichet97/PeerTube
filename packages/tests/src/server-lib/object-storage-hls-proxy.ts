@@ -1,7 +1,10 @@
 /* eslint-disable @typescript-eslint/no-unused-expressions */
 import { expect } from 'chai'
 import {
+  clearHLSPlaylistResponseCache,
+  getCachedHLSPlaylistResponse,
   HLSPlaylistResponseCache,
+  HLSPlaylistResponseTiming,
   transformM3U8ToProxy
 } from '@server/lib/object-storage/presigned-redirect.js'
 
@@ -61,6 +64,31 @@ describe('object-storage HLS proxy', function () {
     cache.clear()
     await cache.getOrCreate('hls/video-uuid/720.m3u8', build)
     expect(builds).to.equal(2)
+  })
+
+  it('should report cache, fetch, and transform timings for HLS playlist responses', async function () {
+    clearHLSPlaylistResponseCache()
+
+    const firstTimings: HLSPlaylistResponseTiming[] = []
+    const first = await getCachedHLSPlaylistResponse({
+      playlistKey: 'hls/timing-video/master.m3u8',
+      getContent: () => Promise.resolve(Buffer.from('#EXTM3U')),
+      onTiming: timing => firstTimings.push(timing)
+    })
+
+    const cachedTimings: HLSPlaylistResponseTiming[] = []
+    const cached = await getCachedHLSPlaylistResponse({
+      playlistKey: 'hls/timing-video/master.m3u8',
+      getContent: () => Promise.resolve(Buffer.from('#EXTM3U')),
+      onTiming: timing => cachedTimings.push(timing)
+    })
+
+    expect(first).to.equal('#EXTM3U')
+    expect(cached).to.equal('#EXTM3U')
+    expect(firstTimings.some(timing => timing.cacheState === 'build')).to.be.true
+    expect(firstTimings.some(timing => timing.objectStorageFetchMs !== undefined)).to.be.true
+    expect(firstTimings.some(timing => timing.transformMs !== undefined)).to.be.true
+    expect(cachedTimings).to.deep.equal([ { cacheState: 'hit' } ])
   })
 
   it('should bound concurrent builds for distinct cold playlists', async function () {
