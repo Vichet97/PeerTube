@@ -18,6 +18,7 @@ import { VideoJobInfoModel } from '@server/models/video/video-job-info.js'
 import { VideoPathManager } from '@server/lib/video-path-manager.js'
 import { VideoModel } from '@server/models/video/video.js'
 import { checkObjectStorageReadiness, generateHLSObjectStorageKey } from '@server/lib/object-storage/index.js'
+import { withObjectStorageClientPool } from '@server/lib/object-storage/shared/client-pool.js'
 import { getHLSResolutionPlaylistFilename } from '@server/lib/paths.js'
 import { pathExists } from 'fs-extra/esm'
 import { Job } from 'bullmq'
@@ -353,13 +354,13 @@ export async function processMoveToObjectStorage (job: Job) {
     const startTime = Date.now()
 
     try {
-      await moveVideoToObjectStorage({
+      await withObjectStorageClientPool('move', () => moveVideoToObjectStorage({
         videoUUID: payload.videoUUID,
         moveVideoState,
         hlsCutover: payload.hlsCutover,
         loggerTags: lTagsBase().tags,
         onProgress: (percent: number) => updateProgress(percent)
-      })
+      }))
 
       const duration = Date.now() - startTime
       // [LOGGER] Move operation completed
@@ -394,12 +395,12 @@ export async function processMoveToObjectStorage (job: Job) {
 
     updateProgress(50)
 
-    await moveCaptionToObjectStorage({
+    await withObjectStorageClientPool('move', () => moveCaptionToObjectStorage({
       captionId: payload.captionId,
       videoUUID: targetVideoUUID,
       includeAllVideoCaptions: true,
       loggerTags: lTagsBase().tags
-    })
+    }))
 
     updateProgress(100)
     logger.info(

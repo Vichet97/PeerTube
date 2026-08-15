@@ -28,6 +28,7 @@ import {
   moveVideoFileToObjectStorage
 } from '@server/lib/move-storage/move-to-object-storage.js'
 import { checkObjectStorageReadiness, generateHLSObjectStorageKey } from '@server/lib/object-storage/index.js'
+import { withObjectStorageClientPool } from '@server/lib/object-storage/shared/client-pool.js'
 import { MStreamingPlaylistFiles, MVideoWithAllFiles } from '@server/types/models/index.js'
 import { makeHLSFileAvailable } from '@server/lib/object-storage/videos.js'
 import { createAllCaptionPlaylistsOnFSIfNeeded } from '@server/lib/video-captions.js'
@@ -198,7 +199,7 @@ async function processMoveVideoFile (
 
   try {
     updateProgress(60)
-    await moveVideoFileToObjectStorage(videoUUID, fileId)
+    await withObjectStorageClientPool('move', () => moveVideoFileToObjectStorage(videoUUID, fileId))
 
     updateProgress(95)
     await checkAndTransitionVideoState(videoUUID, isNewVideo, previousVideoState, false, isRetryOfFailedJob(payload))
@@ -410,7 +411,10 @@ async function processMoveHLSPlaylist (
 
     const filesCountBeforeMove = await getHLSSegmentFilesToMoveCount(videoUUID, playlistId, effectiveFileIds)
 
-    await moveHLSSegmentFilesToObjectStorage(videoUUID, playlistId, effectiveFileIds, { deleteLocalFiles: false })
+    await withObjectStorageClientPool(
+      'move',
+      () => moveHLSSegmentFilesToObjectStorage(videoUUID, playlistId, effectiveFileIds, { deleteLocalFiles: false })
+    )
     // Note: moveHLSSegmentFilesToObjectStorage sets videoFile.storage = OBJECT_STORAGE
 
     if (filesCountBeforeMove > 0) {
@@ -457,7 +461,7 @@ async function processMoveHLSPlaylist (
     // Master playlist now has correct OS segment URLs
     updateProgress(80)
 
-    await moveMasterPlaylistToObjectStorage(videoUUID, playlistId)
+    await withObjectStorageClientPool('move', () => moveMasterPlaylistToObjectStorage(videoUUID, playlistId))
     logger.info('[GRANULAR_MOVE] Master playlist uploaded with OS URLs', playlistId)
 
     updateProgress(90)
@@ -581,7 +585,7 @@ async function processMoveThumbnail (
       updateProgress(60)
     }
 
-    await moveThumbnailToObjectStorage(videoUUID, thumbnailId)
+    await withObjectStorageClientPool('move', () => moveThumbnailToObjectStorage(videoUUID, thumbnailId))
 
     updateProgress(95)
     await checkAndTransitionVideoState(videoUUID, isNewVideo, previousVideoState, false, isRetryOfFailedJob(payload))

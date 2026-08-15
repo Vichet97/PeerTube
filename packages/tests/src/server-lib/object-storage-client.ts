@@ -4,9 +4,15 @@ import {
   buildObjectStorageNodeHttpHandlerOptions,
   getClient,
   getEndpoint,
+  getObjectStorageMaxSockets,
   getReadClient,
   getReadEndpoint
 } from '@peertube/peertube-server/core/lib/object-storage/shared/client.js'
+import { withObjectStorageClientPool } from '@peertube/peertube-server/core/lib/object-storage/shared/client-pool.js'
+import {
+  addObjectStorageMoveTasks,
+  getObjectStorageMoveQueueConcurrency
+} from '@peertube/peertube-server/core/lib/object-storage/shared/move-queue.js'
 import { CONFIG } from '@peertube/peertube-server/core/initializers/config.js'
 import { buildObjectStoragePublicFileUrl, buildObjectStorageRawUrl } from '@peertube/peertube-server/core/lib/object-storage/urls.js'
 
@@ -44,14 +50,42 @@ describe('object-storage S3 client handler options', function () {
       CONFIG.OBJECT_STORAGE.FORCE_PATH_STYLE = true
       CONFIG.OBJECT_STORAGE.READ_FORCE_PATH_STYLE = true
 
-      const [ writeClient, readClient ] = await Promise.all([ getClient(), getReadClient() ])
+      const [ writeClient, moveClient, readClient ] = await Promise.all([
+        getClient(),
+        withObjectStorageClientPool('move', () => getClient()),
+        getReadClient()
+      ])
 
       expect(readClient).not.to.equal(writeClient)
+      expect(moveClient).not.to.equal(writeClient)
+      expect(moveClient).not.to.equal(readClient)
+
+      const [ queuedMoveClient ] = await addObjectStorageMoveTasks([ () => getClient() ])
+      expect(queuedMoveClient).to.equal(moveClient)
     } finally {
       CONFIG.OBJECT_STORAGE.ENDPOINT = originalEndpoint
       CONFIG.OBJECT_STORAGE.READ_ENDPOINT = originalReadEndpoint
       CONFIG.OBJECT_STORAGE.FORCE_PATH_STYLE = originalForcePathStyle
       CONFIG.OBJECT_STORAGE.READ_FORCE_PATH_STYLE = originalReadForcePathStyle
+    }
+  })
+
+  it('should bound the shared move queue by its socket pool and multipart part queue', function () {
+    const originalConcurrency = CONFIG.OBJECT_STORAGE.CONCURRENCY
+    const originalUploadConcurrency = CONFIG.OBJECT_STORAGE.UPLOAD_CONCURRENCY
+    const originalUploadPartQueueSize = CONFIG.OBJECT_STORAGE.UPLOAD_PART_QUEUE_SIZE
+
+    try {
+      CONFIG.OBJECT_STORAGE.CONCURRENCY = 10
+      CONFIG.OBJECT_STORAGE.UPLOAD_CONCURRENCY = 10
+      CONFIG.OBJECT_STORAGE.UPLOAD_PART_QUEUE_SIZE = 3
+
+      expect(getObjectStorageMaxSockets('move')).to.equal(15)
+      expect(getObjectStorageMoveQueueConcurrency()).to.equal(5)
+    } finally {
+      CONFIG.OBJECT_STORAGE.CONCURRENCY = originalConcurrency
+      CONFIG.OBJECT_STORAGE.UPLOAD_CONCURRENCY = originalUploadConcurrency
+      CONFIG.OBJECT_STORAGE.UPLOAD_PART_QUEUE_SIZE = originalUploadPartQueueSize
     }
   })
 

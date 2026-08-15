@@ -39,6 +39,7 @@ import { JobQueue } from '@server/lib/job-queue/index.js'
 import { CLEANUP_LOCK_HEARTBEAT_MS, LocalFileCleanupLock, LocalFileLeaseManager } from '@server/lib/local-file-lease-manager.js'
 import { notifyLocalStorageImportPathRemoved } from '@server/lib/local-storage-import-admission.js'
 import { buildMoveVideoJob } from '@server/lib/video-jobs.js'
+import { addObjectStorageMoveTasks } from '@server/lib/object-storage/shared/move-queue.js'
 import {
   MStreamingPlaylistFiles,
   MStreamingPlaylistVideo,
@@ -628,10 +629,9 @@ async function moveVideoSourceFile (source: MVideoSource, video: MVideoWithAllFi
 // ---------------------------------------------------------------------------
 
 async function moveCaptionFiles (captions: MVideoCaption[], hls: MStreamingPlaylistVideo, video?: MVideoWithAllFiles) {
-  const queue = new PQueue({ concurrency: CONFIG.OBJECT_STORAGE.UPLOAD_CONCURRENCY })
   const pipelineVideoUUID = video?.uuid ?? hls?.Video?.uuid
 
-  const results = await queue.addAll(captions.map(caption => async () => {
+  const results = await addObjectStorageMoveTasks(captions.map(caption => async () => {
     let captionUpdated = false
 
     if (caption.storage === FileStorage.FILE_SYSTEM) {
@@ -742,8 +742,6 @@ async function moveCaptionFiles (captions: MVideoCaption[], hls: MStreamingPlayl
 // ---------------------------------------------------------------------------
 
 async function moveWebVideoFiles (video: MVideoWithAllFiles) {
-  const queue = new PQueue({ concurrency: CONFIG.OBJECT_STORAGE.UPLOAD_CONCURRENCY })
-
   const filesToMove = video.VideoFiles.filter(f => f.storage === FileStorage.FILE_SYSTEM)
 
   if (filesToMove.length > 0) {
@@ -762,7 +760,7 @@ async function moveWebVideoFiles (video: MVideoWithAllFiles) {
     })
   }
 
-  await queue.addAll(video.VideoFiles.map(file => async () => {
+  await addObjectStorageMoveTasks(video.VideoFiles.map(file => async () => {
     if (file.storage !== FileStorage.FILE_SYSTEM) return
 
     const sourcePath = VideoPathManager.Instance.getFSVideoFileOutputPath(video, file)
@@ -802,7 +800,6 @@ async function moveWebVideoFiles (video: MVideoWithAllFiles) {
 async function moveHLSFiles (video: MVideoWithAllFiles, options?: {
   onInitialCutoverReady?: (options: { playlistId: number, fileIds: number[] }) => Promise<void>
 }): Promise<boolean> {
-  const queue = new PQueue({ concurrency: CONFIG.OBJECT_STORAGE.UPLOAD_CONCURRENCY })
   let initialCutoverDeferred = false
 
   for (const playlist of video.VideoStreamingPlaylists) {
@@ -826,7 +823,7 @@ async function moveHLSFiles (video: MVideoWithAllFiles, options?: {
       })
     }
 
-    const results = await queue.addAll(playlist.VideoFiles.map(file => async () => {
+    const results = await addObjectStorageMoveTasks(playlist.VideoFiles.map(file => async () => {
       if (file.storage !== FileStorage.FILE_SYSTEM) return undefined
 
       // Resolution playlist
@@ -1174,8 +1171,6 @@ async function onVideoFileMoved (options: {
 // ---------------------------------------------------------------------------
 
 async function moveThumbnailFiles (thumbnails: MThumbnail[], video: MVideoWithAllFiles) {
-  const queue = new PQueue({ concurrency: CONFIG.OBJECT_STORAGE.UPLOAD_CONCURRENCY })
-
   const filesToMove = thumbnails.filter(t => t.storage === FileStorage.FILE_SYSTEM)
   if (filesToMove.length > 0) {
     logger.info('[MOVE_STORAGE] Starting thumbnails move to object storage', {
@@ -1192,7 +1187,7 @@ async function moveThumbnailFiles (thumbnails: MThumbnail[], video: MVideoWithAl
     })
   }
 
-  await queue.addAll(thumbnails.map(thumbnail => async () => {
+  await addObjectStorageMoveTasks(thumbnails.map(thumbnail => async () => {
     if (thumbnail.storage !== FileStorage.FILE_SYSTEM) return
 
     const thumbnailPath = thumbnail.getFSPath()
@@ -1235,8 +1230,6 @@ async function moveThumbnailFiles (thumbnails: MThumbnail[], video: MVideoWithAl
 // ---------------------------------------------------------------------------
 
 async function moveStoryboardFiles (storyboards: MStoryboard[], video: MVideoWithAllFiles) {
-  const queue = new PQueue({ concurrency: CONFIG.OBJECT_STORAGE.UPLOAD_CONCURRENCY })
-
   const filesToMove = storyboards.filter(s => s.storage === FileStorage.FILE_SYSTEM)
   if (filesToMove.length > 0) {
     logger.info('[MOVE_STORAGE] Starting storyboards move to object storage', {
@@ -1251,7 +1244,7 @@ async function moveStoryboardFiles (storyboards: MStoryboard[], video: MVideoWit
     })
   }
 
-  await queue.addAll(storyboards.map(storyboard => async () => {
+  await addObjectStorageMoveTasks(storyboards.map(storyboard => async () => {
     if (storyboard.storage !== FileStorage.FILE_SYSTEM) return
 
     const storyboardPath = storyboard.getFSPath()
@@ -1295,8 +1288,6 @@ async function moveTorrentFiles (video: MVideoWithAllFiles) {
     ...(video.VideoStreamingPlaylists || []).flatMap(p => p.VideoFiles)
   ]
 
-  const queue = new PQueue({ concurrency: CONFIG.OBJECT_STORAGE.UPLOAD_CONCURRENCY })
-
   const filesToMove = allFiles.filter(f => f.torrentFilename)
   if (filesToMove.length > 0) {
     logger.info('[MOVE_STORAGE] Starting torrent files move to object storage', {
@@ -1312,7 +1303,7 @@ async function moveTorrentFiles (video: MVideoWithAllFiles) {
     })
   }
 
-  await queue.addAll(allFiles.map(file => async () => {
+  await addObjectStorageMoveTasks(allFiles.map(file => async () => {
     if (!file.torrentFilename) return
 
     const torrentPath = join(CONFIG.STORAGE.TORRENTS_DIR, file.torrentFilename)

@@ -5,12 +5,12 @@ import { getProxy, isProxyEnabled } from '@server/helpers/proxy.js'
 import { CONFIG } from '@server/initializers/config.js'
 import http from 'http'
 import https from 'https'
+import { getObjectStorageClientPool, ObjectStorageClientPool } from './client-pool.js'
 import { lTags } from './logger.js'
 import { getReadForcePathStyle } from '../read-url.js'
 
-let writeS3ClientPromise: Promise<S3Client>
-let writeS3ClientResolved: S3Client
-let writeS3ClientEndpoint: string
+const writeS3ClientPromises = new Map<string, Promise<S3Client>>()
+const writeS3ClientsResolved = new Map<string, S3Client>()
 
 let readS3ClientPromise: Promise<S3Client>
 let readS3ClientEndpoint: string
@@ -20,16 +20,19 @@ const DEFAULT_OBJECT_STORAGE_SOCKET_TIMEOUT_MS = 120_000
 
 export function getClient () {
   const endpoint = getEndpoint()
-  if (writeS3ClientPromise !== undefined && writeS3ClientEndpoint === endpoint) return writeS3ClientPromise
+  const pool = getObjectStorageClientPool()
+  const cacheKey = `${pool}|${endpoint}`
+  const cachedClient = writeS3ClientPromises.get(cacheKey)
+  if (cachedClient !== undefined) return cachedClient
 
-  writeS3ClientEndpoint = endpoint
-  writeS3ClientPromise = buildClient(endpoint)
+  const clientPromise = buildClient(endpoint, CONFIG.OBJECT_STORAGE.FORCE_PATH_STYLE, pool)
     .then(client => {
-      writeS3ClientResolved = client
+      writeS3ClientsResolved.set(cacheKey, client)
       return client
     })
 
-  return writeS3ClientPromise
+  writeS3ClientPromises.set(cacheKey, clientPromise)
+  return clientPromise
 }
 
 export function getReadClient () {
@@ -39,15 +42,15 @@ export function getReadClient () {
   if (readS3ClientPromise !== undefined && readS3ClientEndpoint === `${endpoint}|${forcePathStyle}`) return readS3ClientPromise
 
   readS3ClientEndpoint = `${endpoint}|${forcePathStyle}`
-  readS3ClientPromise = buildClient(endpoint, forcePathStyle)
+  readS3ClientPromise = buildClient(endpoint, forcePathStyle, 'read')
     .then(client => client)
 
   return readS3ClientPromise
 }
 
-// Synchronous access to cached client (only available after first getClient() call completes)
+// Synchronous access to the default write client (only available after first getClient() call completes)
 export function getClientSync (): S3Client | undefined {
-  return writeS3ClientResolved
+  return writeS3ClientsResolved.get(`write|${getEndpoint()}`)
 }
 
 export function getEndpoint () {
@@ -65,12 +68,12 @@ function normalizeEndpoint (endpointConfig: string) {
     : 'https://' + endpointConfig
 }
 
-async function buildClient (endpoint: string, forcePathStyle = CONFIG.OBJECT_STORAGE.FORCE_PATH_STYLE) {
+async function buildClient (endpoint: string, forcePathStyle = CONFIG.OBJECT_STORAGE.FORCE_PATH_STYLE, pool: ObjectStorageClientPool) {
   const OBJECT_STORAGE = CONFIG.OBJECT_STORAGE
 
   const { S3Client } = await import('@aws-sdk/client-s3')
 
-  const requestHandler = await getProxyRequestHandler()
+  const requestHandler = await getProxyRequestHandler(pool)
 
   const client = new S3Client({
     endpoint,
@@ -90,7 +93,7 @@ async function buildClient (endpoint: string, forcePathStyle = CONFIG.OBJECT_STO
     responseChecksumValidation: 'WHEN_REQUIRED'
   })
 
-  logger.info('Initialized S3 client %s with region %s.', endpoint, OBJECT_STORAGE.REGION, lTags())
+  logger.info('Initialized %s S3 client %s with region %s.', pool, endpoint, OBJECT_STORAGE.REGION, lTags())
 
   return client
 }
@@ -99,9 +102,9 @@ async function buildClient (endpoint: string, forcePathStyle = CONFIG.OBJECT_STO
 // Private
 // ---------------------------------------------------------------------------
 
-async function getProxyRequestHandler () {
+async function getProxyRequestHandler (pool: ObjectStorageClientPool) {
   const { NodeHttpHandler } = await import('@smithy/node-http-handler')
-  return new NodeHttpHandler(buildObjectStorageNodeHttpHandlerOptions())
+  return new NodeHttpHandler(buildObjectStorageNodeHttpHandlerOptions(pool))
 }
 
 export function getObjectStorageSocketTimeoutMs () {
@@ -112,11 +115,19 @@ export function getObjectStorageConnectionTimeoutMs (socketTimeoutMs = getObject
   return Math.min(socketTimeoutMs, DEFAULT_OBJECT_STORAGE_CONNECTION_TIMEOUT_MS)
 }
 
-export function buildObjectStorageNodeHttpHandlerOptions () {
+export function getObjectStorageMaxSockets (pool: ObjectStorageClientPool = 'write') {
   const maxSockets = Math.max(
     16,
     Math.min(64, Math.max(1, CONFIG.OBJECT_STORAGE.CONCURRENCY) * 3)
   )
+
+  if (pool === 'move') return Math.max(8, Math.floor(maxSockets / 2))
+
+  return maxSockets
+}
+
+export function buildObjectStorageNodeHttpHandlerOptions (pool: ObjectStorageClientPool = 'write') {
+  const maxSockets = getObjectStorageMaxSockets(pool)
   const maxFreeSockets = Math.min(16, maxSockets)
   const socketTimeout = getObjectStorageSocketTimeoutMs()
   const connectionTimeout = getObjectStorageConnectionTimeoutMs(socketTimeout)
