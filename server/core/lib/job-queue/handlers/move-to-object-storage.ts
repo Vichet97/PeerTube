@@ -23,6 +23,7 @@ import { getHLSResolutionPlaylistFilename } from '@server/lib/paths.js'
 import { pathExists } from 'fs-extra/esm'
 import { Job } from 'bullmq'
 import { join } from 'path'
+import { isMinimalMoveToObjectStoragePayload } from '../move-job-payload.js'
 
 const lTagsBase = loggerTagsFactory('move-object-storage')
 
@@ -62,7 +63,7 @@ export async function processMoveToObjectStorage (job: Job) {
       hlsCutover: legacyPayload.hlsCutover,
       isFollowUp: legacyPayload.isFollowUp
     }
-  } else if ('videoUUID' in rawPayload && Object.keys(rawPayload).length === 1) {
+  } else if (isMinimalMoveToObjectStoragePayload(rawPayload)) {
     // Minimal format: only videoUUID provided
     // Load video to determine state
     logger.info('[MOVE_JOB] Detected minimal move-to-object-storage job %s, inferring state from video', job.id)
