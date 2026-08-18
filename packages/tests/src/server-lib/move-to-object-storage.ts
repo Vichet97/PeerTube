@@ -9,6 +9,7 @@ import { FileStorage, VideoState } from '@peertube/peertube-models'
 import {
   buildRetainedLocalFileCleanupDelay,
   cleanupRetainedLocalFilesAfterRestart,
+  getUnreferencedLocalHLSFilenames,
   isOrphanLocalMediaOldEnough,
   maybeTransitionAfterObjectStorageMove,
   removeLocalFileAfterMove
@@ -200,6 +201,14 @@ describe('move-to-object-storage', function () {
     } finally {
       await remove(tmpDirectory)
     }
+  })
+
+  it('should identify stale HLS filenames inside a known video directory', function () {
+    expect(getUnreferencedLocalHLSFilenames([
+      'current-master.m3u8',
+      'current-480-fragmented.mp4',
+      'stale-master.m3u8'
+    ], new Set([ 'current-master.m3u8', 'current-480-fragmented.mp4' ]))).to.deep.equal([ 'stale-master.m3u8' ])
   })
 
   it('should defer restart cleanup once per video instead of creating per-file polling loops', async function () {

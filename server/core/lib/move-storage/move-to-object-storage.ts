@@ -110,6 +110,7 @@ type RetainedLocalFilesCleanupContext = {
 
 type OrphanLocalMediaCleanupResult = {
   deletedWebVideoFiles: number
+  deletedHLSFiles: number
   deletedHLSDirectories: number
 }
 
@@ -1442,10 +1443,11 @@ async function performRetainedLocalFilesCleanupAfterRestart () {
   await addRetainedStoryboardFileCandidates(counts, context)
 
   const orphanCleanup = await cleanupUnreferencedLocalMedia()
-  if (orphanCleanup.deletedWebVideoFiles !== 0 || orphanCleanup.deletedHLSDirectories !== 0) {
+  if (orphanCleanup.deletedWebVideoFiles !== 0 || orphanCleanup.deletedHLSFiles !== 0 || orphanCleanup.deletedHLSDirectories !== 0) {
     logger.info(
-      'Deleted %d orphan web-video file(s) and %d orphan HLS directory/directories after database reconciliation.',
+      'Deleted %d orphan web-video file(s), %d orphan HLS file(s), and %d orphan HLS directory/directories after database reconciliation.',
       orphanCleanup.deletedWebVideoFiles,
+      orphanCleanup.deletedHLSFiles,
       orphanCleanup.deletedHLSDirectories,
       lTagsBase()
     )
@@ -1474,10 +1476,10 @@ async function performRetainedLocalFilesCleanupAfterRestart () {
 
 async function cleanupUnreferencedLocalMedia (): Promise<OrphanLocalMediaCleanupResult> {
   if (await hasPendingLocalPipelineWork()) {
-    return { deletedWebVideoFiles: 0, deletedHLSDirectories: 0 }
+    return { deletedWebVideoFiles: 0, deletedHLSFiles: 0, deletedHLSDirectories: 0 }
   }
 
-  const [ webVideoFiles, videos ] = await Promise.all([
+  const [ webVideoFiles, videos, playlists, hlsFiles, captions ] = await Promise.all([
     VideoFileModel.unscoped().findAll({
       attributes: [ 'filename' ],
       where: {
@@ -1487,13 +1489,72 @@ async function cleanupUnreferencedLocalMedia (): Promise<OrphanLocalMediaCleanup
       raw: true
     }),
     VideoModel.unscoped().findAll({
-      attributes: [ 'uuid' ],
+      attributes: [ 'id', 'uuid' ],
+      raw: true
+    }),
+    VideoStreamingPlaylistModel.unscoped().findAll({
+      attributes: [ 'id', 'videoId', 'playlistFilename', 'segmentsSha256Filename' ],
+      raw: true
+    }),
+    VideoFileModel.unscoped().findAll({
+      attributes: [ 'filename', 'videoStreamingPlaylistId' ],
+      where: {
+        videoStreamingPlaylistId: { [Op.ne]: null },
+        filename: { [Op.ne]: null }
+      },
+      raw: true
+    }),
+    VideoCaptionModel.unscoped().findAll({
+      attributes: [ 'videoId', 'm3u8Filename' ],
+      where: {
+        m3u8Filename: { [Op.ne]: null }
+      },
       raw: true
     })
   ])
 
   const referencedWebVideoFilenames = new Set(webVideoFiles.map(file => file.filename).filter(Boolean))
   const knownVideoUUIDs = new Set(videos.map(video => video.uuid).filter(Boolean))
+  const videoUUIDById = new Map(
+    videos
+      .map(video => [ video.id, video.uuid ])
+      .filter((entry): entry is [number, string] => Boolean(entry[1]))
+  )
+  const playlistVideoIdById = new Map(playlists.map(playlist => [ playlist.id, playlist.videoId ]))
+  const referencedHLSFilenamesByVideoUUID = new Map<string, Set<string>>()
+
+  const addReferencedHLSFilename = (videoId: number, filename: string | null | undefined) => {
+    if (!filename) return
+
+    const videoUUID = videoUUIDById.get(videoId)
+    if (!videoUUID) return
+
+    let filenames = referencedHLSFilenamesByVideoUUID.get(videoUUID)
+    if (!filenames) {
+      filenames = new Set<string>()
+      referencedHLSFilenamesByVideoUUID.set(videoUUID, filenames)
+    }
+
+    filenames.add(filename)
+  }
+
+  for (const playlist of playlists) {
+    addReferencedHLSFilename(playlist.videoId, playlist.playlistFilename)
+    addReferencedHLSFilename(playlist.videoId, playlist.segmentsSha256Filename)
+  }
+
+  for (const file of hlsFiles) {
+    const videoId = playlistVideoIdById.get(file.videoStreamingPlaylistId)
+    if (videoId === undefined) continue
+
+    addReferencedHLSFilename(videoId, file.filename)
+    addReferencedHLSFilename(videoId, getHLSResolutionPlaylistFilename(file.filename))
+  }
+
+  for (const caption of captions) {
+    addReferencedHLSFilename(caption.videoId, caption.m3u8Filename)
+  }
+
   const nowMs = Date.now()
 
   const deletedWebVideoFiles = await cleanupOrphanWebVideoFiles({
@@ -1501,13 +1562,14 @@ async function cleanupUnreferencedLocalMedia (): Promise<OrphanLocalMediaCleanup
     referencedFilenames: referencedWebVideoFilenames,
     nowMs
   })
-  const deletedHLSDirectories = await cleanupOrphanHLSDirectories({
+  const deletedHLS = await cleanupOrphanHLSDirectories({
     directories: [ DIRECTORIES.HLS_STREAMING_PLAYLIST.PUBLIC, DIRECTORIES.HLS_STREAMING_PLAYLIST.PRIVATE ],
     knownVideoUUIDs,
+    referencedHLSFilenamesByVideoUUID,
     nowMs
   })
 
-  return { deletedWebVideoFiles, deletedHLSDirectories }
+  return { deletedWebVideoFiles, ...deletedHLS }
 }
 
 async function hasPendingLocalPipelineWork () {
@@ -1562,9 +1624,11 @@ async function cleanupOrphanWebVideoFiles (options: {
 async function cleanupOrphanHLSDirectories (options: {
   directories: string[]
   knownVideoUUIDs: Set<string>
+  referencedHLSFilenamesByVideoUUID: Map<string, Set<string>>
   nowMs: number
 }) {
-  let deleted = 0
+  let deletedFiles = 0
+  let deletedDirectories = 0
 
   for (const directory of options.directories) {
     let entries: Awaited<ReturnType<typeof readdir>>
@@ -1581,15 +1645,77 @@ async function cleanupOrphanHLSDirectories (options: {
       // container, not a video UUID directory, and must never be removed by
       // the orphan scrub.
       if (resolve(path) === resolve(DIRECTORIES.HLS_STREAMING_PLAYLIST.PRIVATE)) continue
-      if (!entry.isDirectory() || options.knownVideoUUIDs.has(entry.name)) continue
+      if (!entry.isDirectory()) continue
+
+      if (options.knownVideoUUIDs.has(entry.name)) {
+        deletedFiles += await cleanupUnreferencedHLSFiles({
+          directory: path,
+          videoUUID: entry.name,
+          referencedFilenames: options.referencedHLSFilenamesByVideoUUID.get(entry.name) || new Set<string>(),
+          nowMs: options.nowMs
+        })
+        continue
+      }
+
       if (!await isOrphanLocalMediaOldEnough(path, options.nowMs)) continue
 
       await remove(path)
-      deleted++
+      deletedDirectories++
     }
   }
 
-  return deleted
+  return {
+    deletedHLSFiles: deletedFiles,
+    deletedHLSDirectories: deletedDirectories
+  }
+}
+
+async function cleanupUnreferencedHLSFiles (options: {
+  directory: string
+  videoUUID: string
+  referencedFilenames: Set<string>
+  nowMs: number
+}) {
+  let entries: Awaited<ReturnType<typeof readdir>>
+  try {
+    entries = await readdir(options.directory, { withFileTypes: true })
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return 0
+    throw err
+  }
+
+  const orphanFilenames = getUnreferencedLocalHLSFilenames(
+    entries.filter(entry => entry.isFile()).map(entry => entry.name),
+    options.referencedFilenames
+  )
+  const orphanFiles = [] as string[]
+  for (const filename of orphanFilenames) {
+    const path = join(options.directory, filename)
+    if (await isOrphanLocalMediaOldEnough(path, options.nowMs)) orphanFiles.push(path)
+  }
+
+  if (orphanFiles.length === 0 || await LocalFileLeaseManager.Instance.hasActiveLeases(options.videoUUID)) return 0
+
+  const releaser = await VideoPathManager.Instance.lockFiles(options.videoUUID)
+  let cleanupLock: LocalFileCleanupLock | undefined
+
+  try {
+    cleanupLock = await LocalFileLeaseManager.Instance.acquireCleanupLock(options.videoUUID)
+    if (!cleanupLock || await LocalFileLeaseManager.Instance.hasActiveLeases(options.videoUUID)) return 0
+
+    let deleted = 0
+    for (const path of orphanFiles) {
+      if (!await pathExists(path)) continue
+
+      await removeLocalPathNow(path)
+      deleted++
+    }
+
+    return deleted
+  } finally {
+    await cleanupLock?.release()
+    releaser()
+  }
 }
 
 export async function isOrphanLocalMediaOldEnough (path: string, nowMs = Date.now()) {
@@ -2066,6 +2192,10 @@ async function removeLocalPathNow (path: string) {
   await remove(path)
   await notifyLocalStorageImportPathRemoved(path)
   await removeParentDirIfEmpty(path)
+}
+
+export function getUnreferencedLocalHLSFilenames (filenames: readonly string[], referencedFilenames: ReadonlySet<string>) {
+  return filenames.filter(filename => !referencedFilenames.has(filename))
 }
 
 export async function removeLocalFileAfterMove (options: {
